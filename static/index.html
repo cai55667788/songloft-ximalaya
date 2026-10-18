@@ -137,6 +137,20 @@
     #qPanel .qrow .qdel:hover { color: var(--err); }
     #qPanel .qfoot { display: flex; gap: 8px; padding: 8px 14px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
     #qPanel .qempty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
+    /* 收听报告 */
+    .stat { flex: 1; min-width: 96px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+    .stat .sv { font-size: 16px; font-weight: 700; color: var(--accent); line-height: 1.3; }
+    .stat .sl { font-size: 11px; color: var(--muted); }
+    .bars { display: flex; align-items: flex-end; gap: 3px; height: 64px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .bars .bar { flex: 1; height: 100%; display: flex; align-items: flex-end; }
+    .bars .bfill { width: 100%; background: var(--accent); opacity: .75; border-radius: 2px 2px 0 0; min-height: 2px; }
+    .rank { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 0; }
+    .rank .rn { flex: none; width: 16px; color: var(--muted); }
+    .rank .rt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rank .rp2 { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .rank .rbar { flex: none; width: 64px; height: 5px; background: var(--chip); border-radius: 3px; overflow: hidden; }
+    .rank .rbar span { display: block; height: 100%; background: var(--accent); }
+    .rpBtn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
     .hide { display: none !important; }
   </style>
 </head>
@@ -144,7 +158,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.10.0</span>
+    <span class="ver" id="ver">v0.11.0</span>
   </div>
 
   <div class="tabs">
@@ -246,6 +260,23 @@
       </div>
       <div id="recentList" style="margin-top:8px;"></div>
     </div>
+
+    <div class="card">
+      <h2>📊 收听报告</h2>
+      <div class="btns">
+        <button class="small plain rpBtn" data-period="week">本周</button>
+        <button class="small plain rpBtn" data-period="month">本月</button>
+        <button class="small plain rpBtn" data-period="all">累计</button>
+        <button class="small" id="btnRpSpeak" title="用音箱把报告念出来">🔊 念给我听</button>
+      </div>
+      <div id="rpBody" style="margin-top:12px;">
+        <div class="muted small-txt">点上面的「本周 / 本月 / 累计」看统计。</div>
+      </div>
+      <div class="btns" style="margin-top:10px;">
+        <button class="small ghost" id="btnRpReset">清空统计</button>
+      </div>
+      <div class="muted small-txt" style="margin-top:6px;">只统计在本插件播放器里实际播放的时长；上报到 NAS，换设备也合并。</div>
+    </div>
   </section>
 
   <!-- ===== 订阅 ===== -->
@@ -312,6 +343,30 @@
     </div>
 
     <div class="card">
+      <h2>🔎 关键词追更</h2>
+      <div class="row">
+        <div style="flex:2"><label>关注关键词</label><input type="text" id="wKw" placeholder="如：郭德纲 相声、股票复盘" /></div>
+        <div><label>每张只导最近 N 集</label><input type="number" id="wMaxNew" min="1" value="10" /></div>
+        <div style="flex:none"><button class="small" id="btnWAdd">添加</button></div>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <div><label>每天几点跑（跟自动同步一起）</label><input type="time" id="wTime" value="08:30" /></div>
+        <div><label>开关</label>
+          <select id="wEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
+        </div>
+        <div><label>有新内容时</label>
+          <select id="wPush"><option value="0">只加入歌单</option><option value="1">同时用音箱报告</option></select>
+        </div>
+      </div>
+      <div class="btns">
+        <button class="small" id="btnWSave">保存设置</button>
+        <button class="small plain" id="btnWRun">立即跑一次</button>
+      </div>
+      <div id="wList" style="margin-top:10px;"></div>
+      <div class="muted small-txt" style="margin-top:6px;" id="wInfo">不用逐张订阅：定时搜这个关键词，把新出现的专辑自动建成歌单（只取最近 N 集）。</div>
+    </div>
+
+    <div class="card">
       <h2>📌 我的订阅</h2>
       <div id="subsList"><span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span></div>
     </div>
@@ -341,6 +396,24 @@
         <button class="small plain" id="btnDlStop">停止下载</button>
       </div>
       <div class="muted small-txt" style="margin-top:6px;">下载后这些歌会变成本地文件，断网也能听；默认按「主播/专辑/集名」自动分目录。</div>
+    </div>
+
+    <div class="card">
+      <h2>🗣️ 一句话让音箱播</h2>
+      <div class="row">
+        <div style="flex:3"><label>说一句（回车执行）</label>
+          <input type="text" id="vCmd" placeholder="播郭德纲第 5 集 / 继续听德云社 / 有什么更新" /></div>
+        <div style="flex:none"><button class="small" id="btnVCmd">执行</button></div>
+      </div>
+      <div class="btns" style="margin-top:8px;">
+        <button class="small plain vchip" data-cmd="播郭德纲第 5 集">播郭德纲第 5 集</button>
+        <button class="small plain vchip" data-cmd="最新一集">最新一集</button>
+        <button class="small plain vchip" data-cmd="暂停">暂停</button>
+        <button class="small plain vchip" data-cmd="下一集">下一集</button>
+        <button class="small plain vchip" data-cmd="声音大一点">声音大一点</button>
+        <button class="small plain vchip" data-cmd="有什么更新">有什么更新</button>
+      </div>
+      <div class="muted small-txt" id="vInfo" style="margin-top:8px;">支持：播《专辑名》第N集 / 最新一集 / 继续听专辑 / 暂停 / 继续 / 停止 / 下一集 / 上一集 / 声音大（小）一点 / 有什么更新。<br />播放类指令要求该专辑已导入成歌单。</div>
     </div>
   </section>
 
@@ -469,6 +542,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.10.0"></script>
+<script src="static/app.js?v=0.11.0"></script>
 </body>
 </html>
