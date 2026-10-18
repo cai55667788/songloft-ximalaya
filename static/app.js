@@ -1,4 +1,4 @@
-/* 喜马拉雅插件 v0.7.0 — 设置页脚本
+/* 喜马拉雅插件 v0.8.0 — 设置页脚本
  * 优先用宿主注入的 SongloftPlugin（apiGet/apiPost/apiDelete 自动鉴权），独立打开回退 ?token=。 */
 (function () {
   'use strict';
@@ -94,13 +94,14 @@
     btn.addEventListener('click', function () {
       document.querySelectorAll('.tab').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
-      ['search', 'subs', 'lib', 'set'].forEach(function (t) {
+      ['search', 'recent', 'subs', 'lib', 'set'].forEach(function (t) {
         $('tab-' + t).classList.toggle('hide', t !== btn.dataset.tab);
       });
       if (btn.dataset.tab === 'subs') {
         loadSubs();
         if (!meLoaded) loadMySubs(false);
       }
+      if (btn.dataset.tab === 'recent') renderRecent();
       if (btn.dataset.tab === 'lib') loadImported();
     });
   });
@@ -353,8 +354,127 @@
       sSet(lastKey(c.albumId), JSON.stringify({
         trackId: trackId, index: c.index, title: c.title, t: o.t, d: o.d, at: o.at
       }));
+      pushRecent({
+        albumId: c.albumId,
+        albumName: c.albumName || '',
+        cover: c.cover || '',
+        trackId: trackId,
+        index: c.index,
+        title: c.title,
+        t: o.t, d: o.d, at: o.at,
+        finished: !!(o.t >= o.d - 15)
+      });
     }
   }
+
+  // ---------- 最近收听（跨专辑聚合，存在本机） ----------
+  var RECENT_KEY = 'xm_recent';
+  var RECENT_MAX = 40;
+
+  function readRecent() {
+    try {
+      var a = JSON.parse(sGet(RECENT_KEY) || '[]');
+      return Array.isArray(a) ? a : [];
+    } catch (e) { return []; }
+  }
+
+  function writeRecent(list) {
+    sSet(RECENT_KEY, JSON.stringify((list || []).slice(0, RECENT_MAX)));
+  }
+
+  function pushRecent(e) {
+    if (!e || !e.albumId) return;
+    var list = readRecent().filter(function (x) { return String(x.albumId) !== String(e.albumId); });
+    list.unshift(e);
+    writeRecent(list);
+  }
+
+  function agoText(at) {
+    if (!at) return '';
+    var d = Date.now() - at;
+    if (d < 60000) return '刚刚';
+    if (d < 3600000) return Math.floor(d / 60000) + ' 分钟前';
+    if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
+    return Math.floor(d / 86400000) + ' 天前';
+  }
+
+  function renderRecent() {
+    var el = $('recentList');
+    if (!el) return;
+    var list = readRecent();
+    el.innerHTML = '';
+    if (!list.length) {
+      $('recentStat').textContent = '还没有收听记录。搜一张专辑点开，随便听一集就会出现在这里。';
+      return;
+    }
+    var unfinished = list.filter(function (r) { return !r.finished; }).length;
+    $('recentStat').textContent = '共 ' + list.length + ' 张专辑有收听记录' +
+      (unfinished ? '，其中 ' + unfinished + ' 张没听完' : '，全部听完了');
+
+    list.forEach(function (r) {
+      var line = document.createElement('div');
+      line.className = 'line';
+      var img = document.createElement('img');
+      img.src = r.cover || '';
+      img.alt = '';
+      var body = document.createElement('div');
+      body.className = 'body';
+      var n = document.createElement('div');
+      n.className = 'n';
+      n.textContent = r.albumName || ('专辑 ' + r.albumId);
+      n.style.cursor = 'pointer';
+      n.addEventListener('click', function () { openAlbumFromRecent(r.albumId); });
+      var s = document.createElement('div');
+      s.className = 's';
+      var bits = ['第 ' + (r.index || '?') + ' 集'];
+      if (r.finished) bits.push('✓ 已听完');
+      else bits.push('听到 ' + fmtTime(r.t || 0) + (r.d ? ' / ' + fmtTime(r.d) : ''));
+      if (r.at) bits.push(agoText(r.at));
+      s.textContent = bits.join(' · ');
+      body.appendChild(n); body.appendChild(s);
+
+      var ops = document.createElement('div');
+      ops.className = 'ops';
+      var bOpen = document.createElement('button');
+      bOpen.className = 'small plain';
+      bOpen.textContent = '专辑';
+      bOpen.addEventListener('click', function () { openAlbumFromRecent(r.albumId); });
+      var bPlay = document.createElement('button');
+      bPlay.className = 'small';
+      bPlay.textContent = '▶ 继续听';
+      bPlay.addEventListener('click', function () { resumeRecent(r); });
+      var bDel = document.createElement('button');
+      bDel.className = 'small plain';
+      bDel.textContent = '✕';
+      bDel.title = '从最近收听里移除';
+      bDel.addEventListener('click', function () {
+        writeRecent(readRecent().filter(function (x) { return String(x.albumId) !== String(r.albumId); }));
+        renderRecent();
+      });
+      ops.appendChild(bPlay); ops.appendChild(bOpen); ops.appendChild(bDel);
+      line.appendChild(img); line.appendChild(body); line.appendChild(ops);
+      el.appendChild(line);
+    });
+  }
+
+  function openAlbumFromRecent(albumId) {
+    document.querySelector('.tab[data-tab="search"]').click();
+    $('searchCard').classList.add('hide');
+    openDetail(albumId);
+  }
+
+  function resumeRecent(r) {
+    if (r.finished) sSet(posKey(r.trackId), '');
+    playQueue([{ trackId: r.trackId, index: r.index, title: r.title }], 0,
+      { id: r.albumId, name: r.albumName, cover: r.cover });
+  }
+
+  $('btnRecentRefresh').addEventListener('click', renderRecent);
+  $('btnRecentClear').addEventListener('click', function () {
+    if (!confirm('清空最近收听记录？（各集的播放进度不受影响）')) return;
+    writeRecent([]);
+    renderRecent();
+  });
 
   function updateProg() {
     var a = $('audio');
@@ -369,6 +489,12 @@
     curPlayingId = '';
     var t = queue[idx];
     var label = (t.index ? t.index + '. ' : '') + t.title;
+    var alb = [];
+    if (t.albumName) alb.push(t.albumName);
+    if (queue.length > 1) alb.push('第 ' + (idx + 1) + ' / ' + queue.length + ' 集');
+    else if (t.index) alb.push('第 ' + t.index + ' 集');
+    $('pAlbum').textContent = alb.join(' · ');
+    $('pAlbum').dataset.albumId = t.albumId || '';
     $('player').classList.add('show');
     if (document.body) document.body.classList.add('has-player');
     $('pTitle').textContent = '载入中… ' + label;
@@ -389,7 +515,9 @@
     queue = (list || []).map(function (t) {
       return {
         trackId: t.trackId, index: t.index, title: t.title,
-        albumId: (album && album.id) || '', albumName: (album && album.name) || ''
+        albumId: (album && album.id) || t.albumId || '',
+        albumName: (album && album.name) || t.albumName || '',
+        cover: (album && album.cover) || t.cover || ''
       };
     });
     playAt(idx);
@@ -415,11 +543,74 @@
     savePos(queue[qi].trackId, this.currentTime, this.duration);
   });
 
-  $('audio').addEventListener('ended', function () {
+  // 播到队列末尾时，先把当前页后面的集补齐，再翻下一页，长书可以一直听下去
+  async function extendQueue() {
+    var c = queue[qi];
+    if (!c || !c.albumId) return false;
+    if (String(cur.id) !== String(c.albumId)) return false;
+
+    var seen = {};
+    queue.forEach(function (x) { seen[String(x.trackId)] = 1; });
+    var lastIdx = Number(c.index) || 0;
+    var page = cur.page || 1;
+
+    try {
+      // ① 当前页里排在后面的集还没进队列（例如从「最近收听」只带了一集过来）
+      var r0 = await api('GET', '/album/' + cur.id + '/tracks?page=' + page);
+      if (r0 && r0.success !== false) {
+        var list = (r0.data && r0.data.tracks) || [];
+        var added = 0;
+        list.forEach(function (t) {
+          if (seen[String(t.trackId)]) return;
+          if (Number(t.index) <= lastIdx) return;
+          queue.push({
+            trackId: t.trackId, index: t.index, title: t.title,
+            albumId: c.albumId, albumName: c.albumName, cover: c.cover
+          });
+          added += 1;
+        });
+        if (added) { msg('已接上本页后面 ' + added + ' 集'); return true; }
+      }
+
+      // ② 当前页听完了，翻下一页
+      if (!cur.hasMore) return false;
+      var p = page + 1;
+      var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
+      if (!r || r.success === false) return false;
+      var more = (r.data && r.data.tracks) || [];
+      if (!more.length) return false;
+      cur.page = p;
+      cur.hasMore = !!r.data.hasMore;
+      more.forEach(function (t) {
+        queue.push({
+          trackId: t.trackId, index: t.index, title: t.title,
+          albumId: c.albumId, albumName: c.albumName, cover: c.cover
+        });
+      });
+      if (!$('detailCard').classList.contains('hide')) {
+        renderTracks(more);
+        $('dPage').textContent = '第 ' + p + ' 页';
+        $('dPrev').disabled = p <= 1;
+        $('dNext').disabled = !cur.hasMore;
+      }
+      msg('已自动接入第 ' + p + ' 页');
+      return true;
+    } catch (e) { return false; }
+  }
+
+  $('audio').addEventListener('ended', async function () {
     var a = this;
     if (qi >= 0) savePos(queue[qi].trackId, a.duration, a.duration);
-    if (qi >= 0 && qi + 1 < queue.length) playAt(qi + 1);
-    else msg('已播完本页 ' + queue.length + ' 集');
+    if (sleepMode === 'end') {
+      sleepMode = 'off';
+      $('pSleep').value = '0';
+      $('pSleepTip').textContent = '已按「本集播完」停止';
+      a.pause();
+      return;
+    }
+    if (qi >= 0 && qi + 1 < queue.length) { playAt(qi + 1); return; }
+    if (await extendQueue()) { playAt(qi + 1); return; }
+    msg('已播完' + (queue[qi] && queue[qi].albumName ? '《' + queue[qi].albumName + '》' : '本页') + '共 ' + queue.length + ' 集');
   });
 
   $('pPrev').addEventListener('click', function () { if (qi > 0) playAt(qi - 1); });
@@ -437,10 +628,18 @@
   });
 
   // 睡眠定时
-  var sleepTimer = null, sleepAt = 0;
+  var sleepTimer = null, sleepAt = 0, sleepMode = 'off';
   $('pSleep').addEventListener('change', function () {
-    var min = Number(this.value) || 0;
+    var v = this.value;
     if (sleepTimer) { clearInterval(sleepTimer); sleepTimer = null; }
+    if (v === 'end') {
+      sleepMode = 'end';
+      sleepAt = 0;
+      $('pSleepTip').textContent = '本集播完停止';
+      return;
+    }
+    sleepMode = 'off';
+    var min = Number(v) || 0;
     sleepAt = min ? Date.now() + min * 60000 : 0;
     if (!min) { $('pSleepTip').textContent = ''; return; }
     $('pSleepTip').textContent = '剩 ' + min + ':00';
@@ -457,6 +656,12 @@
       var m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
       $('pSleepTip').textContent = '剩 ' + m + ':' + (s < 10 ? '0' : '') + s;
     }, 1000);
+  });
+
+  // 点播放条上的专辑名，跳回该专辑详情页
+  $('pAlbum').addEventListener('click', function () {
+    var aid = this.dataset.albumId;
+    if (aid) openAlbumFromRecent(aid);
   });
 
   $('pClose').addEventListener('click', function () {
@@ -699,14 +904,35 @@
 
   var curTracks = [];
   var curLast = null;
+  var filterUnheard = false;
 
   function renderTracks(tracks) {
     var el = $('dTracks');
     el.innerHTML = '';
     curTracks = tracks || [];
     if (!tracks.length) { el.innerHTML = '<span class="muted">没有曲目</span>'; return; }
-    var album = { id: cur.id, name: (cur.detail && cur.detail.name) || '' };
+    var album = {
+      id: cur.id,
+      name: (cur.detail && cur.detail.name) || '',
+      cover: (cur.detail && cur.detail.cover) || ''
+    };
+
+    var doneN = 0, partN = 0;
+    tracks.forEach(function (t) {
+      var s = trackStat(t.trackId);
+      if (s === 'done') doneN += 1;
+      else if (s === 'part') partN += 1;
+    });
+    if ($('dProgStat')) {
+      $('dProgStat').textContent = '本页 ' + tracks.length + ' 集 · 已听完 ' + doneN +
+        (partN ? ' · 听了一半 ' + partN : '') + ' · 未听 ' + (tracks.length - doneN - partN);
+    }
+
+    var shown = 0;
     tracks.forEach(function (t, i) {
+      var state = trackStat(t.trackId);
+      if (filterUnheard && state === 'done') return;
+      shown += 1;
       var d = document.createElement('div');
       d.className = 'trk';
       var no = document.createElement('span');
@@ -739,6 +965,17 @@
       d.addEventListener('click', function () { playQueue(curTracks, i, album); });
       el.appendChild(d);
     });
+    if (!shown) {
+      el.innerHTML = '<span class="muted">本页都听完了。取消勾选「只看未听」可以看到全部。</span>';
+    }
+  }
+
+  // 单集收听状态：none 未听 / part 听了没听完 / done 已听完
+  function trackStat(trackId) {
+    var pos = getPos(trackId);
+    if (!pos || !pos.t) return 'none';
+    if (pos.d && pos.t >= pos.d - 20) return 'done';
+    return 'part';
   }
 
   function renderResume() {
@@ -824,6 +1061,10 @@
 
   $('dPrev').addEventListener('click', function () { gotoPage(cur.page - 1); });
   $('dNext').addEventListener('click', function () { gotoPage(cur.page + 1); });
+  $('ckUnheard').addEventListener('change', function () {
+    filterUnheard = !!this.checked;
+    renderTracks(curTracks);
+  });
   $('btnPlayPage').addEventListener('click', function () {
     if (!curTracks.length) { msg('本页没有曲目', 'err'); return; }
     playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '' });
