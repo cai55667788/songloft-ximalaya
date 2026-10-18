@@ -100,8 +100,9 @@
       if (btn.dataset.tab === 'subs') {
         loadSubs();
         if (!meLoaded) loadMySubs(false);
+        loadWatch();
       }
-      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); }
+      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
     });
@@ -379,7 +380,8 @@
       queueProg({
         trackId: trackId, albumId: c.albumId, albumName: c.albumName || '',
         title: c.title, index: c.index, cover: c.cover || '',
-        t: o.t, d: o.d, at: o.at, finished: !!(o.t >= o.d - 15)
+        t: o.t, d: o.d, at: o.at, finished: !!(o.t >= o.d - 15),
+        listened: takeListened()
       });
     }
   }
@@ -388,6 +390,34 @@
   var progSyncEnabled = sGet('xm_prog_sync') !== '0';
   var progQueue = [], progTimer = null;
 
+  // 实际收听时长：播放中每走 1 秒计 1 秒，切集/暂停时结算到待上报的 listened 字段
+  var listenedAcc = 0;
+  var lastTickAt = 0;
+  var LISTEN_KEY = 'xm_listened_pending';
+
+  function takeListened() {
+    var n = Math.round(listenedAcc);
+    listenedAcc = 0;
+    sSet(LISTEN_KEY, '0');
+    return n > 0 ? n : 0;
+  }
+
+  $('audio').addEventListener('playing', function () { lastTickAt = Date.now(); });
+  $('audio').addEventListener('timeupdate', function () {
+    if (this.paused) return;
+    var now = Date.now();
+    if (lastTickAt && now - lastTickAt > 0 && now - lastTickAt < 3000) {
+      listenedAcc += (now - lastTickAt) / 1000;
+    }
+    lastTickAt = now;
+    // 每积累 60 秒落一次本地，防止页面被关掉丢太多
+    if (listenedAcc >= 60) {
+      sSet(LISTEN_KEY, String(Math.round(listenedAcc)));
+    }
+  });
+  $('audio').addEventListener('pause', function () { lastTickAt = 0; });
+  $('audio').addEventListener('ended', function () { lastTickAt = 0; });
+
   function queueProg(item) {
     if (!progSyncEnabled || !item || !item.trackId) return;
     progQueue = progQueue.filter(function (x) { return String(x.trackId) !== String(item.trackId); });
@@ -395,6 +425,19 @@
     if (progQueue.length > 40) progQueue = progQueue.slice(-40);
     if (progTimer) return;
     progTimer = setTimeout(function () { flushProg(); }, 8000);
+  }
+
+  // 收尾时把没上报的收听时长补进队列（防止暂停后丢掉最后一段）
+  function flushListened() {
+    var n = takeListened();
+    if (n < 5 || qi < 0 || !queue[qi]) return;
+    var c = queue[qi];
+    var pos = getPos(c.trackId) || { t: Math.round($('audio').currentTime || 0), d: Math.round($('audio').duration || 0) };
+    queueProg({
+      trackId: c.trackId, albumId: c.albumId, albumName: c.albumName || '',
+      title: c.title, index: c.index, cover: c.cover || '',
+      t: pos.t || 0, d: pos.d || 0, at: Date.now(), finished: false, listened: n
+    });
   }
 
   async function flushProg() {
@@ -711,10 +754,10 @@
   // 暂停 / 播放器关闭时立刻把攒着的进度推给 NAS，不等防抖
   $('audio').addEventListener('pause', function () {
     if (qi >= 0) savePos(queue[qi].trackId, this.currentTime, this.duration);
+    flushListened();
     flushProg();
     if (qPanelOpen()) renderQueue();
-  });
-  $('audio').addEventListener('play', function () {
+  });  $('audio').addEventListener('play', function () {
     if (qPanelOpen()) renderQueue();
   });
 
@@ -1965,6 +2008,189 @@
     } catch (e) { msg('检查失败: ' + e.message, 'err'); }
   });
 
+  // ---------- 收听报告 ----------
+  var rpPeriod = 'week';
+
+  function fmtHM(sec) {
+    var n = Math.round(Number(sec) || 0);
+    var h = Math.floor(n / 3600), m = Math.round((n % 3600) / 60);
+    if (h > 0) return h + ' 小时' + (m ? ' ' + m + ' 分' : '');
+    if (m > 0) return m + ' 分钟';
+    return n + ' 秒';
+  }
+
+  async function loadReport(period) {
+    rpPeriod = period || rpPeriod;
+    var el = $('rpBody');
+    if (!el) return;
+    document.querySelectorAll('.rpBtn').forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-period') === rpPeriod);
+    });
+    el.innerHTML = '<span class="muted">统计中…</span>';
+    try {
+      var r = await api('GET', '/report?period=' + rpPeriod);
+      if (r.success === false) { el.innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
+      var d = r.data || {};
+      var html = '';
+      html += '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;">';
+      html += '<div class="stat"><div class="sv">' + esc(fmtHM(d.sec)) + '</div><div class="sl">' + esc(d.label) + '收听</div></div>';
+      html += '<div class="stat"><div class="sv">' + (d.days || 0) + '</div><div class="sl">收听天数</div></div>';
+      html += '<div class="stat"><div class="sv">' + (d.finished || 0) + '</div><div class="sl">听完集数</div></div>';
+      html += '<div class="stat"><div class="sv">' + esc(fmtHM(d.avgSec)) + '</div><div class="sl">日均</div></div>';
+      html += '</div>';
+      html += '<div class="muted small-txt" style="margin-bottom:10px;">' + esc(d.text) + '</div>';
+
+      // 每日柱状
+      var daily = d.daily || [];
+      if (daily.length) {
+        var max = 1;
+        daily.forEach(function (x) { if (x.sec > max) max = x.sec; });
+        html += '<div class="bars">';
+        daily.slice(-30).forEach(function (x) {
+          var h = Math.max(2, Math.round(x.sec * 100 / max));
+          html += '<div class="bar" title="' + esc(x.day + ' · ' + fmtHM(x.sec)) + '">' +
+            '<div class="bfill" style="height:' + h + '%"></div></div>';
+        });
+        html += '</div>';
+        html += '<div class="muted small-txt" style="margin-top:4px;">最近 ' + Math.min(30, daily.length) + ' 天（柱高 = 当天时长）</div>';
+      }
+
+      // 专辑排行
+      var top = d.top || [];
+      if (top.length) {
+        html += '<div style="margin-top:12px;"><b style="font-size:13px;">听得最多</b></div>';
+        top.forEach(function (a, i) {
+          var pct = d.sec ? Math.round(a.sec * 100 / d.sec) : 0;
+          html += '<div class="rank">' +
+            '<span class="rn">' + (i + 1) + '</span>' +
+            '<span class="rt">' + esc(a.name) + '</span>' +
+            '<span class="rp2">' + esc(fmtHM(a.sec)) + '</span>' +
+            '<span class="rbar"><span style="width:' + pct + '%"></span></span>' +
+            '</div>';
+        });
+      }
+      el.innerHTML = html;
+    } catch (e) { el.innerHTML = '<span class="err">加载失败: ' + esc(e.message) + '</span>'; }
+  }
+
+  if ($('rpBody')) {
+    document.querySelectorAll('.rpBtn').forEach(function (b) {
+      b.addEventListener('click', function () { loadReport(b.getAttribute('data-period')); });
+    });
+    $('btnRpSpeak').addEventListener('click', async function () {
+      $('rpBody').innerHTML = '<span class="muted">正在让音箱念…</span>';
+      try {
+        var r = await api('POST', '/report/speak', { period: rpPeriod });
+        var d = r.data || {};
+        msg(r.success === false ? '❌ ' + (r.error || '播报失败') : '🔊 已念给 ' + (d.device || '音箱'), r.success === false ? 'err' : 'ok');
+      } catch (e) { msg('播报失败: ' + e.message, 'err'); }
+      loadReport(rpPeriod);
+    });
+    $('btnRpReset').addEventListener('click', async function () {
+      if (!confirm('清空所有收听统计？（不影响播放进度）')) return;
+      await api('POST', '/report/reset', {});
+      msg('统计已清空');
+      loadReport(rpPeriod);
+    });
+  }
+
+  // ---------- 关键词追更 ----------
+  async function loadWatch() {
+    var list = $('wList');
+    if (!list) return;
+    try {
+      var r = await api('GET', '/watch');
+      var d = r.data || {};
+      var cfg = d.cfg || {};
+      var items = d.items || [];
+      var job = d.job || {};
+      if ($('wEnabled')) $('wEnabled').value = cfg.enabled ? '1' : '0';
+      if ($('wPush')) $('wPush').value = cfg.pushDevice ? '1' : '0';
+      if ($('wTime') && cfg.time) $('wTime').value = cfg.time;
+      if ($('wMaxNew') && cfg.maxNew) $('wMaxNew').value = cfg.maxNew;
+
+      list.innerHTML = '';
+      if (!items.length) {
+        list.innerHTML = '<span class="muted small-txt">还没有关键词。加一个，比如「郭德纲」。</span>';
+      }
+      items.forEach(function (it) {
+        var line = document.createElement('div');
+        line.className = 'line';
+        var body = document.createElement('div');
+        body.className = 'body';
+        var n = document.createElement('div');
+        n.className = 'n';
+        n.textContent = it.kw;
+        var s2 = document.createElement('div');
+        s2.className = 's';
+        var bits = ['每次导最近 ' + (it.maxNew || 10) + ' 集'];
+        if (it.lastRunAt) bits.push('上次 ' + it.lastRunAt);
+        if (it.lastAdded) bits.push('新增 ' + it.lastAdded + ' 集');
+        if (it.lastError) bits.push('⚠️ ' + it.lastError);
+        s2.textContent = bits.join(' · ');
+        body.appendChild(n); body.appendChild(s2);
+
+        var ops = document.createElement('div');
+        ops.className = 'ops';
+        var bDel = document.createElement('button');
+        bDel.className = 'small plain';
+        bDel.textContent = '删除';
+        bDel.addEventListener('click', async function () {
+          if (!confirm('删除关键词「' + it.kw + '」？（已建好的歌单保留）')) return;
+          await api('POST', '/watch', { remove: it.id });
+          loadWatch();
+        });
+        ops.appendChild(bDel);
+        line.appendChild(body); line.appendChild(ops);
+        list.appendChild(line);
+      });
+
+      var info = [];
+      if (job.running) info.push('⏳ ' + (job.msg || '追更中'));
+      else if (job.msg) info.push('上次：' + job.msg + (job.at ? '（' + job.at + '）' : ''));
+      if (cfg.lastRunDate) info.push('今天已跑过');
+      if ($('wInfo')) {
+        $('wInfo').innerHTML = (info.length ? info.map(esc).join(' · ') + '<br />' : '') +
+          '不用逐张订阅：定时搜这个关键词，把新出现的专辑自动建成歌单（只取最近 N 集）。';
+      }
+    } catch (e) {
+      list.innerHTML = '<span class="err">加载失败: ' + esc(e.message) + '</span>';
+    }
+  }
+
+  if ($('btnWAdd')) {
+    $('btnWAdd').addEventListener('click', async function () {
+      var kw = $('wKw').value.trim();
+      if (!kw) { msg('先填一个关键词', 'err'); return; }
+      await api('POST', '/watch', { add: { kw: kw, maxNew: Number($('wMaxNew').value) || 10 } });
+      $('wKw').value = '';
+      msg('已添加关键词「' + kw + '」', 'ok');
+      loadWatch();
+    });
+    $('wKw').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('btnWAdd').click(); });
+
+    $('btnWSave').addEventListener('click', async function () {
+      await api('POST', '/watch', {
+        cfg: {
+          enabled: $('wEnabled').value === '1',
+          pushDevice: $('wPush').value === '1',
+          time: $('wTime').value || '08:30',
+          maxNew: Number($('wMaxNew').value) || 10
+        }
+      });
+      msg('✅ 追更设置已保存', 'ok');
+      loadWatch();
+    });
+
+    $('btnWRun').addEventListener('click', async function () {
+      var r = await api('POST', '/watch/run', {});
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ 追更已开始，稍等几十秒刷新看结果');
+      setTimeout(loadWatch, 4000);
+      setTimeout(loadWatch, 15000);
+    });
+  }
+
   // ---------- 已导入 ----------
   async function loadImported() {
     var el = $('importedList');
@@ -2165,6 +2391,39 @@
       msg(r.success === false ? '❌ ' + r.error : (r.data.message || '已请求停止'), r.success === false ? 'err' : 'ok');
     } catch (e) { msg('操作失败: ' + e.message, 'err'); }
   });
+
+  // ---------- 语音 / 文字指令 ----------
+  async function runVCmd(text) {
+    var cmd = String(text || '').trim();
+    if (!cmd) return;
+    $('vCmd').value = cmd;
+    $('vInfo').innerHTML = '⏳ 正在处理…';
+    try {
+      var r = await api('POST', '/voice', { text: cmd });
+      var d = r.data || {};
+      if (r.success === false) {
+        $('vInfo').innerHTML = '<span class="err">❌ ' + esc(r.error || '执行失败') + '</span>' +
+          (d.albumName ? '<br /><span class="muted small-txt">《' + esc(d.albumName) + '》</span>' : '');
+        return;
+      }
+      var line = [];
+      if (d.text) line.push((d.played ? '✅ ' : 'ℹ️ ') + esc(d.text));
+      if (d.target && d.target !== d.text) line.push('<span class="muted small-txt">' + esc(d.target) + '</span>');
+      $('vInfo').innerHTML = line.join('<br />');
+    } catch (e) {
+      $('vInfo').innerHTML = '<span class="err">❌ ' + esc(e.message) + '</span>';
+    }
+  }
+
+  if ($('btnVCmd')) {
+    $('btnVCmd').addEventListener('click', function () { runVCmd($('vCmd').value); });
+    $('vCmd').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') runVCmd(this.value);
+    });
+    document.querySelectorAll('.vchip').forEach(function (b) {
+      b.addEventListener('click', function () { runVCmd(b.getAttribute('data-cmd')); });
+    });
+  }
 
   async function loadTts() {
     try {
