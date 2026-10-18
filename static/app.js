@@ -571,6 +571,80 @@
     $('pProg').textContent = fmtTime(t) + ' / ' + fmtTime(d) + ' · 剩 ' + fmtTime(d - t);
   }
 
+  // 正序 / 倒序：倒序时按集数从大到小听（新书先听最新一集）
+  var ORDER_KEY = 'xm_order';
+  var playOrder = sGet(ORDER_KEY) === 'desc' ? 'desc' : 'asc';
+
+  function orderIcon() { return playOrder === 'desc' ? '↓ 倒序' : '↑ 正序'; }
+
+  function sortByOrder(list) {
+    var arr = (list || []).slice();
+    if (playOrder === 'desc') {
+      arr.sort(function (a, b) { return (Number(b.index) || 0) - (Number(a.index) || 0); });
+    } else {
+      arr.sort(function (a, b) { return (Number(a.index) || 0) - (Number(b.index) || 0); });
+    }
+    return arr;
+  }
+
+  function syncOrderBtn() {
+    var txt = orderIcon();
+    var t1 = playOrder === 'desc' ? '按集数升序（旧→新）排列' : '按集数降序（新→旧）排列';
+    ['btnOrder', 'pOrder'].forEach(function (id) {
+      var b = $(id);
+      if (!b) return;
+      b.textContent = txt;
+      b.title = t1;
+    });
+  }
+
+  function setOrder(v, silent) {
+    playOrder = v === 'desc' ? 'desc' : 'asc';
+    sSet(ORDER_KEY, playOrder);
+    syncOrderBtn();
+    // 队列同步重排，正在播的那集保持不动
+    if (queue.length > 1) {
+      var curId = qi >= 0 && queue[qi] ? String(queue[qi].trackId) : '';
+      queue = sortByOrder(queue);
+      if (curId) {
+        var ni = indexOfTrack(queue, curId);
+        if (ni >= 0) qi = ni;
+      }
+      updateProg();
+    }
+    if (curTracks.length) renderTracks(sortByOrder(curTracks));
+    syncOrderBtn();
+    if (!silent) {
+      // 切倒序：列表翻到最后一页，跟「从最新一集起播」对齐；切正序：回第一页
+      if (cur.id && !$('detailCard').classList.contains('hide')) {
+        jumpToOrderPage(playOrder === 'desc');
+      } else {
+        renderResume();
+        msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
+      }
+      return;
+    }
+    renderResume();
+  }
+
+  // 倒序 → 最后一页；正序 → 第一页。取不到目录就停在当前页。
+  async function jumpToOrderPage(toLast) {
+    try {
+      var o = await api('GET', '/album/' + cur.id + '/outline');
+      var p = toLast ? (o && o.data && o.data.lastPage) : 1;
+      if (p && p !== cur.page) {
+        await gotoPage(p);
+        msg('倒序：已跳到第 ' + p + ' 页（最新集在前）');
+      } else {
+        msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
+      }
+    } catch (e) {
+      msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
+    }
+    syncOrderBtn();
+    renderResume();
+  }
+
   async function playAt(idx) {
     if (idx < 0 || idx >= queue.length) return;
     qi = idx;
@@ -581,6 +655,7 @@
     if (t.albumName) alb.push(t.albumName);
     if (queue.length > 1) alb.push('第 ' + (idx + 1) + ' / ' + queue.length + ' 集');
     else if (t.index) alb.push('第 ' + t.index + ' 集');
+    if (playOrder === 'desc') alb.push('倒序');
     $('pAlbum').textContent = alb.join(' · ');
     $('pAlbum').dataset.albumId = t.albumId || '';
     $('player').classList.add('show');
@@ -600,14 +675,15 @@
   }
 
   function playQueue(list, idx, album) {
-    queue = (list || []).map(function (t) {
+    queue = sortByOrder((list || []).map(function (t) {
       return {
         trackId: t.trackId, index: t.index, title: t.title,
         albumId: (album && album.id) || t.albumId || '',
         albumName: (album && album.name) || t.albumName || '',
         cover: (album && album.cover) || t.cover || ''
       };
-    });
+    }));
+    if (idx < 0) idx = 0;
     playAt(idx);
   }
 
@@ -646,6 +722,7 @@
     queue.forEach(function (x) { seen[String(x.trackId)] = 1; });
     var lastIdx = Number(c.index) || 0;
     var page = cur.page || 1;
+    var desc = playOrder === 'desc';
 
     try {
       // ① 当前页里排在后面的集还没进队列（例如从「最近收听」只带了一集过来）
@@ -655,19 +732,24 @@
         var added = 0;
         list.forEach(function (t) {
           if (seen[String(t.trackId)]) return;
-          if (Number(t.index) <= lastIdx) return;
+          var n = Number(t.index) || 0;
+          if (desc ? n >= lastIdx : n <= lastIdx) return;
           queue.push({
             trackId: t.trackId, index: t.index, title: t.title,
             albumId: c.albumId, albumName: c.albumName, cover: c.cover
           });
           added += 1;
         });
-        if (added) { msg('已接上本页后面 ' + added + ' 集'); return true; }
+        if (added) {
+          if (desc) queue = sortByOrder(queue), qi = indexOfTrack(queue, c.trackId);
+          msg('已接上本页' + (desc ? '前面 ' : '后面 ') + added + ' 集');
+          return true;
+        }
       }
 
-      // ② 当前页听完了，翻下一页
-      if (!cur.hasMore) return false;
-      var p = page + 1;
+      // ② 当前页听完了，翻下一页（倒序时翻上一页）
+      if (desc ? page <= 1 : !cur.hasMore) return false;
+      var p = desc ? page - 1 : page + 1;
       var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
       if (!r || r.success === false) return false;
       var more = (r.data && r.data.tracks) || [];
@@ -680,6 +762,7 @@
           albumId: c.albumId, albumName: c.albumName, cover: c.cover
         });
       });
+      if (desc) { queue = sortByOrder(queue); qi = indexOfTrack(queue, c.trackId); }
       if (!$('detailCard').classList.contains('hide')) {
         renderTracks(more);
         $('dPage').textContent = '第 ' + p + ' 页';
@@ -689,6 +772,13 @@
       msg('已自动接入第 ' + p + ' 页');
       return true;
     } catch (e) { return false; }
+  }
+
+  function indexOfTrack(list, trackId) {
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].trackId) === String(trackId)) return i;
+    }
+    return -1;
   }
 
   $('audio').addEventListener('ended', async function () {
@@ -703,11 +793,21 @@
     }
     if (qi >= 0 && qi + 1 < queue.length) { playAt(qi + 1); return; }
     if (await extendQueue()) { playAt(qi + 1); return; }
-    msg('已播完' + (queue[qi] && queue[qi].albumName ? '《' + queue[qi].albumName + '》' : '本页') + '共 ' + queue.length + ' 集');
+    msg('已播完' + (queue[qi] && queue[qi].albumName ? '《' + queue[qi].albumName + '》' : '本页') + '共 ' + queue.length + ' 集' +
+      (playOrder === 'desc' ? '（倒序已到头，可切回正序）' : ''));
   });
 
-  $('pPrev').addEventListener('click', function () { if (qi > 0) playAt(qi - 1); });
-  $('pNext').addEventListener('click', function () { if (qi + 1 < queue.length) playAt(qi + 1); });
+  $('pPrev').addEventListener('click', function () {
+    if (qi > 0) playAt(qi - 1);
+    else msg('已经是队列第 1 集');
+  });
+  $('pNext').addEventListener('click', function () {
+    if (qi + 1 < queue.length) playAt(qi + 1);
+    else msg('已经是队列最后一集');
+  });
+  $('pOrder').addEventListener('click', function () {
+    setOrder(playOrder === 'desc' ? 'asc' : 'desc');
+  });
 
   // 倍速（跨会话记忆）
   var rateSel = $('pRate');
@@ -1130,6 +1230,8 @@
       $('dPage').textContent = '第 1 页';
       $('dPrev').disabled = true;
       $('dNext').disabled = !d.hasMore;
+      // 倒序时直接翻到最后一页，最新一集在最前
+      if (playOrder === 'desc' && d.hasMore) await jumpToOrderPage(true);
     } catch (e) { $('dName').textContent = '加载失败: ' + e.message; }
   }
 
@@ -1153,7 +1255,8 @@
   function renderTracks(tracks) {
     var el = $('dTracks');
     el.innerHTML = '';
-    curTracks = tracks || [];
+    curTracks = sortByOrder(tracks || []);
+    tracks = curTracks;
     if (!tracks.length) { el.innerHTML = '<span class="muted">没有曲目</span>'; return; }
     var album = {
       id: cur.id,
@@ -1242,9 +1345,11 @@
 
     var done = curLast.d && curLast.t >= curLast.d - 5;
     if (done) {
+      // 按当前播放顺序找「下一集」：正序下一集 = 集数 +1，倒序下一集 = 集数 -1
+      var step = playOrder === 'desc' ? -1 : 1;
       var nIdx = -1;
       for (var i = 0; i < curTracks.length; i++) {
-        if (Number(curTracks[i].index) === Number(curLast.index) + 1) { nIdx = i; break; }
+        if (Number(curTracks[i].index) === Number(curLast.index) + step) { nIdx = i; break; }
       }
       curLast._next = nIdx;
       $('btnResume').textContent = nIdx >= 0
@@ -1307,8 +1412,12 @@
   $('dNext').addEventListener('click', function () { gotoPage(cur.page + 1); });
   $('ckUnheard').addEventListener('change', function () {
     filterUnheard = !!this.checked;
-    renderTracks(curTracks);
+    renderTracks(sortByOrder(curTracks));
   });
+  $('btnOrder').addEventListener('click', function () {
+    setOrder(playOrder === 'desc' ? 'asc' : 'desc');
+  });
+  syncOrderBtn();
   $('btnPlayPage').addEventListener('click', function () {
     if (!curTracks.length) { msg('本页没有曲目', 'err'); return; }
     playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '' });
