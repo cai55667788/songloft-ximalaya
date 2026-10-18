@@ -19,7 +19,7 @@
   ],
   "icon": "static/icon.svg",
   "entryHash": "349f39bbdb4045deb06b26717834993f89d648be696e30137b263be99a16e3bd",
-  "zipHash": "f6a29a6e7c81373a3edba8a1e31e07f213eb3a4a358abc485cea23a5f13604d3",
+  "zipHash": "1114adc92734785704e73d3dda21b2417a8453af29ae2a7fed7d1775ce9ef178",
   "updateUrl": "https://raw.githubusercontent.com/cai55667788/songloft-ximalaya/main/plugin.json",
   "download_url": "https://github.com/cai55667788/songloft-ximalaya/releases/download/v0.10.0/ximalaya.jsplugin.zip"
 }
