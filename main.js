@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.12.1';
+var VERSION = '0.13.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -885,6 +885,10 @@ async function loadAll() {
   try { var stt = await songloft.storage.get(STAT_KEY); if (stt) stats = typeof stt === 'string' ? JSON.parse(stt) : stt; } catch (e) { /* */ }
   try { var dj = await songloft.storage.get(DL_KEY); if (dj) dlJob = typeof dj === 'string' ? JSON.parse(dj) : dj; } catch (e) { /* */ }
   try { var w = await songloft.storage.get(WATCH_KEY); if (w) watch = typeof w === 'string' ? JSON.parse(w) : w; } catch (e) { /* */ }
+  try { var bmk = await songloft.storage.get(BM_KEY); if (bmk) bookmarks = typeof bmk === 'string' ? JSON.parse(bmk) : bmk; } catch (e) { /* */ }
+  try { var hst = await songloft.storage.get(HIST_KEY); if (hst) history = typeof hst === 'string' ? JSON.parse(hst) : hst; } catch (e) { /* */ }
+  if (!Array.isArray(bookmarks)) bookmarks = [];
+  if (!Array.isArray(history)) history = [];
 
   if (!config || typeof config !== 'object') config = {};
   if (!config.device) config.device = { account_id: '', device_id: '', device_name: '' };
@@ -1070,8 +1074,7 @@ function progUpsert(raw) {
 }
 
 // ---------- 收听统计 ----------
-function dayKeyOf(ts) {
-  var d = new Date(Number(ts) || Date.now());
+function dayKeyOf(ts) {  var d = new Date(Number(ts) || Date.now());
   var m = d.getMonth() + 1, day = d.getDate();
   return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
 }
@@ -1173,6 +1176,129 @@ function buildReport(period) {
     finished: finishedN, top: albums, daily: r.list, text: text,
     albumCount: Object.keys(stats.albums).length
   };
+}
+
+// ---------- 章节书签 ----------
+// 存「某集某个时间点 + 备注」，跨设备共用。上限 BM_MAX 条，超出按时间淘汰最旧。
+var BM_KEY = 'bookmarks:v1';
+var BM_MAX = 1000;
+var bookmarks = [];
+
+// 播放历史时间线：按天记录「听了哪本书的哪一集」，用于「收听」页的时间线视图
+var HIST_KEY = 'history:v1';
+var HIST_MAX = 2000;
+var history = [];
+
+function normBookmark(o) {
+  if (!o) return null;
+  var trackId = String(o.trackId || o.track_id || '');
+  var t = progNum(o.t);
+  if (!trackId) return null;
+  return {
+    id: String(o.id || ''),
+    trackId: trackId,
+    albumId: String(o.albumId || o.album_id || ''),
+    albumName: String(o.albumName || ''),
+    title: String(o.title || ''),
+    index: progNum(o.index),
+    cover: String(o.cover || ''),
+    t: t,
+    note: String(o.note || '').slice(0, 120),
+    at: Number(o.at) || Date.now()
+  };
+}
+
+function bmFind(id) {
+  for (var i = 0; i < bookmarks.length; i++) if (String(bookmarks[i].id) === String(id)) return i;
+  return -1;
+}
+
+// 同一集同一时间点（±3 秒）视为重复，避免连点产生多条
+function bmAdd(raw) {
+  var b = normBookmark(raw);
+  if (!b) return { ok: false, error: '书签缺集号' };
+  for (var i = 0; i < bookmarks.length; i++) {
+    var x = bookmarks[i];
+    if (String(x.trackId) === b.trackId && Math.abs((Number(x.t) || 0) - b.t) <= 3) {
+      if (b.note) x.note = b.note;
+      x.at = Date.now();
+      persistBookmarks();
+      return { ok: true, dup: true, item: x, total: bookmarks.length };
+    }
+  }
+  if (!b.id) b.id = 'bm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  bookmarks.unshift(b);
+  if (bookmarks.length > BM_MAX) bookmarks.length = BM_MAX;
+  persistBookmarks();
+  return { ok: true, item: b, total: bookmarks.length };
+}
+
+function bmRemove(id) {
+  var i = bmFind(id);
+  if (i < 0) return false;
+  bookmarks.splice(i, 1);
+  persistBookmarks();
+  return true;
+}
+
+function bmList(albumId) {
+  var out = bookmarks.filter(function (b) { return !albumId || String(b.albumId) === String(albumId); });
+  out.sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); });
+  return out;
+}
+
+async function persistBookmarks() {
+  try { await songloft.storage.set(BM_KEY, JSON.stringify(bookmarks.slice(0, BM_MAX))); }
+  catch (e) { songloft.log.warn('[喜马拉雅] 书签落盘失败: ' + String(e)); }
+}
+
+// 播放历史：同一集 10 分钟内只记一次，避免频繁刷
+function histAdd(raw) {
+  var h = normBookmark(raw);   // 字段与书签一致，复用归一化
+  if (!h) return false;
+  var last = history[0];
+  if (last && String(last.trackId) === h.trackId && Date.now() - (Number(last.at) || 0) < 600 * 1000) {
+    last.at = Date.now();
+    last.t = Math.max(Number(last.t) || 0, h.t);
+    persistHistory();
+    return true;
+  }
+  h.id = 'h' + Date.now().toString(36);
+  history.unshift(h);
+  if (history.length > HIST_MAX) history.length = HIST_MAX;
+  persistHistory();
+  return true;
+}
+
+async function persistHistory() {
+  try { await songloft.storage.set(HIST_KEY, JSON.stringify(history.slice(0, HIST_MAX))); }
+  catch (e) { songloft.log.warn('[喜马拉雅] 历史落盘失败: ' + String(e)); }
+}
+
+// 按天分组，返回 [{day, items:[...], count}]，最近在前
+function histTimeline(days, limit) {
+  var dayN = Math.max(1, Number(days) || 30);
+  var cut = Date.now() - dayN * 86400000;
+  var groups = {}, order = [];
+  history.forEach(function (h) {
+    if (Number(h.at) < cut) return;
+    var dk = dayKeyOf(h.at);
+    if (!groups[dk]) { groups[dk] = { day: dk, items: [], count: 0, sec: 0 }; order.push(dk); }
+    groups[dk].items.push(h);
+    groups[dk].count += 1;
+    groups[dk].sec += Number(h.t) || 0;
+  });
+  order.sort(function (a, b) { return a < b ? 1 : -1; });
+  var out = order.map(function (k) {
+    var g = groups[k];
+    return {
+      day: g.day,
+      listSec: Number(stats.days[k]) || 0,     // 当天实际收听时长
+      count: g.count,
+      items: g.items.slice(0, limit && limit > 0 ? limit : 200)
+    };
+  });
+  return out;
 }
 
 function progPrune() {
@@ -2000,6 +2126,50 @@ async function handleHTTPRequest(req) {
     return jsonResp({ success: true, data: { message: '统计数据已清空' } });
   }
 
+  // ---------- 章节书签 ----------
+  if (path === '/bookmarks' && method === 'GET') {
+    return jsonResp({ success: true, data: { items: bmList(q.albumId || ''), total: bookmarks.length } });
+  }
+
+  if (path === '/bookmarks' && method === 'POST') {
+    var bmb = readBodyJson(req);
+    if (bmb.remove) {
+      if (!bmRemove(bmb.remove)) return jsonResp({ success: false, error: '书签不存在' }, 404);
+      return jsonResp({ success: true, data: { removed: bmb.remove, total: bookmarks.length } });
+    }
+    if (bmb.clear) {
+      bookmarks = [];
+      await persistBookmarks();
+      return jsonResp({ success: true, data: { message: '书签已清空', total: 0 } });
+    }
+    var r1 = bmAdd(bmb);
+    if (!r1.ok) return jsonResp({ success: false, error: r1.error }, 400);
+    return jsonResp({ success: true, data: r1 });
+  }
+
+  // ---------- 播放历史时间线 ----------
+  if (path === '/history' && method === 'GET') {
+    var hdays = Number(q.days) || 30;
+    return jsonResp({
+      success: true,
+      data: { days: hdays, total: history.length, groups: histTimeline(hdays, Number(q.limit) || 0) }
+    });
+  }
+
+  if (path === '/history' && method === 'POST') {
+    var hb = readBodyJson(req);
+    if (hb.clear) {
+      history = [];
+      await persistHistory();
+      return jsonResp({ success: true, data: { message: '历史已清空' } });
+    }
+    var items = Array.isArray(hb.items) ? hb.items : [hb];
+    var hn = 0;
+    items.forEach(function (x) { if (histAdd(x)) hn += 1; });
+    if (hn) await persistHistory();
+    return jsonResp({ success: true, data: { added: hn, total: history.length } });
+  }
+
   // ---------- 关键词追更 ----------
   if (path === '/watch' && method === 'GET') {
     return jsonResp({ success: true, data: { cfg: config.watch, items: watch.items, job: watch.job } });
@@ -2073,7 +2243,7 @@ async function handleHTTPRequest(req) {
   if (path === '/progress' && method === 'POST') {
     var pb = readBodyJson(req);
     var items = Array.isArray(pb.items) ? pb.items : [pb];
-    var saved = 0, statChanged = false;
+    var saved = 0, statChanged = false, histChanged = false;
     for (var pi = 0; pi < items.length; pi++) {
       var one = items[pi];
       if (progUpsert(one)) saved += 1;
@@ -2081,10 +2251,13 @@ async function handleHTTPRequest(req) {
       var ls = Number(one && one.listened) || 0;
       if (ls > 0) {
         if (statAdd(ls, one.albumId, one.albumName, one.at)) statChanged = true;
+        // 顺便记一条播放历史（同一集 10 分钟内去重）
+        if (histAdd(one)) histChanged = true;
       }
     }
     if (saved) { progPrune(); await persistProg(); }
     if (statChanged) await persistStat();
+    if (histChanged) await persistHistory();
     return jsonResp({ success: true, data: { saved: saved, tracks: Object.keys(progress.tracks).length } });
   }
 
