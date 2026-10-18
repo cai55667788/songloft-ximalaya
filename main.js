@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.11.0';
+var VERSION = '0.12.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -402,6 +402,7 @@ async function fetchAlbumDetail(albumId) {
   var d = await getJSON(url, pcHeaders(albumId));
   if (d.ret !== 200) throw new Error('专辑信息获取失败 ret=' + d.ret + ' ' + (d.msg || ''));
   var m = (d.data && d.data.albumPageMainInfo) || {};
+  var pay = classifyPay(m);
   return {
     albumId: String(albumId),
     name: stripHtml(m.albumTitle || ''),
@@ -410,14 +411,43 @@ async function fetchAlbumDetail(albumId) {
     intro: stripHtml(m.shortIntro || ''),
     introFull: stripHtml(m.richIntro || m.detailRichIntro || ''),
     playCount: m.playCount || 0,
-    isPaid: !!m.isPaid,
-    isFinished: !!m.isFinished,
-    updateDate: m.updateDate || '',
-    createDate: m.createDate || '',
+    isPaid: pay.paid,
+    payLabel: pay.label,
+    payTip: pay.tip,
+    hasBuy: !!m.hasBuy,
+    vipType: Number(m.vipType) || 0,
+    isFinished: Number(m.isFinished) || 0,
+    finishedText: pay.finishedText,
+    updateDate: String(m.updateDate || '').split(' ')[0],
+    createDate: String(m.createDate || '').split(' ')[0],
     category: m.categoryTitle || '',
     subscribeCount: m.subscribeCount || 0
   };
 }
+
+// 付费类型判定。实测（2026-10）：免费专辑 isPaid=false & vipType=0；
+// 付费/VIP 专辑 isPaid=true & vipType=2。字段可能缺失，故做多重兜底。
+function classifyPay(m) {
+  m = m || {};
+  var isPaid = !!(m.isPaid || m.is_paid);
+  var vipType = Number(m.vipType) || 0;
+  var paid = isPaid || vipType > 0;
+  var label = '', tip = '';
+  if (paid) {
+    tip = '这是付费 / VIP 专辑，未购买或未开通会员时无法收听完整内容';
+    if (m.hasBuy) { label = '已购买'; tip = '这是付费专辑，当前账号已购买'; }
+    else if (vipType === 2) label = 'VIP 会员';
+    else label = '付费';
+  } else if (Number(m.ximiVipFreeType) > 0) {
+    label = '会员免费';
+    tip = '喜马拉雅会员可免费收听';
+  }
+  var fin = Number(m.isFinished) || 0;
+  // 实测：0=连载中，1=已完结（个别专辑为 2，按完结处理）
+  var finishedText = fin === 0 ? '连载中' : '已完结';
+  return { paid: paid, label: label, tip: tip, finishedText: finishedText };
+}
+
 
 async function fetchTrackUrl(trackId) {
   var url = 'https://m.ximalaya.com/tracks/' + trackId + '.json';
@@ -2451,7 +2481,12 @@ async function handleHTTPRequest(req) {
           introFull: (detail && detail.introFull) || '',
           playCount: (detail && detail.playCount) || 0,
           isPaid: !!(detail && detail.isPaid),
-          isFinished: !!(detail && detail.isFinished),
+          payLabel: (detail && detail.payLabel) || '',
+          payTip: (detail && detail.payTip) || '',
+          hasBuy: !!(detail && detail.hasBuy),
+          vipType: (detail && detail.vipType) || 0,
+          isFinished: Number(detail && detail.isFinished) || 0,
+          finishedText: (detail && detail.finishedText) || '',
           updateDate: (detail && detail.updateDate) || '',
           createDate: (detail && detail.createDate) || '',
           category: (detail && detail.category) || '',
