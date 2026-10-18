@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.9.1';
+var VERSION = '0.10.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -346,6 +346,41 @@ async function fetchShowPage(albumId, page) {
   var d = await getJSON(url, pcHeaders(albumId));
   if (d.ret !== 200) throw new Error('喜马拉雅接口异常 ret=' + d.ret + ' ' + (d.msg || ''));
   return (d.data && d.data.tracksAudioPlay) || [];
+}
+
+// 专辑目录：逐页扫一轮集数，得到「总页数 + 每页集数范围」，倒序播放靠它从最后一集起播。
+// 有 10 分钟缓存——专辑更新后最多晚 10 分钟才反映到倒序起点。
+var outlineCache = {};
+async function fetchAlbumOutline(albumId) {
+  var ck = String(albumId);
+  var hit = outlineCache[ck];
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.data;
+
+  var pages = [];
+  var page = 1;
+  var lastIndex = 0;
+  while (page <= 200) {
+    var list = await fetchShowPage(albumId, page);
+    if (!list.length) break;
+    var idx = list.map(function (t) { return Number(t.index) || 0; });
+    var min = Math.min.apply(null, idx);
+    var max = Math.max.apply(null, idx);
+    pages.push({ page: page, min: min, max: max, count: list.length });
+    lastIndex = max;
+    if (list.length < PAGE_SIZE) break;
+    page += 1;
+  }
+  var data = {
+    albumId: ck,
+    pageSize: PAGE_SIZE,
+    pageCount: pages.length,
+    lastPage: pages.length ? pages[pages.length - 1].page : 1,
+    lastIndex: lastIndex,
+    firstIndex: pages.length ? pages[0].min : 0,
+    pages: pages
+  };
+  outlineCache[ck] = { at: Date.now(), data: data };
+  return data;
 }
 
 function mapTrack(t, albumName) {
@@ -2071,6 +2106,17 @@ async function handleHTTPRequest(req) {
           tracks: bt.map(function (t) { return mapTrack(t, an); })
         }
       });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e) }, 500);
+    }
+  }
+
+  // 专辑目录（每页的集数范围）：供前端「倒序」从最后一集开始听
+  var mOutline = path.match(/^\/album\/(\d+)\/outline$/);
+  if (mOutline && method === 'GET') {
+    try {
+      var oo = await fetchAlbumOutline(mOutline[1]);
+      return jsonResp({ success: true, data: oo });
     } catch (e) {
       return jsonResp({ success: false, error: String(e) }, 500);
     }
