@@ -1,5 +1,5 @@
 'use strict';
-// 喜马拉雅插件 for Songloft v0.8.0
+// 喜马拉雅插件 for Songloft v0.9.0
 // 能力：
 //   ① 关键词搜索专辑（多源：完整搜索 → 登录态移动搜索 → 联想词扩展聚合）
 //   ② 专辑详情页（封面/作者/简介/分集列表）+ 单集在线试听
@@ -10,15 +10,20 @@
 //   ⑦ 扫码登录：手机喜马拉雅 APP 扫一扫直接登录，无需手动复制 Cookie（v0.6.0）
 //   ⑧ 听书播放器：断点续播、整页连播、倍速、睡眠定时、已听标记（v0.7.0）
 //   ⑨ 最近收听聚合、跨页自动连播、导入时写入主播名（v0.8.0）
+//   ⑩ 跨设备收听进度：进度/最后收听存到 NAS 端，换设备接着听（v0.9.0）
+//   ⑪ 定时语音播报：每天到点同步订阅，有新集就用音箱 TTS 播报（v0.9.0）
+//   ⑫ 单集（声音）搜索：直接搜某一集，可单集试听或加进歌单（v0.9.0）
+//   ⑬ 整本下载：把歌单里的集数下载到 Songloft 本地音乐目录（v0.9.0）
 // 数据源（公开接口，免登录）：
 //   专辑详情: GET https://www.ximalaya.com/revision/album/v1/simple?albumId={id}
 //   专辑曲目: GET https://www.ximalaya.com/revision/play/v1/show?id={id}&num={page}&size=30&ptype=0
 //   单集直链: GET https://m.ximalaya.com/tracks/{trackId}.json → play_path_64/32
 //   搜索:     GET /revision/search/main（WAF 风控）/revision/suggest（可用）
+//   搜索（单集）: GET https://www.ximalaya.com/revision/search?core=track&kw=&page=&rows=
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.8.0';
+var VERSION = '0.9.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -26,6 +31,8 @@ var LIB_KEY = 'imported:v1';
 var JOB_KEY = 'import_job:v1';
 var LOGIN_KEY = 'login:v1';
 var SUB_KEY = 'subs:v1';
+var PROG_KEY = 'progress:v1';
+var DL_KEY = 'download_job:v1';
 
 var UA_PC = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 var UA_M = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
@@ -36,16 +43,27 @@ var SYNC_MAX_PAGES = 25;   // 增量同步最多回溯 25 页
 
 var config = {
   device: { account_id: '', device_id: '', device_name: '' },
-  auto: { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' }
+  auto: { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' },
+  tts: {
+    enabled: false, time: '07:30', account_id: '', device_id: '', device_name: '',
+    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, lastRunDate: ''
+  },
+  sync: { progress: true },
+  dl: { targetDir: '喜马拉雅', format: 'mp3' }
 };
 var imported = [];   // [{albumId, name, playlistId, count, importedAt}]
 var subs = [];       // [{albumId, name, playlistId, lastIndex, songCount, cover, author, updateDate, lastCheckAt, newCount, newTitles, autoSync}]
 var job = { running: false, mode: '', title: '', done: 0, total: 0, playlistId: 0, error: '', finishedAt: '', current: '', parts: [] };
+var dlJob = { running: false, playlistId: 0, title: '', done: 0, total: 0, ok: 0, fail: 0, current: '', error: '', finishedAt: '', targetDir: '', cancel: false };
+var progress = { tracks: {}, albums: {}, at: '' };
 var login = { cookie: '', savedAt: '' };
 var lastSync = { at: '', result: '', trigger: '' };
+var lastTts = { at: '', text: '', result: '' };
 
 var syncing = false;
 var importing = false;
+var downloading = false;
+var ttsRunning = false;
 var tickTimer = null;
 
 // ---------- 基础工具 ----------
@@ -737,6 +755,56 @@ async function searchAlbumsSmart(kw) {
   return result;
 }
 
+// ---------- 单集（声音）搜索 ----------
+// 老版 web 检索接口（不受 WAF 风控）：/revision/search?core=track&kw=&page=&rows=
+// 返回 docs[] 里带 play_path_32/64，可直接拿地址；这里只取元数据，播放仍走 /track/{id}/url
+
+function normTrackDoc(d) {
+  if (!d) return null;
+  var id = String(d.id || d.track_id || d.trackId || '');
+  if (!id) return null;
+  return {
+    trackId: id,
+    title: stripTags(d.title || d.track_title || ''),
+    author: stripTags(d.nickname || d.anchor_name || d.user_name || ''),
+    album: stripTags(d.album_title || d.albumTitle || ''),
+    albumId: String(d.album_id || d.albumId || ''),
+    cover: normCover(d.album_cover_path || d.cover_path || d.cover || ''),
+    duration: progNum(d.duration),
+    playUrl: d.play_path_64 || d.play_path_32 || d.play_path || '',
+    isPaid: !!(d.is_paid || d.isPaid),
+    play: progNum(d.count_play || d.play_count),
+    category: d.category_title || '',
+    createdAt: Number(d.created_at) || 0
+  };
+}
+
+var trackSearchCache = {};
+
+async function searchTracks(kw, page, rows) {
+  var key = String(kw).trim() + '|' + (page || 1) + '|' + (rows || 20);
+  var hit = trackSearchCache[key];
+  if (hit && Date.now() - hit.at < SEARCH_TTL) return hit.data;
+
+  var url = 'https://www.ximalaya.com/revision/search?core=track&kw=' + encodeURIComponent(String(kw).trim()) +
+    '&page=' + (page || 1) + '&rows=' + (rows || 20);
+  var d = await getJSON(url, pcHeaders(''));
+  var risk = !d || (d.ret !== 200 && d.ret !== 0);
+  if (risk) {
+    return { tracks: [], total: 0, risk: true, source: '声音检索（受限）' };
+  }
+  var docs = (d.data && d.data.result && d.data.result.response && d.data.result.response.docs) ||
+    (d.data && d.data.docs) || [];
+  var tracks = [];
+  for (var i = 0; i < docs.length; i++) {
+    var t = normTrackDoc(docs[i]);
+    if (t && t.trackId) tracks.push(t);
+  }
+  var out = { tracks: tracks, total: progNum(d.data && d.data.result && d.data.result.response && d.data.result.response.numFound), risk: false, source: '声音检索' };
+  if (tracks.length) trackSearchCache[key] = { at: Date.now(), data: out };
+  return out;
+}
+
 // ---------- 存储 ----------
 
 async function loadAll() {
@@ -745,14 +813,41 @@ async function loadAll() {
   try { var j = await songloft.storage.get(JOB_KEY); if (j) job = typeof j === 'string' ? JSON.parse(j) : j; } catch (e) { /* */ }
   try { var g = await songloft.storage.get(LOGIN_KEY); if (g) login = typeof g === 'string' ? JSON.parse(g) : g; } catch (e) { /* */ }
   try { var s = await songloft.storage.get(SUB_KEY); if (s) subs = typeof s === 'string' ? JSON.parse(s) : s; } catch (e) { /* */ }
+  try { var pg = await songloft.storage.get(PROG_KEY); if (pg) progress = typeof pg === 'string' ? JSON.parse(pg) : pg; } catch (e) { /* */ }
+  try { var dj = await songloft.storage.get(DL_KEY); if (dj) dlJob = typeof dj === 'string' ? JSON.parse(dj) : dj; } catch (e) { /* */ }
 
   if (!config || typeof config !== 'object') config = {};
   if (!config.device) config.device = { account_id: '', device_id: '', device_name: '' };
   if (!config.auto) config.auto = { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' };
+  var dftTts = {
+    enabled: false, time: '07:30', account_id: '', device_id: '', device_name: '',
+    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, lastRunDate: ''
+  };
+  if (!config.tts) config.tts = dftTts;
+  for (var tk in dftTts) {
+    if (Object.prototype.hasOwnProperty.call(dftTts, tk) && config.tts[tk] === undefined) config.tts[tk] = dftTts[tk];
+  }
+  if (!config.sync || typeof config.sync !== 'object') config.sync = { progress: true };
+  if (typeof config.sync.progress !== 'boolean') config.sync.progress = true;
+  if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
+  if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '';
+  if (config.dl.format !== '' && config.dl.format !== 'mp3') config.dl.format = 'mp3';
+
   if (!login || typeof login.cookie !== 'string') login = { cookie: '', savedAt: '' };
   if (!Array.isArray(subs)) subs = [];
   if (!Array.isArray(imported)) imported = [];
   if (!job || typeof job !== 'object') job = { running: false, mode: '', title: '', done: 0, total: 0, playlistId: 0, error: '', finishedAt: '', current: '', parts: [] };
+
+  if (!progress || typeof progress !== 'object') progress = { tracks: {}, albums: {}, at: '' };
+  if (!progress.tracks || typeof progress.tracks !== 'object') progress.tracks = {};
+  if (!progress.albums || typeof progress.albums !== 'object') progress.albums = {};
+  var dftDl = { running: false, playlistId: 0, title: '', done: 0, total: 0, ok: 0, fail: 0, current: '', error: '', finishedAt: '', targetDir: '', cancel: false };
+  if (!dlJob || typeof dlJob !== 'object') dlJob = dftDl;
+  for (var dk in dftDl) {
+    if (Object.prototype.hasOwnProperty.call(dftDl, dk) && dlJob[dk] === undefined) dlJob[dk] = dftDl[dk];
+  }
+  // 进程重启后不可能还有在跑的任务，把残留的 running 归位
+  if (dlJob.running) { dlJob.running = false; dlJob.error = dlJob.error || '任务被中断'; }
 
   // v0.3 及更早版本没有 subscriptions，用导入记录反向补一份
   if (!subs.length && imported.length) {
@@ -781,6 +876,14 @@ async function persist() {
   await songloft.storage.set(JOB_KEY, JSON.stringify(job));
   await songloft.storage.set(LOGIN_KEY, JSON.stringify(login));
   await songloft.storage.set(SUB_KEY, JSON.stringify(subs));
+}
+
+async function persistProg() {
+  try { await songloft.storage.set(PROG_KEY, JSON.stringify(progress)); } catch (e) { songloft.log.warn('[喜马拉雅] 进度落盘失败: ' + String(e)); }
+}
+
+async function persistDl() {
+  try { await songloft.storage.set(DL_KEY, JSON.stringify(dlJob)); } catch (e) { /* */ }
 }
 
 function findSub(albumId) {
@@ -823,6 +926,81 @@ async function miotPost(path, payload) {
   }, 15);
   var text = await resp.text();
   try { return { ok: resp.ok, data: JSON.parse(text) }; } catch (e) { return { ok: resp.ok, data: null }; }
+}
+
+// ---------- 跨设备收听进度 ----------
+
+var PROG_MAX_TRACKS = 4000;   // 最多记 4000 集单集进度
+var PROG_MAX_ALBUMS = 800;
+
+function progNum(x) { var n = Number(x); return isFinite(n) && n > 0 ? Math.round(n) : 0; }
+
+// 归一化一条进度记录（前端/服务端字段可能略不同）
+function normProg(o) {
+  if (!o) return null;
+  var trackId = String(o.trackId || o.track_id || o.id || '');
+  if (!trackId) return null;
+  var t = progNum(o.t), d = progNum(o.d || o.dur || o.duration);
+  if (!d) return null;
+  return {
+    trackId: trackId,
+    albumId: String(o.albumId || o.album_id || ''),
+    albumName: String(o.albumName || o.album_name || o.album || ''),
+    title: String(o.title || ''),
+    index: progNum(o.index),
+    cover: String(o.cover || ''),
+    author: String(o.author || ''),
+    t: t, d: d,
+    at: Number(o.at) || Date.now(),
+    finished: !!(o.finished || (d > 0 && t >= d - 20))
+  };
+}
+
+// 写入一条进度，返回是否真的更新
+function progUpsert(raw) {
+  var p = normProg(raw);
+  if (!p) return false;
+  var old = progress.tracks[p.trackId];
+  if (old && Number(old.at) > p.at) return false;    // 旧数据更旧，忽略
+  progress.tracks[p.trackId] = p;
+  if (p.albumId) {
+    var a = progress.albums[p.albumId];
+    if (!a || Number(a.at) <= p.at) {
+      progress.albums[p.albumId] = {
+        trackId: p.trackId, index: p.index, title: p.title, t: p.t, d: p.d, at: p.at,
+        albumName: p.albumName, cover: p.cover, author: p.author, finished: p.finished
+      };
+    }
+  }
+  progress.at = nowStr();
+  return true;
+}
+
+function progPrune() {
+  var ids = Object.keys(progress.tracks);
+  if (ids.length > PROG_MAX_TRACKS) {
+    ids.sort(function (a, b) { return (Number(progress.tracks[a].at) || 0) - (Number(progress.tracks[b].at) || 0); });
+    var drop = ids.length - PROG_MAX_TRACKS;
+    for (var i = 0; i < drop; i++) delete progress.tracks[ids[i]];
+  }
+  var aids = Object.keys(progress.albums);
+  if (aids.length > PROG_MAX_ALBUMS) {
+    aids.sort(function (a, b) { return (Number(progress.albums[a].at) || 0) - (Number(progress.albums[b].at) || 0); });
+    var drop2 = aids.length - PROG_MAX_ALBUMS;
+    for (var j = 0; j < drop2; j++) delete progress.albums[aids[j]];
+  }
+}
+
+function progList(albumId, limit) {
+  var out = [];
+  var ids = Object.keys(progress.tracks);
+  for (var i = 0; i < ids.length; i++) {
+    var p = progress.tracks[ids[i]];
+    if (albumId && String(p.albumId) !== String(albumId)) continue;
+    out.push(p);
+  }
+  out.sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); });
+  return limit ? out.slice(0, limit) : out;
 }
 
 // ---------- 曲目获取 ----------
@@ -1079,7 +1257,7 @@ async function runImportMulti(items, mode, mergedName) {
 
 async function syncOne(sub, opts) {
   opts = opts || {};
-  var out = { albumId: sub.albumId, name: sub.name, newCount: 0, added: 0, error: '' };
+  var out = { albumId: sub.albumId, name: sub.name, newCount: 0, added: 0, error: '', titles: [] };
   try {
     var detail = null;
     try { detail = await fetchAlbumDetail(sub.albumId); } catch (e) { detail = null; }
@@ -1092,6 +1270,7 @@ async function syncOne(sub, opts) {
 
     var r = await fetchNewTracks(sub.albumId, sub.lastIndex || 0);
     out.newCount = r.tracks.length;
+    out.titles = r.tracks.map(function (t) { return t.index + '. ' + t.title; });
     sub.newCount = r.tracks.length;
     sub.newTitles = r.tracks.slice(-3).map(function (t) { return t.index + '. ' + t.title; });
     sub.lastCheckAt = nowStr();
@@ -1117,9 +1296,9 @@ async function syncOne(sub, opts) {
 
 async function runSyncAll(opts) {
   opts = opts || {};
-  if (syncing) return { skipped: true, newCount: 0 };
+  if (syncing) return { skipped: true, newCount: 0, checked: 0, errors: [], updates: [] };
   syncing = true;
-  var totalNew = 0, totalAdded = 0, checked = 0, errors = [];
+  var totalNew = 0, totalAdded = 0, checked = 0, errors = [], updates = [];
   var pushed = null;
   try {
     for (var i = 0; i < subs.length; i++) {
@@ -1129,6 +1308,7 @@ async function runSyncAll(opts) {
       checked += 1;
       totalNew += r.newCount || 0;
       totalAdded += r.added || 0;
+      if (r.added) updates.push({ albumId: s.albumId, name: s.name, added: r.added, titles: r.titles || [] });
       if (r.error) errors.push(r.name + ': ' + r.error);
       if (r.added && !pushed) pushed = s;
     }
@@ -1154,16 +1334,219 @@ async function runSyncAll(opts) {
   } finally {
     syncing = false;
   }
-  return { newCount: totalAdded, checked: checked, errors: errors };
+  return { newCount: totalAdded, checked: checked, errors: errors, updates: updates };
 }
 
 async function tick() {
-  if (!config.auto || !config.auto.enabled) return;
   if (syncing) return;
-  if (config.auto.lastRunDate === todayStr()) return;
-  if (hhmmNow() < String(config.auto.time || '08:30')) return;
+  var now = hhmmNow();
+  var today = todayStr();
+
+  // ① 定时语音播报：到点先同步（内部会追加新集），再把结果读出来
+  var t = config.tts || {};
+  if (t.enabled && t.lastRunDate !== today && now >= String(t.time || '07:30')) {
+    var dev = ttsDevice();
+    if (dev.account_id && dev.device_id) {
+      songloft.log.info('[喜马拉雅] 触发定时语音播报（设定 ' + t.time + '）');
+      var res = await runTtsReport({ speak: true, trigger: '定时播报' });
+      if (!res.spoken) songloft.log.warn('[喜马拉雅] 播报未发出: ' + res.error);
+      return;
+    }
+    songloft.log.warn('[喜马拉雅] 定时播报已开启但没有选音箱，已跳过');
+  }
+
+  // ② 定时自动同步
+  if (!config.auto || !config.auto.enabled) return;
+  if (config.auto.lastRunDate === today) return;
+  if (now < String(config.auto.time || '08:30')) return;
   songloft.log.info('[喜马拉雅] 触发定时同步（设定 ' + config.auto.time + '）');
   await runSyncAll({ import: true, markAuto: true, trigger: '定时' });
+}
+
+// ---------- 定时语音播报（TTS） ----------
+
+function ttsDevice() {
+  var t = config.tts || {};
+  var d = config.device || {};
+  var acc = t.account_id || d.account_id || '';
+  var dev = t.device_id || d.device_id || '';
+  var name = t.device_name || d.device_name || '';
+  return { account_id: acc, device_id: dev, device_name: name };
+}
+
+// 把「本次同步的新增」拼成一段适合 TTS 朗读的话
+function buildTtsText(updates, totalAdded) {
+  var prefix = String((config.tts && config.tts.prefix) || '喜马拉雅更新提醒').trim();
+  var list = (updates || []).filter(function (u) { return u && u.added > 0; });
+  var body;
+  if (!list.length) {
+    body = '今天的订阅没有新的集数。';
+  } else {
+    var maxItems = Math.max(1, Number(config.tts && config.tts.maxItems) || 3);
+    var shown = list.slice(0, maxItems);
+    var parts = shown.map(function (u) {
+      return '《' + String(u.name || '').replace(/[《》]/g, '') + '》更新' + u.added + '集';
+    });
+    body = parts.join('，');
+    if (list.length > shown.length) body += '，等' + list.length + '张专辑';
+    body += '，一共' + totalAdded + '集已经加入歌单。';
+    // 带最新一集的名字，听起来更有信息量
+    var first = shown[0];
+    if (first && first.titles && first.titles.length) {
+      var last = String(first.titles[first.titles.length - 1] || '');
+      if (last) body += '《' + String(first.name || '').replace(/[《》]/g, '') + '》最新一集是' + last.replace(/^\d+\.\s*/, '') + '。';
+    }
+  }
+  var text = prefix ? (prefix.replace(/[。，,.\s]+$/, '') + '。' + body) : body;
+  if (text.length > 480) text = text.slice(0, 478) + '。';
+  return text;
+}
+
+// 同步订阅并生成播报稿；opts.speak=true 时下发到音箱
+async function runTtsReport(opts) {
+  opts = opts || {};
+  var sync = { newCount: 0, checked: 0, errors: [], updates: [] };
+  try {
+    sync = await runSyncAll({ import: true, trigger: opts.trigger || '语音播报' });
+  } catch (e) {
+    songloft.log.warn('[喜马拉雅] 播报前同步失败: ' + String(e));
+  }
+  var updates = sync.updates || [];
+  var totalAdded = Number(sync.newCount) || 0;
+  var text = opts.text || buildTtsText(updates, totalAdded);
+  var out = { text: text, spoken: false, device: null, error: '', newCount: totalAdded, checked: sync.checked || 0 };
+
+  if (!opts.speak) return out;
+  if (!updates.length && !(config.tts && config.tts.speakEmpty)) {
+    out.error = '没有新集，不播报';
+    return out;
+  }
+  var dev = ttsDevice();
+  if (!dev.account_id || !dev.device_id) {
+    out.error = '没有配置播报音箱（请先在设置里选设备）';
+    return out;
+  }
+  try {
+    var r = await miotPost('/mina/tts', { account_id: dev.account_id, device_id: dev.device_id, text: text });
+    if (!r.ok || (r.data && r.data.success === false)) {
+      out.error = 'TTS 下发失败: ' + ((r.data && r.data.error) || 'HTTP');
+    } else {
+      out.spoken = true;
+      out.device = dev.device_name || dev.device_id;
+    }
+  } catch (e) {
+    out.error = 'TTS 下发异常: ' + String(e);
+  }
+  lastTts = { at: nowStr(), text: text, result: out.spoken ? ('已播报到 ' + (out.device || '音箱')) : (out.error || '未播报') };
+  if (config.tts) { config.tts.lastRunDate = todayStr(); await persist(); }
+  songloft.log.info('[喜马拉雅] 语音播报：' + lastTts.result);
+  return out;
+}
+
+// ---------- 整本下载到本地音乐目录 ----------
+
+async function collectPlaylistSongs(playlistId) {
+  var out = [], offset = 0, pageSize = 200;
+  for (var guard = 0; guard < 100; guard++) {
+    var batch = await songloft.playlists.getSongs(playlistId, { limit: pageSize, offset: offset });
+    if (!batch || !batch.length) break;
+    out = out.concat(batch);
+    if (batch.length < pageSize) break;
+    offset += batch.length;
+  }
+  return out;
+}
+
+// 取歌曲里存的喜马拉雅 trackId
+function songTrackId(s) {
+  if (!s) return '';
+  var sd = s.sourceData !== undefined ? s.sourceData : s.source_data;
+  if (!sd) return '';
+  if (typeof sd === 'object') return String(sd.trackId || sd.track_id || '');
+  var str = String(sd);
+  var m = str.match(/"track_?[iI]d"\s*:\s*"?([0-9]+)/);
+  return m ? m[1] : '';
+}
+
+// 只下载「本插件导入的远程歌曲」，本地文件跳过
+function isXmRemoteSong(s) {
+  if (!s) return false;
+  if (s.type === 'local') return false;
+  var sd = s.sourceData !== undefined ? s.sourceData : s.source_data;
+  if (!sd) return false;
+  if (typeof sd === 'object') return !!(sd.trackId || sd.track_id);
+  var str = String(sd);
+  return str.indexOf('trackId') >= 0;
+}
+
+async function runDownload(playlistId, subDir, title) {
+  // 落地目录用 path_template 的前缀表达：子目录/主播/专辑/集名
+  var sub = String(subDir || '').replace(/^\/+|\/+$/g, '');
+  var pathTpl = (sub ? sub + '/' : '') + '{artist}/{album}/{title}';
+  if (downloading) return { ok: false, error: '已有下载任务进行中' };
+  if (typeof songloft.songs.download !== 'function') {
+    return { ok: false, error: '当前 Songloft 版本不支持下载到本地（songs.download 不可用），请先升级宿主' };
+  }
+  if (!playlistId) return { ok: false, error: '缺少歌单' };
+
+  downloading = true;
+  dlJob = {
+    running: true, playlistId: Number(playlistId) || 0, title: title || '', done: 0, total: 0,
+    ok: 0, fail: 0, current: '正在读取歌单…', error: '', finishedAt: '',
+    targetDir: sub, cancel: false
+  };
+  await persistDl();
+
+  try {
+    var all = await collectPlaylistSongs(playlistId);
+    var songs = all.filter(isXmRemoteSong);
+    dlJob.total = songs.length;
+    await persistDl();
+    if (!songs.length) throw new Error('这个歌单里没有可下载的喜马拉雅集数（可能已经全部下载过了）');
+
+    var lastErr = '';
+    for (var i = 0; i < songs.length; i++) {
+      if (dlJob.cancel) break;
+      var s = songs[i];
+      dlJob.current = s.title || ('第 ' + (i + 1) + ' 集');
+      try {
+        var dlOpt = { embed_metadata: true, path_template: pathTpl };
+        // 喜马拉雅多为 m4a/48K 源，统一转 mp3 才能写标签、拖进别的播放器也不挑格式
+        if (config.dl && config.dl.format === 'mp3') {
+          dlOpt.format = 'mp3';
+          dlOpt.quality = '128';
+        }
+        songloft.log.info('[喜马拉雅] 下载 ' + dlJob.current + ' trackId=' + songTrackId(s) + ' format=' + (dlOpt.format || '原格式'));
+        var r = await songloft.songs.download(s.id, dlOpt);
+        if (r && (r.status === 'ok' || r.path)) { dlJob.ok += 1; if (r.path) dlJob.lastPath = r.path; }
+        else { dlJob.fail += 1; lastErr = (r && r.error) || '未知错误'; }
+      } catch (e) {
+        dlJob.fail += 1;
+        lastErr = String(e && e.message || e);
+        if (lastErr.indexOf('paid') >= 0) lastErr = '付费/VIP 内容，需要登录且账号已购买';
+        songloft.log.warn('[喜马拉雅] 下载失败《' + dlJob.current + '》: ' + lastErr);
+      }
+      dlJob.done += 1;
+      if (dlJob.done % 3 === 0 || dlJob.done === dlJob.total) await persistDl();
+    }
+    dlJob.running = false;
+    dlJob.current = '';
+    dlJob.finishedAt = nowStr();
+    if (lastErr && !dlJob.ok) dlJob.error = '全部失败，最后一条错误：' + lastErr;
+    else if (dlJob.fail) dlJob.error = dlJob.fail + ' 集下载失败' + (lastErr ? '：' + lastErr : '');
+    await persistDl();
+    songloft.log.info('[喜马拉雅] 下载完成：成功 ' + dlJob.ok + '，失败 ' + dlJob.fail + '，歌单 ' + playlistId);
+    return { ok: true, ok_count: dlJob.ok, fail: dlJob.fail, total: dlJob.total };
+  } catch (e) {
+    dlJob.running = false;
+    dlJob.error = String(e && e.message || e);
+    dlJob.finishedAt = nowStr();
+    await persistDl();
+    songloft.log.error('[喜马拉雅] 下载任务失败: ' + dlJob.error);
+    return { ok: false, error: dlJob.error };
+  } finally {
+    downloading = false;
+  }
 }
 
 // ---------- HTTP 路由 ----------
@@ -1200,6 +1583,25 @@ async function handleHTTPRequest(req) {
       if (typeof a.pushDevice === 'boolean') config.auto.pushDevice = a.pushDevice;
       if (a.lastRunDate === '') config.auto.lastRunDate = '';
     }
+    if (body.tts) {
+      var t = body.tts;
+      if (typeof t.enabled === 'boolean') config.tts.enabled = t.enabled;
+      if (t.time && /^\d{1,2}:\d{2}$/.test(t.time)) config.tts.time = t.time;
+      if (typeof t.account_id === 'string') config.tts.account_id = t.account_id;
+      if (typeof t.device_id === 'string') config.tts.device_id = t.device_id;
+      if (typeof t.device_name === 'string') config.tts.device_name = t.device_name;
+      if (typeof t.prefix === 'string') config.tts.prefix = t.prefix.slice(0, 40);
+      if (t.maxItems !== undefined) config.tts.maxItems = Math.max(1, Math.min(8, Number(t.maxItems) || 3));
+      if (typeof t.speakEmpty === 'boolean') config.tts.speakEmpty = t.speakEmpty;
+      if (t.lastRunDate === '') config.tts.lastRunDate = '';
+    }
+    if (body.sync) {
+      if (typeof body.sync.progress === 'boolean') config.sync.progress = body.sync.progress;
+    }
+    if (body.dl) {
+      if (typeof body.dl.targetDir === 'string') config.dl.targetDir = body.dl.targetDir.trim();
+      if (body.dl.format === 'mp3' || body.dl.format === '') config.dl.format = body.dl.format;
+    }
     await persist();
     return jsonResp({ success: true, data: config });
   }
@@ -1210,9 +1612,173 @@ async function handleHTTPRequest(req) {
       data: {
         job: job, imported: imported, subs: subs, auto: config.auto,
         lastSync: lastSync, syncing: syncing, version: VERSION,
-        loggedIn: !!login.cookie
+        loggedIn: !!login.cookie,
+        dlJob: dlJob,
+        tts: { cfg: config.tts, last: lastTts, device: ttsDevice() },
+        progressStat: { tracks: Object.keys(progress.tracks).length, albums: Object.keys(progress.albums).length, at: progress.at || '' },
+        syncCfg: config.sync, dlCfg: config.dl
       }
     });
+  }
+
+  // 能力自检（排查宿主版本差异）
+  if (path === '/diag' && method === 'GET') {
+    var caps = {
+      songsDownload: typeof songloft.songs.download,
+      songsCreate: typeof songloft.songs.create,
+      playlistsGetSongs: typeof songloft.playlists.getSongs,
+      fs: typeof (songloft.fs && songloft.fs.writeFile),
+      storage: typeof songloft.storage.get,
+      version: VERSION
+    };
+    return jsonResp({ success: true, data: caps });
+  }
+
+  // ---------- 跨设备收听进度 ----------
+  if (path === '/progress' && method === 'POST') {
+    var pb = readBodyJson(req);
+    var items = Array.isArray(pb.items) ? pb.items : [pb];
+    var saved = 0;
+    for (var pi = 0; pi < items.length; pi++) {
+      if (progUpsert(items[pi])) saved += 1;
+    }
+    if (saved) { progPrune(); await persistProg(); }
+    return jsonResp({ success: true, data: { saved: saved, tracks: Object.keys(progress.tracks).length } });
+  }
+
+  if (path === '/progress' && method === 'GET') {
+    var pa = String(q.albumId || q.album_id || '');
+    if (pa) {
+      var lastA = progress.albums[pa] || null;
+      var listA = progList(pa, 500);
+      return jsonResp({ success: true, data: { album: lastA, tracks: listA, count: listA.length } });
+    }
+    var lim = Number(q.limit) || 200;
+    return jsonResp({
+      success: true,
+      data: {
+        album: null,
+        tracks: progList('', lim),
+        albums: progress.albums,
+        at: progress.at || '',
+        count: Object.keys(progress.tracks).length
+      }
+    });
+  }
+
+  if (path === '/progress/recent' && method === 'GET') {
+    var rl = progList('', Number(q.limit) || 40);
+    var recent = rl.map(function (p) {
+      return {
+        albumId: p.albumId, albumName: p.albumName, cover: p.cover, author: p.author,
+        trackId: p.trackId, index: p.index, title: p.title,
+        t: p.t, d: p.d, at: p.at, finished: !!p.finished
+      };
+    });
+    return jsonResp({ success: true, data: recent });
+  }
+
+  if (path === '/progress' && method === 'DELETE') {
+    var db = readBodyJson(req);
+    var dt = String(db.trackId || q.trackId || '');
+    var da = String(db.albumId || q.albumId || '');
+    var all = String(db.all || q.all || '') === '1';
+    var removed = 0;
+    if (all) {
+      removed = Object.keys(progress.tracks).length;
+      progress.tracks = {}; progress.albums = {};
+    } else if (da) {
+      var idsA = Object.keys(progress.tracks);
+      for (var i2 = 0; i2 < idsA.length; i2++) {
+        if (String(progress.tracks[idsA[i2]].albumId) === da) { delete progress.tracks[idsA[i2]]; removed += 1; }
+      }
+      if (progress.albums[da]) { delete progress.albums[da]; removed += 1; }
+    } else if (dt) {
+      if (progress.tracks[dt]) { delete progress.tracks[dt]; removed += 1; }
+    }
+    progress.at = nowStr();
+    await persistProg();
+    return jsonResp({ success: true, data: { removed: removed } });
+  }
+
+  // 单集搜索
+  if (path === '/search/tracks' && (method === 'GET' || method === 'POST')) {
+    try {
+      var tb = method === 'POST' ? readBodyJson(req) : {};
+      var tkw = String(tb.kw || tb.keyword || q.kw || q.keyword || '').trim();
+      if (!tkw) return jsonResp({ success: false, error: '缺少关键词' }, 400);
+      var tpage = Number(tb.page || q.page) || 1;
+      var trows = Math.max(1, Math.min(50, Number(tb.rows || q.rows) || 20));
+      var tr = await searchTracks(tkw, tpage, trows);
+      return jsonResp({
+        success: true, data: tr.tracks, risk: !!tr.risk, source: tr.source,
+        page: tpage, hasMore: tr.tracks.length >= trows, total: tr.total || 0, count: tr.tracks.length
+      });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // 单集导入（直接建成歌单 / 追加进已有歌单）
+  if (path === '/import-tracks' && method === 'POST') {
+    var ib = readBodyJson(req);
+    var items2 = Array.isArray(ib.tracks) ? ib.tracks : [];
+    if (!items2.length) return jsonResp({ success: false, error: '没有选择单集' }, 400);
+    if (items2.length > 200) return jsonResp({ success: false, error: '一次最多导入 200 集' }, 400);
+    try {
+      var plId = Number(ib.playlist_id) || 0;
+      var plName = String(ib.name || '').trim() || ('喜马拉雅单集 ' + todayStr());
+      var plObj = null;
+      if (plId) {
+        try { plObj = await songloft.playlists.getById(plId); } catch (e) { plObj = null; }
+      }
+      if (!plObj) {
+        try {
+          plObj = await songloft.playlists.create({ name: plName, description: '来自喜马拉雅 · 单集收藏' });
+        } catch (ce) {
+          // 同名歌单已存在时复用，不报错（用户重复点「＋歌单」很常见）
+          if (String(ce).indexOf('same name') < 0) throw ce;
+          var allPl = [];
+          try { allPl = await songloft.playlists.list() || []; } catch (e3) { allPl = []; }
+          for (var k3 = 0; k3 < allPl.length; k3++) {
+            if (allPl[k3] && String(allPl[k3].name) === plName) { plObj = allPl[k3]; break; }
+          }
+          if (!plObj) plObj = await songloft.playlists.create({ name: plName + ' ' + hhmmNow(), description: '来自喜马拉雅 · 单集收藏' });
+        }
+      }
+      var songsIn = [];
+      var seenT = {};
+      for (var j2 = 0; j2 < items2.length; j2++) {
+        var it2 = items2[j2];
+        var tid = String(it2.trackId || it2.track_id || it2.id || '');
+        if (!tid || seenT[tid]) continue;
+        seenT[tid] = 1;
+        songsIn.push({
+          title: it2.title || ('单集 ' + tid),
+          artist: it2.author || '喜马拉雅',
+          album: it2.album || plName,
+          coverUrl: it2.cover || '',
+          duration: Number(it2.duration) || 0,
+          sourceData: JSON.stringify({
+            trackId: tid, title: it2.title || '', album: it2.album || '',
+            cover: it2.cover || '', duration: Number(it2.duration) || 0
+          }),
+          dedupKey: 'xm:' + tid
+        });
+      }
+      if (!songsIn.length) return jsonResp({ success: false, error: '没有有效的单集' }, 400);
+      var created2 = await songloft.songs.create(songsIn);
+      var ids2 = (created2 || []).map(function (s) { return s && s.id; }).filter(function (x) { return !!x; });
+      var added2 = 0;
+      if (ids2.length) {
+        var r2 = await songloft.playlists.addSongs(plObj.id, ids2);
+        added2 = (r2 && typeof r2.added === 'number') ? r2.added : ids2.length;
+      }
+      songloft.log.info('[喜马拉雅] 单集导入：' + added2 + ' 集 → 歌单 ' + plObj.id);
+      return jsonResp({ success: true, data: { playlistId: plObj.id, name: plObj.name, added: added2, total: songsIn.length } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
   }
 
   // ---------- 扫码登录 ----------
@@ -1404,7 +1970,25 @@ async function handleHTTPRequest(req) {
       var kw = String(b2.keyword || '').trim();
       if (!kw) return jsonResp({ code: 1, msg: 'empty keyword', data: null });
       var sr = await searchAlbumsSmart(kw);
-      if (!sr.albums.length) return jsonResp({ code: 1, msg: '未找到', data: null });
+      if (!sr.albums.length) {
+        // 没有匹配专辑时退回单集搜索：小爱直接播这一集
+        try {
+          var tr0 = await searchTracks(kw, 1, 5);
+          if (tr0.tracks && tr0.tracks.length) {
+            var ft = tr0.tracks[0];
+            var linkF = await fetchTrackUrl(ft.trackId);
+            return jsonResp({
+              code: 0, msg: 'ok（单集）',
+              data: {
+                title: ft.title, artist: '喜马拉雅·' + (ft.album || ft.author || ''), url: linkF,
+                duration: ft.duration,
+                source_data: { trackId: ft.trackId, title: ft.title, album: ft.album, cover: ft.cover, duration: ft.duration }
+              }
+            });
+          }
+        } catch (e2) { /* 继续返回未找到 */ }
+        return jsonResp({ code: 1, msg: '未找到', data: null });
+      }
       var album = sr.albums[0];
       var page1 = await fetchAlbumTracks(album.id, 1, 3, 1);
       if (!page1.tracks.length) return jsonResp({ code: 1, msg: '专辑无可用曲目', data: null });
@@ -1620,6 +2204,76 @@ async function handleHTTPRequest(req) {
     } catch (e) {
       return jsonResp({ success: false, error: String(e) }, 500);
     }
+  }
+
+  // ---------- 整本下载到本地音乐目录 ----------
+  if (path === '/download' && method === 'POST') {
+    if (downloading) return jsonResp({ success: false, error: '已有下载任务进行中' }, 409);
+    var dbb = readBodyJson(req);
+    var plid = Number(dbb.playlist_id || dbb.playlistId) || 0;
+    var dalbum = String(dbb.album_id || dbb.albumId || '');
+    var dtitle = String(dbb.name || '');
+    if (!plid && dalbum) {
+      var sfound = findSub(dalbum);
+      if (sfound && sfound.playlistId) { plid = Number(sfound.playlistId); dtitle = dtitle || sfound.name; }
+      var ifound = null;
+      for (var ii = 0; ii < imported.length; ii++) if (String(imported[ii].albumId) === dalbum) { ifound = imported[ii]; break; }
+      if (!plid && ifound) { plid = Number(ifound.playlistId); dtitle = dtitle || ifound.name; }
+    }
+    if (!plid) return jsonResp({ success: false, error: '这个专辑还没有歌单，请先导入' }, 400);
+    var tdir = String(dbb.target_dir || '').trim() || config.dl.targetDir || '';
+    runDownload(plid, tdir, dtitle).catch(function (e) {
+      songloft.log.error('[喜马拉雅] 下载异常: ' + String(e));
+    });
+    return jsonResp({ success: true, data: { message: '已开始下载' + (dtitle ? '《' + dtitle + '》' : ''), job: dlJob } });
+  }
+
+  if (path === '/download/status' && method === 'GET') {
+    return jsonResp({ success: true, data: { job: dlJob, cfg: config.dl } });
+  }
+
+  if (path === '/download/stop' && method === 'POST') {
+    if (!dlJob.running) return jsonResp({ success: true, data: { message: '当前没有下载任务' } });
+    dlJob.cancel = true;
+    await persistDl();
+    return jsonResp({ success: true, data: { message: '已请求停止，当前这一集下载完就停' } });
+  }
+
+  // ---------- 定时语音播报 ----------
+  // 预览：只用「已检查到的更新」拼稿，不做同步，秒回
+  if (path === '/tts/preview' && (method === 'POST' || method === 'GET')) {
+    var ups = [];
+    for (var ui = 0; ui < subs.length; ui++) {
+      var su = subs[ui];
+      if (Number(su.newCount) > 0) ups.push({ name: su.name, added: Number(su.newCount), titles: su.newTitles || [] });
+    }
+    var tot = 0;
+    for (var uj = 0; uj < ups.length; uj++) tot += ups[uj].added;
+    return jsonResp({
+      success: true,
+      data: {
+        text: buildTtsText(ups, tot), newCount: tot, albums: ups.length,
+        device: ttsDevice(),
+        hint: ups.length ? '' : '暂时没有已知的新集（可先「立即全部同步」再预览）'
+      }
+    });
+  }
+
+  // 播报：同步 + TTS 耗时远超宿主 60s 限制，必须异步立即返回
+  if (path === '/tts/run' && method === 'POST') {
+    if (ttsRunning) return jsonResp({ success: false, error: '播报任务已在运行' }, 409);
+    var tb2 = readBodyJson(req);
+    var speak = tb2.speak !== false;
+    var custom = String(tb2.text || '').trim();
+    var dev2 = ttsDevice();
+    if (speak && (!dev2.account_id || !dev2.device_id)) {
+      return jsonResp({ success: false, error: '没有配置播报音箱，请先在「设置」里选择设备' }, 400);
+    }
+    ttsRunning = true;
+    runTtsReport({ speak: speak, text: custom, trigger: '手动' })
+      .catch(function (e) { songloft.log.warn('[喜马拉雅] 播报异常: ' + String(e)); })
+      .then(function () { ttsRunning = false; });
+    return jsonResp({ success: true, data: { message: '已开始同步并播报，稍后留意音箱' } });
   }
 
   if (path === '/devices' && method === 'GET') {
