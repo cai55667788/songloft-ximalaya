@@ -529,6 +529,60 @@
     return Math.floor(d / 86400000) + ' 天前';
   }
 
+  // 「2026-05-12」→「2026年5月12日（5 个月前）」
+  function dateHuman(s) {
+    var m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(s || ''));
+    if (!m) return '';
+    var y = Number(m[1]), mo = Number(m[2]), dd = Number(m[3]);
+    var then = new Date(y, mo - 1, dd).getTime();
+    var days = Math.floor((Date.now() - then) / 86400000);
+    var rel = '';
+    if (days < 0) rel = '';
+    else if (days === 0) rel = '今天';
+    else if (days === 1) rel = '昨天';
+    else if (days < 30) rel = days + ' 天前';
+    else if (days < 365) rel = Math.floor(days / 30) + ' 个月前';
+    else rel = Math.floor(days / 365) + ' 年前';
+    var label = y + '年' + mo + '月' + dd + '日';
+    return rel ? label + '（' + rel + '）' : label;
+  }
+
+  // 详情页徽章：付费/已购/连载状态一眼可见
+  function renderAlbumBadges(d) {
+    var el = $('dBadges');
+    if (!el) return;
+    var out = [];
+    if (d.isPaid) {
+      if (d.hasBuy) out.push('<span class="dbadge bought" title="该账号已购买本专辑">已购买</span>');
+      else out.push('<span class="dbadge pay" title="' + escHtml(d.payTip || '付费专辑') + '">🔒 ' +
+        escHtml(d.payLabel || '付费专辑') + '</span>');
+    } else if (d.payLabel) {
+      out.push('<span class="dbadge serial">' + escHtml(d.payLabel) + '</span>');
+    }
+    var fin = Number(d.isFinished) || 0;
+    if (fin === 0) out.push('<span class="dbadge serial" title="仍在更新，可订阅跟进">● 连载中</span>');
+    else out.push('<span class="dbadge done">✓ 已完结</span>');
+    el.innerHTML = out.join('');
+  }
+
+  // 详情页日期行：更新日期单独一行，超过 1 年没更新标红提示
+  function renderAlbumDates(d) {
+    var el = $('dDate');
+    if (!el) return;
+    var parts = [];
+    var upd = String(d.updateDate || '').split(' ')[0];
+    if (upd) {
+      var h = dateHuman(upd);
+      var m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(upd);
+      var days = m ? Math.floor((Date.now() - new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()) / 86400000) : -1;
+      var cls = days > 365 ? ' class="stale"' : '';
+      parts.push('🗓 更新于 <b' + cls + '>' + escHtml(h || upd) + '</b>' + (days > 365 ? ' 久未更新' : ''));
+    }
+    var cre = String(d.createDate || '').split(' ')[0];
+    if (cre) parts.push('发布于 ' + escHtml(dateHuman(cre) || cre));
+    el.innerHTML = parts.join('　·　');
+  }
+
   function renderRecent() {
     var el = $('recentList');
     if (!el) return;
@@ -1129,12 +1183,15 @@
       var m = document.createElement('div');
       m.className = 'm';
       var bits = [];
-      if (a.isPaid) bits.push('VIP/付费');
       if (a.category) bits.push(a.category);
       if (a.author) bits.push(a.author);
       if (a.tracks) bits.push(a.tracks + '集');
       if (a.play) bits.push(fmtPlay(a.play) + '播放');
-      m.textContent = bits.join(' · ');
+      if (a.isPaid) {
+        m.innerHTML = '<span class="dbadge pay" style="margin-right:5px;font-size:10px;">🔒 付费</span>' + escHtml(bits.join(' · '));
+      } else {
+        m.textContent = bits.join(' · ');
+      }
       body.appendChild(t); body.appendChild(m);
       body.addEventListener('click', function () { openDetail(a.id); });
 
@@ -1372,6 +1429,8 @@
     $('searchCard').classList.add('hide');
     $('detailCard').classList.remove('hide');
     $('dName').textContent = '载入中…';
+    $('dBadges').innerHTML = '';
+    $('dDate').innerHTML = '';
     $('dMeta').textContent = '';
     $('dSubState').textContent = '';
     $('dIntro').textContent = '';
@@ -1390,10 +1449,9 @@
       if (d.category) bits.push(d.category);
       if (d.playCount) bits.push(fmtPlay(d.playCount) + '播放');
       if (d.subscribeCount) bits.push(fmtPlay(d.subscribeCount) + '订阅');
-      if (d.updateDate) bits.push('更新于 ' + d.updateDate);
-      if (d.isPaid) bits.push('VIP/付费');
-      if (d.isFinished) bits.push('已完结');
       $('dMeta').textContent = bits.join(' · ');
+      renderAlbumBadges(d);
+      renderAlbumDates(d);
       $('dIntro').textContent = d.introFull || d.intro || '（无简介）';
       $('dIntroToggle').textContent = '展开简介';
       $('dIntro').classList.remove('open');
