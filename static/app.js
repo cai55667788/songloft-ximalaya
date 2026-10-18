@@ -102,7 +102,7 @@
         if (!meLoaded) loadMySubs(false);
         loadWatch();
       }
-      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); renderTimeline(); }
+      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); renderTimeline(); loadDashboard(); }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
     });
@@ -1183,6 +1183,7 @@
       var bits = [];
       if (b.index) bits.push('第 ' + b.index + ' 集');
       if (b.albumName) bits.push(b.albumName);
+      if (bmCats[b.id]) bits.push('#' + bmCats[b.id]);
       bits.push(agoText(b.at));
       sub.textContent = bits.join(' · ');
       mid.appendChild(tt);
@@ -1271,6 +1272,33 @@
   });
   $('bmNote').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); addBmNow(); }
+  });
+
+  // AI 归类：给书签打「干货/情节/笑点/疑问/待复查」，结果按 id 存在本机
+  var bmCats = {};
+  try { bmCats = JSON.parse(sGet('xm_bm_cat') || '{}') || {}; } catch (e) { bmCats = {}; }
+
+  if ($('bmAi')) $('bmAi').addEventListener('click', async function () {
+    if (!bmItems.length) { msg('先打几条书签', 'err'); return; }
+    var st = await loadAiStatus(false);
+    if (!st.ready) { msg('AI 还没启用，去设置页配置', 'err'); return; }
+    $('bmAi').disabled = true;
+    $('bmAi').textContent = '归类中…';
+    try {
+      var r = await api('POST', '/ai/classify', {});
+      if (!r || r.success === false) throw new Error((r && r.error) || '失败');
+      var map = (r.data && r.data.map) || {};
+      var n = 0;
+      Object.keys(map).forEach(function (k) { bmCats[k] = map[k]; n += 1; });
+      sSet('xm_bm_cat', JSON.stringify(bmCats));
+      msg('✨ 已归类 ' + n + ' 条书签', 'ok');
+      renderBm();
+    } catch (e) {
+      msg('归类失败: ' + e.message, 'err');
+    } finally {
+      $('bmAi').disabled = false;
+      $('bmAi').textContent = '✨ AI 归类';
+    }
   });
 
   // ---------- A-B 复读 ----------
@@ -1882,6 +1910,8 @@
       await pullAlbumProgress(cur.id);
       renderTracks(d.tracks || []);
       renderResume();
+      loadAiCard(cur.id);
+      loadLibMarks(cur.id);
       $('dPage').textContent = '第 1 页';
       $('dPrev').disabled = true;
       $('dNext').disabled = !d.hasMore;
@@ -1889,6 +1919,222 @@
       if (playOrder === 'desc' && d.hasMore) await jumpToOrderPage(true);
     } catch (e) { $('dName').textContent = '加载失败: ' + e.message; }
   }
+
+  // ---------- AI 速览 / 问这本书 ----------
+  var aiStatus = { ready: false, checked: false };
+
+  async function loadAiStatus(force) {
+    if (aiStatus.checked && !force) return aiStatus;
+    try {
+      var r = await api('GET', '/ai/status');
+      aiStatus = { ready: !!(r && r.data && r.data.ready), checked: true, data: (r && r.data) || {} };
+    } catch (e) { aiStatus = { ready: false, checked: true, data: {} }; }
+    return aiStatus;
+  }
+
+  async function loadAiCard(albumId) {
+    var card = $('aiCard');
+    if (!card) return;
+    var st = await loadAiStatus(true);   // 每次进详情都重新确认，设置里关掉就立刻生效
+    if (!st.ready) { card.classList.add('hide'); return; }
+    card.classList.remove('hide');
+    $('aiAns').classList.add('hide');
+    $('aiAns').textContent = '';
+    $('aiQ').value = '';
+    $('btnAiGen').classList.remove('hide');
+    $('btnAiRe').classList.add('hide');
+    $('aiMeta').textContent = '读取中…';
+    $('aiBody').innerHTML = '';
+    try {
+      var r = await api('GET', '/ai/summary?albumId=' + encodeURIComponent(albumId));
+      if (r && r.success !== false && r.data && r.data.item) {
+        renderAiSummary(r.data.item, !!r.data.cached);
+        return;
+      }
+      $('aiMeta').textContent = '还没有速览，点「生成」';
+    } catch (e) {
+      $('aiMeta').textContent = '还没有速览，点「生成」';
+    }
+  }
+
+  function renderAiSummary(it, cached) {
+    if (!it || !it.summary) return;
+    $('btnAiGen').classList.add('hide');
+    $('btnAiRe').classList.remove('hide');
+    $('aiMeta').textContent = (cached ? '已缓存' : '刚生成') + (it.model ? ' · ' + it.model : '');
+    var html = '<div class="ai-sum">' + escHtml(it.summary) + '</div>';
+    if (it.tags && it.tags.length) {
+      html += '<div class="ai-tags">' + it.tags.map(function (t) { return '<span class="ai-tag">' + escHtml(t) + '</span>'; }).join('') + '</div>';
+    }
+    if (it.fit) html += '<div class="ai-fit">🎯 ' + escHtml(it.fit) + '</div>';
+    if (it.themes && it.themes.length) {
+      html += '<div class="ai-themes">';
+      it.themes.forEach(function (t) {
+        html += '<div class="ai-theme"><span class="aitn">' + escHtml(t.name) + '</span>' +
+          '<span class="airg">' + escHtml(t.range) + '</span>' +
+          '<span class="ainote">' + escHtml(t.note) + '</span></div>';
+      });
+      html += '</div>';
+    }
+    $('aiBody').innerHTML = html;
+  }
+
+  async function aiGenerate(force) {
+    if (!cur.id) return;
+    $('btnAiGen').disabled = true;
+    $('btnAiRe').disabled = true;
+    $('aiMeta').textContent = 'AI 正在读这本书…';
+    try {
+      var r = await api('GET', '/ai/summary?albumId=' + encodeURIComponent(cur.id) + (force ? '&refresh=1' : ''));
+      if (!r || r.success === false) {
+        $('aiMeta').textContent = '❌ ' + ((r && r.error) || '生成失败');
+        return;
+      }
+      renderAiSummary(r.data.item, !!r.data.cached);
+    } catch (e) {
+      $('aiMeta').textContent = '❌ ' + e.message;
+    } finally {
+      $('btnAiGen').disabled = false;
+      $('btnAiRe').disabled = false;
+    }
+  }
+
+  async function aiAskBook() {
+    if (!cur.id) return;
+    var q = ($('aiQ').value || '').trim();
+    if (!q) { msg('先写个问题', 'err'); return; }
+    $('btnAiAsk').disabled = true;
+    $('aiAns').classList.remove('hide');
+    $('aiAns').innerHTML = '<span class="muted">AI 思考中…</span>';
+    try {
+      var r = await api('POST', '/ai/ask', { albumId: cur.id, q: q });
+      $('aiAns').textContent = (r && r.success !== false) ? ((r.data && r.data.answer) || '（没有回答）') : ('❌ ' + ((r && r.error) || '失败'));
+    } catch (e) {
+      $('aiAns').textContent = '❌ ' + e.message;
+    } finally {
+      $('btnAiAsk').disabled = false;
+    }
+  }
+
+  if ($('btnAiGen')) $('btnAiGen').addEventListener('click', function () { aiGenerate(false); });
+  if ($('btnAiRe')) $('btnAiRe').addEventListener('click', function () { aiGenerate(true); });
+  if ($('btnAiAsk')) $('btnAiAsk').addEventListener('click', aiAskBook);
+  if ($('aiQ')) $('aiQ').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); aiAskBook(); } });
+
+  // ---------- 本机音乐库标记 ----------
+  var libAlbumCache = {};
+
+  async function loadLibMarks(albumId) {
+    try {
+      var r = await api('GET', '/lib/album?albumId=' + encodeURIComponent(albumId));
+      if (!r || r.success === false) return;
+      libAlbumCache[String(albumId)] = r.data || {};
+      var d = r.data || {};
+      var tip = $('dDlTip');
+      if (tip && d.total) {
+        var bits = [];
+        if (d.downloaded) bits.push('已下载 ' + d.downloaded + ' 集（可离线播放）');
+        if (d.missing) bits.push('还差 ' + d.missing + ' 集');
+        tip.innerHTML = bits.length ? ('📁 ' + escHtml(bits.join('，'))) +
+          (d.missing ? ' <span class="link" id="btnFillMissing">补下缺的 ' + d.missing + ' 集</span>' : '') : '';
+        var bf = $('btnFillMissing');
+        if (bf) bf.addEventListener('click', fillMissing);
+      }
+      // 给分集列表打「已下载」标
+      var items = d.items || {};
+      document.querySelectorAll('#dTracks .trk').forEach(function (row) {
+        var tid = row.getAttribute('data-tid');
+        if (!tid) return;
+        var tt = row.querySelector('.tt');
+        if (!tt) return;
+        var old = row.querySelector('.libmark');
+        if (items[tid]) {
+          if (!old) {
+            var sp = document.createElement('span');
+            sp.className = 'libmark';
+            sp.textContent = '本地';
+            sp.title = '已下载到本地：' + (items[tid].path || '');
+            tt.appendChild(sp);
+          }
+        } else if (old) { old.remove(); }
+      });
+    } catch (e) { /* 静默：本地库探测失败不影响使用 */ }
+  }
+
+  async function fillMissing() {
+    var d = libAlbumCache[String(cur.id)] || {};
+    if (!d.missing) { msg('没有缺的集'); return; }
+    if (!confirm('要补下缺的 ' + d.missing + ' 集吗？会跑到本地音乐目录，已下过的自动跳过。')) return;
+    try {
+      var r = await api('POST', '/lib/fill', { albumId: cur.id });
+      msg(r.success ? ('⬇ ' + ((r.data && r.data.message) || '已启动')) : ('❌ ' + (r.error || '失败')), r.success ? 'ok' : 'err');
+      poll();
+    } catch (e) { msg('启动失败: ' + e.message, 'err'); }
+  }
+
+  // ---------- 听书习惯仪表盘 ----------
+  async function loadDashboard() {
+    var box = $('dashBody');
+    if (!box) return;
+    try {
+      var r = await api('GET', '/dashboard');
+      if (!r || r.success === false) { box.innerHTML = '<span class="err">读取失败</span>'; return; }
+      var d = r.data || {};
+      var st = d.streak || {};
+      var ht = d.heat || {};
+      var html = '<div class="dashrow">';
+      html += '<div class="dash"><div class="dv">' + (st.now || 0) + '</div><div class="dl">连续天数</div></div>';
+      html += '<div class="dash"><div class="dv">' + (st.best || 0) + '</div><div class="dl">最长连续</div></div>';
+      html += '<div class="dash"><div class="dv">' + escHtml(d.totalText || '0 秒') + '</div><div class="dl">累计收听</div></div>';
+      html += '<div class="dash"><div class="dv">' + escHtml(d.avgText || '0 秒') + '</div><div class="dl">日均（' + (d.activeDays || 0) + ' 天）</div></div>';
+      html += '</div>';
+
+      // 时段热力
+      var hours = ht.hours || [];
+      var maxH = 1;
+      hours.forEach(function (v) { if (v > maxH) maxH = v; });
+      if (hours.length) {
+        html += '<div class="muted small-txt">🕐 一天里什么时候听得多' +
+          (ht.peakHour >= 0 ? '（高峰 ' + ht.peakHour + ' 点）' : '') + '</div>';
+        html += '<div class="heat">';
+        hours.forEach(function (v, i) {
+          var h = Math.max(2, Math.round((v / maxH) * 52));
+          html += '<div class="hb' + (v > 0 && v >= maxH * 0.6 ? ' on' : '') + '" style="height:' + h + 'px" title="' +
+            i + ' 点 · ' + fmtHM(v) + '"></div>';
+        });
+        html += '</div><div class="heatx"><span>0 点</span><span>6 点</span><span>12 点</span><span>18 点</span><span>23 点</span></div>';
+      }
+
+      // 听完率
+      var rates = d.rates || [];
+      if (rates.length) {
+        html += '<div class="muted small-txt" style="margin-top:12px;">✅ 听完率</div>';
+        rates.forEach(function (x) {
+          html += '<div class="rate"><span class="rn">' + escHtml(x.name) + '</span>' +
+            '<span class="rbar2"><span style="width:' + (x.rate || 0) + '%"></span></span>' +
+            '<span class="rv">' + (x.rate || 0) + '%</span></div>';
+        });
+      }
+
+      // 剩余时长
+      var rm = d.remain || {};
+      if (rm.items && rm.items.length) {
+        html += '<div class="muted small-txt" style="margin-top:12px;">⏳ 手头的书听完还要约 ' + escHtml(rm.totalText || '') + '</div>';
+        rm.items.slice(0, 5).forEach(function (x) {
+          html += '<div class="rate"><span class="rn">' + escHtml(x.name) + '（还剩 ' + x.left + ' / ' + x.total + ' 集）</span>' +
+            '<span class="rv" style="width:auto">' + escHtml(x.remainText) + '</span></div>';
+        });
+      }
+      if (!rates.length && !(rm.items || []).length && !hours.length) {
+        html += '<div class="muted small-txt" style="margin-top:10px;">多听几集，这里就会出现你的收听习惯。</div>';
+      }
+      box.innerHTML = html;
+    } catch (e) {
+      box.innerHTML = '<span class="err">读取失败: ' + escHtml(e.message) + '</span>';
+    }
+  }
+
+  if ($('btnDashRefresh')) $('btnDashRefresh').addEventListener('click', loadDashboard);
 
   function renderSubState(sub, subscribed) {
     if (!subscribed || !sub) {
@@ -1937,6 +2183,7 @@
       shown += 1;
       var d = document.createElement('div');
       d.className = 'trk';
+      d.setAttribute('data-tid', String(t.trackId || ''));
       var no = document.createElement('span');
       no.className = 'no';
       no.textContent = t.index;
@@ -2922,6 +3169,7 @@
       $('ttsTime').value = t.time || '07:30';
       $('ttsEnabled').value = t.enabled ? '1' : '0';
       $('ttsPrefix').value = t.prefix || '喜马拉雅更新提醒';
+      if ($('ttsPlayAfter')) $('ttsPlayAfter').value = t.playAfter ? '1' : '0';
     } catch (e) { /* */ }
   }
 
@@ -2930,7 +3178,8 @@
     var body = {
       time: $('ttsTime').value || '07:30',
       enabled: $('ttsEnabled').value === '1',
-      prefix: $('ttsPrefix').value.trim()
+      prefix: $('ttsPrefix').value.trim(),
+      playAfter: $('ttsPlayAfter') ? $('ttsPlayAfter').value === '1' : false
     };
     if (v) {
       var p = v.split('|');
@@ -2963,6 +3212,72 @@
     } catch (e) { msg('播报失败: ' + e.message, 'err'); }
   });
 
+  // ---------- AI 智能整理（设置） ----------
+  async function loadAiCfg() {
+    try {
+      var r = await api('GET', '/config');
+      var a = (r.data && r.data.ai) || {};
+      if ($('aiEnabled')) $('aiEnabled').value = a.enabled ? '1' : '0';
+      if ($('aiUrl')) $('aiUrl').value = a.url || 'http://127.0.0.1:3065/v1';
+      if ($('aiKey')) $('aiKey').value = a.key || '';
+      if ($('aiModel')) $('aiModel').value = a.model || 'deepseek-v4.1-flash-0930';
+      var st = await loadAiStatus(true);
+      renderAiStat(st);
+    } catch (e) { /* */ }
+  }
+
+  function renderAiStat(st) {
+    var el = $('aiStat');
+    if (!el) return;
+    var d = (st && st.data) || {};
+    if (d.ready) el.innerHTML = '<span class="ok">● 已启用</span> · 已缓存 ' + (d.cached || 0) + ' 本书的速览';
+    else if (d.enabled && !d.hasKey) el.innerHTML = '<span class="err">○ 已开启但没填密钥</span>';
+    else if (d.enabled) el.innerHTML = '<span class="err">○ 配置不完整</span>';
+    else el.innerHTML = '<span class="muted">○ 未启用（填好网关与密钥后开启即可）</span>';
+  }
+
+  if ($('btnAiSave')) $('btnAiSave').addEventListener('click', async function () {
+    var body = {
+      enabled: $('aiEnabled').value === '1',
+      url: ($('aiUrl').value || '').trim() || 'http://127.0.0.1:3065/v1',
+      key: ($('aiKey').value || '').trim(),
+      model: ($('aiModel').value || '').trim() || 'deepseek-v4.1-flash-0930'
+    };
+    if (body.enabled && !body.key) { msg('开启前请先填 API 密钥', 'err'); return; }
+    try {
+      await api('POST', '/config', { ai: body });
+      aiStatus = { ready: false, checked: false };
+      msg('✅ AI 设置已保存', 'ok');
+      renderAiStat(await loadAiStatus(true));
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  });
+
+  if ($('btnAiTest')) $('btnAiTest').addEventListener('click', async function () {
+    var out = $('aiTestOut');
+    out.innerHTML = '<span class="muted">正在连网关…</span>';
+    try {
+      var r = await api('POST', '/ai/test', {});
+      if (r && r.success !== false) {
+        out.innerHTML = '<span class="ok">✓ 通了</span> · ' + escHtml((r.data && r.data.reply) || '') +
+          ' · ' + ((r.data && r.data.ms) || 0) + ' ms · ' + escHtml((r.data && r.data.model) || '');
+      } else {
+        out.innerHTML = '<span class="err">✗ ' + escHtml((r && r.error) || '失败') + '</span>';
+      }
+    } catch (e) { out.innerHTML = '<span class="err">✗ ' + escHtml(e.message) + '</span>'; }
+  });
+
+  if ($('btnAiClearCache')) $('btnAiClearCache').addEventListener('click', async function () {
+    if (!confirm('清空所有 AI 速览缓存？下次打开书会重新生成（会重新消耗额度）。')) return;
+    try {
+      // 借 /ai/status 拿到数量只是显示用；真正清空走一个轻量接口
+      var r = await api('POST', '/ai/clear', {});
+      msg(r && r.success !== false ? 'AI 缓存已清空' : ('❌ ' + ((r && r.error) || '失败')), r && r.success !== false ? 'ok' : 'err');
+      renderAiStat(await loadAiStatus(true));
+    } catch (e) {
+      msg('清空失败: ' + e.message, 'err');
+    }
+  });
+
   async function poll() {
     try {
       var r = await api('GET', '/status');
@@ -2992,12 +3307,14 @@
     loadAuto();
     loadProgCfg();
     loadTts();
+    loadAiCfg();
     loadSubs();
     loadImported();
     renderIdleChips();
     poll();
     pullRecent();
     renderTimeline();
+    loadDashboard();
     abTip();
     document.querySelectorAll('.tlBtn').forEach(function (b) {
       b.classList.toggle('active', Number(b.getAttribute('data-days')) === tlDays);
