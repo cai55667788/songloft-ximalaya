@@ -180,16 +180,6 @@
     .cmpgrid .cell { padding: 6px 8px; background: var(--bg); border-radius: 8px; }
     .cmpgrid .cell.win { outline: 1.5px solid #16a34a; }
     .cmpgrid .lb { text-align: center; font-size: 11px; color: var(--muted); }
-    .cmpverdict { margin-top: 10px; padding: 9px 11px; background: var(--bg); border-left: 3px solid var(--accent, #3b82f6); border-radius: 6px; font-size: 13px; line-height: 1.6; }
-    /* AI 分集简介 / 精彩片段 */
-    .blurb { color: var(--muted); font-size: 12px; margin-top: 2px; }
-    .hlitem { display: flex; gap: 9px; align-items: flex-start; padding: 7px 0; border-bottom: 1px dashed var(--border); cursor: pointer; }
-    .hlitem:last-child { border-bottom: none; }
-    .hlitem:hover { background: var(--bg); }
-    .hlitem .ix { flex: 0 0 34px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-    .hlitem .tt2 { flex: 1; font-size: 13px; }
-    .hlitem .why { color: var(--accent, #3b82f6); font-size: 12px; }
-    .aitip { font-size: 12px; color: var(--muted); margin-top: 8px; }
     /* 搜索历史 */
     .hsrow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
     .hsrow .hslb { font-size: 11px; color: var(--muted); }
@@ -258,24 +248,6 @@
     .tlitem .tlb { flex: 1; min-width: 0; cursor: pointer; }
     .tlitem .tln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tlitem .tls { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    /* AI 速览 */
-    .aicard { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: var(--bg); }
-    .aihead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
-    .aihead .aititle { font-size: 13px; font-weight: 600; }
-    .aihead .small-txt { flex: 1; min-width: 40px; }
-    .ai-sum { font-size: 13px; line-height: 1.6; }
-    .ai-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 2px; }
-    .ai-tag { padding: 1px 8px; border-radius: 999px; font-size: 11px; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); }
-    .ai-fit { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .ai-themes { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px; }
-    .ai-theme { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; }
-    .ai-theme .aitn { flex: none; color: var(--accent); font-weight: 600; min-width: 56px; }
-    .ai-theme .airg { flex: none; color: var(--muted); min-width: 62px; font-variant-numeric: tabular-nums; }
-    .ai-theme .ainote { flex: 1; min-width: 0; }
-    .aiask { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
-    .aiask input { flex: 1; font-size: 13px; padding: 6px 10px; }
-    .aians { margin-top: 8px; font-size: 13px; line-height: 1.6; white-space: pre-wrap;
-      background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
     /* 听书习惯仪表盘 */
     .dashrow { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
     .dash { flex: 1; min-width: 84px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; text-align: center; }
@@ -421,32 +393,13 @@
   .grpname:hover { color: var(--accent); }
   .grpdate { flex: none; font-variant-numeric: tabular-nums; }
 
-  /* ---------- AI 推荐 / 跨专辑问答 / 主题分段 ---------- */
-  .recnow { font-size: 13px; line-height: 1.55; padding: 9px 11px; border-radius: 9px;
-            background: color-mix(in srgb, var(--accent) 14%, transparent);
-            border-left: 3px solid var(--accent); }
-  .recrow { display: flex; flex-wrap: wrap; gap: 7px; }
-  .reckw { display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
-           text-align: left; padding: 7px 11px !important; line-height: 1.35; }
-  .reckw b { font-size: 12.5px; }
-  .reckw span { font-size: 10.5px; color: var(--muted); font-weight: 400; }
-
-  .crossans { font-size: 13px; line-height: 1.6; padding: 9px 11px; border-radius: 9px;
-              background: rgba(128,128,128,.09); white-space: pre-wrap; word-break: break-word; }
-
-  .themrow { padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.14); }
-  .themrow:last-child { border-bottom: none; }
-  .thhead { display: flex; align-items: center; gap: 8px; }
-  .thname { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.16.0</span>
+    <span class="ver" id="ver">v0.17.0</span>
   </div>
 
   <div class="tabs">
@@ -515,40 +468,6 @@
       <div class="intro" id="dIntro"></div>
       <span class="link" id="dIntroToggle">展开简介</span>
 
-      <!-- AI 速览 -->
-      <div class="aicard hide" id="aiCard">
-        <div class="aihead">
-          <span class="aititle">✨ AI 速览</span>
-          <span class="muted small-txt" id="aiMeta"></span>
-          <button class="small plain" id="btnAiGen">生成</button>
-          <button class="small plain hide" id="btnAiRe">重新生成</button>
-        </div>
-        <div id="aiBody"></div>
-        <div class="aiask">
-          <input type="text" id="aiQ" placeholder="问这本书：适合睡前听吗？大概讲什么？" />
-          <button class="small" id="btnAiAsk">问</button>
-        </div>
-        <div class="aians hide" id="aiAns"></div>
-      </div>
-      <!-- AI 精彩片段 -->
-      <div class="aicard hide" id="aiHlCard">
-        <div class="aihead">
-          <span class="aititle">🎯 精彩片段</span>
-          <span class="muted small-txt" id="hlMeta"></span>
-          <button class="small plain" id="btnHlGen">推荐</button>
-        </div>
-        <div id="hlBody"></div>
-      </div>
-      <!-- AI 按主题切段（长书才有意义） -->
-      <div class="aicard hide" id="aiThemeCard">
-        <div class="aihead">
-          <span class="aititle">🧩 按主题分段</span>
-          <span class="muted small-txt" id="themeMeta"></span>
-          <button class="small plain" id="btnThemeGen">切分</button>
-        </div>
-        <div id="themeBody"></div>
-      </div>
-
       <div class="btns" id="dResumeBar" style="display:none;">
         <button class="small" id="btnResume">▶ 继续听</button>
         <button class="small plain" id="btnFromStart">从头听</button>
@@ -559,7 +478,6 @@
           <input type="checkbox" id="ckUnheard" style="accent-color:var(--accent)" /> 只看未听
         </label>
         <button class="small plain" id="btnOrder" title="按集数正序 / 倒序排列">↓ 倒序</button>
-        <button class="small plain" id="btnBlurbs" title="让 AI 给每集写一句话简介，一眼看出这集讲什么">✨ 分集简介</button>
         <span class="muted small-txt" id="dProgStat"></span>
       </div>
       <div class="btns">
@@ -588,32 +506,6 @@
 
   <!-- ===== 收听（最近收听 / 继续听） ===== -->
   <section id="tab-recent" class="hide">
-    <div class="card">
-      <h2>🧭 下一本听什么</h2>
-      <div class="muted small-txt" id="recStat">让 AI 看一眼你在听什么、订阅了什么，给三个方向。</div>
-      <div class="btns">
-        <button class="small plain" id="btnRecLoad">给我推荐</button>
-        <button class="small plain" id="btnRecRefresh">重新算</button>
-      </div>
-      <div id="recBody" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>💬 问我手上的书</h2>
-      <div class="muted small-txt">「哪些适合开车听」「有没有讲明清的」「哪本还没听完」，在订阅和导入的书里找答案。</div>
-      <div class="row" style="margin-top:8px;">
-        <div><input type="text" id="crossQ" placeholder="比如：我手上有没有适合睡前听的？" /></div>
-        <div style="flex:none"><button class="small" id="btnCrossAsk" style="padding:9px 16px">问</button></div>
-      </div>
-      <div class="chips" id="crossChips">
-        <span class="chip" data-q="我手上有没有适合开车听的？">适合开车听</span>
-        <span class="chip" data-q="哪本书我还没听完？">还没听完的</span>
-        <span class="chip" data-q="我这些书里有讲历史的吗？">有讲历史的吗</span>
-        <span class="chip" data-q="推荐一本短的、能几天听完的">来本短的</span>
-      </div>
-      <div id="crossBody" style="margin-top:8px;"></div>
-    </div>
-
     <div class="card">
       <h2>🎧 最近收听</h2>
       <div class="muted small-txt" id="recentStat">还没有收听记录。搜一张专辑点开，随便听一集就会出现在这里。</div>
@@ -888,33 +780,11 @@
     </div>
 
     <div class="card">
-      <h2>✨ AI 智能整理</h2>
-      <div class="muted small-txt" id="aiStat">检查中…</div>
-      <div class="row">
-        <div><label>开关</label>
-          <select id="aiEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
-        </div>
-        <div><label>模型</label><input type="text" id="aiModel" placeholder="deepseek-v4.1-flash" /></div>
-      </div>
-      <label>网关地址（OpenAI 兼容，填到 /v1 为止）</label>
-      <input type="text" id="aiUrl" placeholder="http://127.0.0.1:3065/v1" />
-      <label>API 密钥</label>
-      <input type="text" id="aiKey" placeholder="sk-..." />
-      <div class="btns">
-        <button class="small" id="btnAiSave">保存</button>
-        <button class="small plain" id="btnAiTest">测试连通</button>
-        <button class="small ghost" id="btnAiClearCache">清空 AI 缓存</button>
-      </div>
-      <div class="muted small-txt" id="aiTestOut" style="margin-top:8px;"></div>
-      <div class="muted small-txt" style="margin-top:4px;">开启后：专辑详情页会多出「AI 速览」（一句话简介、内容标签、全书主题分段）和「问这本书」（基于简介与标题作答，不做联网检索）；书签也能交给 AI 归类。结果按专辑缓存，同一本不重复花钱。</div>
-    </div>
-
-    <div class="card">
       <h2>🩺 自检</h2>
       <div class="muted small-txt" id="scSummary">检查中…</div>
       <div class="btns">
         <button class="small plain" id="btnScRun">重新检查</button>
-        <button class="small plain" id="btnScDeep" title="额外验证一次单集播放地址与 AI 连通">深度检查</button>
+        <button class="small plain" id="btnScDeep" title="额外验证一次单集播放地址">深度检查</button>
       </div>
       <div id="scBody" style="margin-top:8px;"></div>
     </div>
@@ -1091,7 +961,6 @@
     <div class="qfoot">
       <button class="small plain" id="bmAddNow" title="在当前播放位置新建书签">＋ 在当前位置打书签</button>
       <button class="small plain" id="bmOnlyAlbum" title="只看当前专辑的书签">仅当前专辑</button>
-      <button class="small plain" id="bmAi" title="让 AI 把书签按 干货/情节/笑点/疑问/待复查 归类">✨ AI 归类</button>
     </div>
   </div>
 </div>
@@ -1134,6 +1003,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.16.0"></script>
+<script src="static/app.js?v=0.17.0"></script>
 </body>
 </html>
