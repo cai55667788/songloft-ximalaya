@@ -1,0 +1,1348 @@
+/* 喜马拉雅插件 v0.7.0 — 设置页脚本
+ * 优先用宿主注入的 SongloftPlugin（apiGet/apiPost/apiDelete 自动鉴权），独立打开回退 ?token=。 */
+(function () {
+  'use strict';
+
+  // localStorage 在部分宿主环境（沙箱 iframe / 鸿蒙 webview 等）会直接抛
+  // SecurityError —— 任何裸调用都会炸掉整个脚本，必须全部走安全封装。
+  function sGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
+  function sSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* */ } }
+
+  // 全局错误可视化：任何未捕获异常都显示在页面上，避免「页面点了没反应」
+  window.addEventListener('error', function (ev) {
+    try {
+      var d = document.createElement('div');
+      d.className = 'err';
+      d.style.cssText = 'position:fixed;left:10px;right:10px;bottom:70px;z-index:9999;background:var(--card);border:1px solid var(--err);border-radius:8px;padding:8px 10px;font-size:12px;';
+      d.textContent = '脚本错误: ' + (ev.message || 'unknown');
+      document.body.appendChild(d);
+      setTimeout(function () { d.remove(); }, 8000);
+    } catch (e) { /* */ }
+  });
+
+  var sp = window.SongloftPlugin || null;
+  var qs = new URLSearchParams(location.search);
+  // token 来源优先级：?token= > xm_token > 宿主注入的 songloft-auth（host 脚本会把 ?access_token 收进去）
+  var token = qs.get('token') || sGet('xm_token') || '';
+  if (!token) {
+    try {
+      var au = JSON.parse(sGet('songloft-auth') || 'null');
+      if (au && au.accessToken) token = au.accessToken;
+    } catch (e) { /* */ }
+  }
+  var API_BASE = (location.pathname.indexOf('/static/') > 0
+    ? location.pathname.slice(0, location.pathname.indexOf('/static/'))
+    : location.pathname.replace(/\/+$/, ''));
+
+  function bare(p) {
+    return p.replace(/^\/api\/v1\/jsplugin\/ximalaya/, '');
+  }
+
+  function headers() {
+    var h = { 'Content-Type': 'application/json' };
+    if (token) h['Authorization'] = 'Bearer ' + token;
+    return h;
+  }
+
+  async function api(method, path, body) {
+    if (sp) {
+      if (method === 'GET' && sp.apiGet) return sp.apiGet(path);
+      if (method === 'POST' && sp.apiPost) return sp.apiPost(path, body === undefined ? {} : body);
+      if (method === 'DELETE' && sp.apiDelete) return sp.apiDelete(path);
+      if (method === 'PUT' && sp.apiPut) return sp.apiPut(path, body === undefined ? {} : body);
+    }
+    var resp = await fetch(API_BASE + path, {
+      method: method, headers: headers(),
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    var data = await resp.json().catch(function () { return {}; });
+    if (!resp.ok && data.error) throw new Error(data.error);
+    return data;
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+  function msg(text, cls) {
+    var el = $('jobText');
+    $('jobBar').classList.add('show');
+    el.className = 'txt ' + (cls || '');
+    el.textContent = text;
+    if (!jobActive) {
+      $('jobFill').style.width = '100%';
+      setTimeout(function () { if (!jobActive) $('jobBar').classList.remove('show'); }, 4000);
+    }
+  }
+  function esc(s) { return String(s == null ? '' : s); }
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmtPlay(n) {
+    n = Number(n) || 0;
+    if (n >= 100000000) return (n / 100000000).toFixed(1) + '亿';
+    if (n >= 10000) return (n / 10000).toFixed(1) + '万';
+    return String(n);
+  }
+  function fmtDur(sec) {
+    sec = Number(sec) || 0;
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // ---------- 标签页 ----------
+  document.querySelectorAll('.tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.tab').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      ['search', 'subs', 'lib', 'set'].forEach(function (t) {
+        $('tab-' + t).classList.toggle('hide', t !== btn.dataset.tab);
+      });
+      if (btn.dataset.tab === 'subs') {
+        loadSubs();
+        if (!meLoaded) loadMySubs(false);
+      }
+      if (btn.dataset.tab === 'lib') loadImported();
+    });
+  });
+
+  // ---------- 登录 ----------
+  function renderLogin(d) {
+    var el = $('loginStatus');
+    d = d || {};
+    if (!d.loggedIn) {
+      el.innerHTML = '<span class="muted">○ 未登录（仅免费内容可用）</span>';
+      return;
+    }
+    var bits = ['<span class="ok">● 已登录</span>'];
+    if (d.user && (d.user.nickname || d.user.uid)) {
+      bits.push('<b>' + esc(d.user.nickname || d.user.uid) + '</b>');
+      if (d.user.uid) bits.push('<span class="muted">uid ' + esc(d.user.uid) + '</span>');
+    } else if (d.valid === false) {
+      bits.push('<span class="err">登录态无效' + (d.error ? '：' + esc(d.error) : '') + '</span>');
+    }
+    bits.push('<span class="muted">保存于 ' + esc(d.savedAt || '') + ' · ' + esc(d.mask || '') + '</span>');
+    if (d.cookieSane === false) bits.push('<span class="err">（' + esc(d.cookieHint || 'Cookie 格式可疑') + '）</span>');
+    el.innerHTML = bits.join(' ');
+  }
+
+  async function loadLogin() {
+    var el = $('loginStatus');
+    try {
+      var r = await api('GET', '/login');
+      var d = r.data || {};
+      renderLogin(d);
+      // 已登录则顺带验证一次（带 user 信息展示）
+      if (d.loggedIn) {
+        try {
+          var m = await api('GET', '/me');
+          var md = (m && m.data) || {};
+          renderLogin({
+            loggedIn: true, valid: md.valid, user: md.user, error: md.error,
+            savedAt: d.savedAt, mask: d.mask, cookieSane: d.cookieSane, cookieHint: d.cookieHint
+          });
+        } catch (e2) { /* 忽略，保留基础展示 */ }
+      }
+    } catch (e) {
+      el.innerHTML = '<span class="err">状态加载失败: ' + esc(e.message) + '</span>';
+    }
+  }
+
+  $('btnLogin').addEventListener('click', async function () {
+    var ck = $('cookieInput').value.trim();
+    if (!ck) { msg('请先粘贴 Cookie', 'err'); return; }
+    if (/^U2FsdGVkX1/.test(ck)) {
+      msg('❌ 这串看起来是加密数据（U2Fsd…），不是 Cookie。请按上面的方式重新复制', 'err');
+      return;
+    }
+    $('btnLogin').disabled = true;
+    msg('⏳ 已发送 Cookie，正在验证登录态…');
+    try {
+      var r = await api('POST', '/login', { cookie: ck });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      var d = r.data || {};
+      if (d.valid) {
+        $('cookieInput').value = '';
+        msg('✅ ' + (d.message || '登录成功'), 'ok');
+      } else {
+        msg('⚠️ ' + (d.message || '已保存但验证未通过'), 'err');
+      }
+      loadLogin();
+      loadMySubs(true);
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+    finally { $('btnLogin').disabled = false; }
+  });
+
+  $('btnVerify').addEventListener('click', async function () {
+    var ck = $('cookieInput').value.trim();
+    $('btnVerify').disabled = true;
+    msg('⏳ 正在验证登录态…');
+    try {
+      var r = await api('POST', '/login/verify', ck ? { cookie: ck } : {});
+      var d = (r && r.data) || {};
+      if (d.valid) {
+        msg('✅ 登录态有效：' + ((d.user && d.user.nickname) || (d.user && d.user.uid) || '已登录'), 'ok');
+      } else {
+        msg('❌ 登录态无效：' + (d.error || '未知原因'), 'err');
+      }
+    } catch (e) { msg('验证失败: ' + e.message, 'err'); }
+    finally { $('btnVerify').disabled = false; loadLogin(); }
+  });
+
+  $('btnLogout').addEventListener('click', async function () {
+    try { await api('POST', '/logout', {}); msg('已退出登录'); loadLogin(); }
+    catch (e) { msg('退出失败: ' + e.message, 'err'); }
+  });
+
+  // ---------- 扫码登录 ----------
+  var qrId = '', qrTimer = null, qrTries = 0;
+
+  function qrStop() { if (qrTimer) { clearInterval(qrTimer); qrTimer = null; } }
+  function qrSetState(html) { $('qrState').innerHTML = html || ''; }
+  function qrMask(show, text) {
+    var m = $('qrMask');
+    if (show) { $('qrMaskTxt').textContent = text || '二维码已过期'; m.style.display = 'flex'; }
+    else { m.style.display = 'none'; }
+  }
+
+  async function qrStart() {
+    qrStop();
+    qrId = '';
+    qrTries = 0;
+    qrMask(false);
+    $('qrImg').style.display = 'none';
+    $('qrPlaceholder').style.display = '';
+    $('qrPlaceholder').innerHTML = '正在生成<br>二维码…';
+    $('btnQr').disabled = true;
+    qrSetState('<span class="muted">正在向喜马拉雅申请二维码…</span>');
+    try {
+      var r = await api('GET', '/qr/new');
+      if (r && r.success === false) throw new Error(r.error || '生成失败');
+      var d = (r && r.data) || {};
+      if (!d.qrId || !d.image) throw new Error(d.imgError || '没有拿到二维码图片');
+      qrId = d.qrId;
+      $('qrImg').src = d.image;
+      $('qrImg').style.display = '';
+      $('qrPlaceholder').style.display = 'none';
+      $('btnQr').textContent = '换一张';
+      qrSetState('<span class="muted">等待扫码…（约 4 分钟内有效）</span>');
+      qrTimer = setInterval(qrPoll, 2000);
+    } catch (e) {
+      $('qrPlaceholder').innerHTML = '生成失败';
+      qrSetState('<span class="err">' + esc(e.message) + '</span>');
+    } finally { $('btnQr').disabled = false; }
+  }
+
+  async function qrPoll() {
+    if (!qrId) { qrStop(); return; }
+    qrTries += 1;
+    if (qrTries > 150) { qrStop(); qrMask(true); return; }
+    try {
+      var r = await api('GET', '/qr/check?qrId=' + encodeURIComponent(qrId));
+      if (r && r.success === false) {
+        qrSetState('<span class="err">检查失败：' + esc(r.error) + '</span>');
+        return;
+      }
+      var d = (r && r.data) || {};
+      if (d.state === 'ok') {
+        qrStop();
+        qrId = '';
+        $('btnQr').textContent = '重新扫码';
+        if (d.valid === false) {
+          qrSetState('<span class="err">已拿到登录凭据，但验证未通过：' + esc(d.error || '') + '</span>');
+        } else {
+          qrSetState('<span class="ok">✅ 登录成功' + (d.user && d.user.nickname ? '：' + esc(d.user.nickname) : '') + '</span>');
+          msg('✅ 扫码登录成功' + (d.user && d.user.nickname ? '：' + esc(d.user.nickname) : ''), 'ok');
+        }
+        loadLogin();
+        loadMySubs(true);
+      } else if (d.state === 'scanned') {
+        qrSetState('<span style="color:#e6a23c;">已扫码，请在手机上点「确认登录」</span>');
+      } else if (d.state === 'expired') {
+        qrStop();
+        qrMask(true, '二维码已过期');
+        qrSetState('<span class="muted">二维码已过期，点「刷新二维码」重新获取</span>');
+      } else if (d.state === 'error') {
+        qrStop();
+        qrSetState('<span class="err">状态查询异常（接口可能变了）：' + esc(String(d.raw || '').replace(/<[^>]+>/g, ' ').slice(0, 100)) + '</span>');
+      }
+    } catch (e) { /* 单次失败继续轮询 */ }
+  }
+
+  $('btnQr').addEventListener('click', qrStart);
+  $('btnQrRefresh').addEventListener('click', qrStart);
+
+  // ---------- 设备 ----------
+  var deviceSaved = '';
+  async function loadDevices() {
+    try {
+      var c = await api('GET', '/config');
+      var dv = (c && c.data && c.data.device) || {};
+      deviceSaved = dv.account_id && dv.device_id ? (dv.account_id + '|' + dv.device_id + '|' + (dv.device_name || '')) : '';
+    } catch (e) { /* */ }
+    try {
+      var d = await api('GET', '/devices');
+      var sel = $('device');
+      sel.innerHTML = '<option value="">（请选择音箱）</option>';
+      var accounts = (d && d.data && d.data.data) || (d && d.data) || [];
+      if (Array.isArray(accounts)) {
+        accounts.forEach(function (acc) {
+          (acc.devices || []).forEach(function (dev) {
+            var name = dev.device_name || dev.name || dev.alias || dev.deviceID || '音箱';
+            var did = dev.deviceID || dev.device_id || dev.id || '';
+            var opt = document.createElement('option');
+            opt.value = acc.account_id + '|' + did + '|' + name;
+            opt.textContent = name + '（' + (acc.account_name || acc.account_id) + '）';
+            if (opt.value === deviceSaved) opt.selected = true;
+            sel.appendChild(opt);
+          });
+        });
+      }
+    } catch (e) { /* */ }
+  }
+  $('device').addEventListener('change', async function () {
+    var v = $('device').value;
+    if (!v) return;
+    var p = v.split('|');
+    deviceSaved = v;
+    try { await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } }); } catch (e) { /* */ }
+  });
+
+  async function playPlaylist(playlistId, name) {
+    var dv = $('device').value || deviceSaved;
+    if (!dv) { msg('请先在「设置」里选择音箱', 'err'); return; }
+    $('device').value = dv;
+    var p = dv.split('|');
+    try {
+      await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } });
+      var r = await api('POST', '/play', {
+        account_id: p[0], device_id: p[1], playlist_id: playlistId, mode: $('mode').value
+      });
+      msg(r.success ? '▶ 已在音箱播放《' + name + '》' : '❌ ' + r.error, r.success ? 'ok' : 'err');
+    } catch (e) { msg('播放失败: ' + e.message, 'err'); }
+  }
+
+  // ---------- 播放器（续播 / 连播 / 倍速 / 睡眠定时） ----------
+  var queue = [];        // [{trackId, index, title, albumId, albumName}]
+  var qi = -1;
+  var pendingSeek = null;
+  var RATE_KEY = 'xm_rate';
+  function posKey(id) { return 'xm_pos_' + id; }
+  function lastKey(aid) { return 'xm_last_' + aid; }
+
+  function fmtTime(sec) {
+    sec = Math.max(0, Math.round(Number(sec) || 0));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    var mm = (h && m < 10 ? '0' : '') + m;
+    return (h ? h + ':' : '') + mm + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function getPos(trackId) {
+    try { return JSON.parse(sGet(posKey(trackId)) || 'null'); } catch (e) { return null; }
+  }
+
+  var curPlayingId = '';  // 已成功加载音频的集，避免切集瞬间把旧进度写到新集
+
+  function savePos(trackId, time, dur) {
+    if (!trackId || !dur || dur < 30) return;
+    if (!curPlayingId || String(curPlayingId) !== String(trackId)) return;
+    if (!(time > 3)) return;
+    var o = { t: Math.round(time), d: Math.round(dur), at: Date.now() };
+    sSet(posKey(trackId), JSON.stringify(o));
+    var c = queue[qi];
+    if (c && c.albumId) {
+      sSet(lastKey(c.albumId), JSON.stringify({
+        trackId: trackId, index: c.index, title: c.title, t: o.t, d: o.d, at: o.at
+      }));
+    }
+  }
+
+  function updateProg() {
+    var a = $('audio');
+    var d = a.duration || 0, t = a.currentTime || 0;
+    if (!d) { $('pProg').textContent = '—'; return; }
+    $('pProg').textContent = fmtTime(t) + ' / ' + fmtTime(d) + ' · 剩 ' + fmtTime(d - t);
+  }
+
+  async function playAt(idx) {
+    if (idx < 0 || idx >= queue.length) return;
+    qi = idx;
+    curPlayingId = '';
+    var t = queue[idx];
+    var label = (t.index ? t.index + '. ' : '') + t.title;
+    $('player').classList.add('show');
+    if (document.body) document.body.classList.add('has-player');
+    $('pTitle').textContent = '载入中… ' + label;
+    try {
+      var r = await api('GET', '/track/' + t.trackId + '/url');
+      if (!r || r.success === false) { $('pTitle').textContent = '❌ ' + ((r && r.error) || '取不到播放地址'); return; }
+      var a = $('audio');
+      a.src = r.data.url;
+      $('pTitle').textContent = label;
+      a.playbackRate = Number(sGet(RATE_KEY) || 1) || 1;
+      pendingSeek = getPos(t.trackId);
+      a.play().catch(function () { /* 浏览器要求先有用户交互 */ });
+      if (queue.length > 1) $('pProg').textContent = '第 ' + (idx + 1) + ' / ' + queue.length + ' 集';
+    } catch (e) { $('pTitle').textContent = '试听失败: ' + e.message; }
+  }
+
+  function playQueue(list, idx, album) {
+    queue = (list || []).map(function (t) {
+      return {
+        trackId: t.trackId, index: t.index, title: t.title,
+        albumId: (album && album.id) || '', albumName: (album && album.name) || ''
+      };
+    });
+    playAt(idx);
+  }
+
+  $('audio').addEventListener('loadedmetadata', function () {
+    var a = this;
+    if (pendingSeek && pendingSeek.t > 10 && pendingSeek.t < (a.duration || 1e9) - 15) {
+      a.currentTime = pendingSeek.t;
+      msg('⏱ 从 ' + fmtTime(pendingSeek.t) + ' 续播');
+    }
+    pendingSeek = null;
+    if (qi >= 0 && queue[qi]) curPlayingId = queue[qi].trackId;
+    updateProg();
+  });
+
+  var lastSaveAt = 0;
+  $('audio').addEventListener('timeupdate', function () {
+    updateProg();
+    var now = Date.now();
+    if (now - lastSaveAt < 5000 || qi < 0) return;
+    lastSaveAt = now;
+    savePos(queue[qi].trackId, this.currentTime, this.duration);
+  });
+
+  $('audio').addEventListener('ended', function () {
+    var a = this;
+    if (qi >= 0) savePos(queue[qi].trackId, a.duration, a.duration);
+    if (qi >= 0 && qi + 1 < queue.length) playAt(qi + 1);
+    else msg('已播完本页 ' + queue.length + ' 集');
+  });
+
+  $('pPrev').addEventListener('click', function () { if (qi > 0) playAt(qi - 1); });
+  $('pNext').addEventListener('click', function () { if (qi + 1 < queue.length) playAt(qi + 1); });
+
+  // 倍速（跨会话记忆）
+  var rateSel = $('pRate');
+  var savedRate = sGet(RATE_KEY);
+  if (savedRate) rateSel.value = savedRate;
+  rateSel.addEventListener('change', function () {
+    var v = Number(this.value) || 1;
+    $('audio').playbackRate = v;
+    sSet(RATE_KEY, String(v));
+    msg('倍速 ' + v + 'x');
+  });
+
+  // 睡眠定时
+  var sleepTimer = null, sleepAt = 0;
+  $('pSleep').addEventListener('change', function () {
+    var min = Number(this.value) || 0;
+    if (sleepTimer) { clearInterval(sleepTimer); sleepTimer = null; }
+    sleepAt = min ? Date.now() + min * 60000 : 0;
+    if (!min) { $('pSleepTip').textContent = ''; return; }
+    $('pSleepTip').textContent = '剩 ' + min + ':00';
+    sleepTimer = setInterval(function () {
+      var left = sleepAt - Date.now();
+      if (left <= 0) {
+        clearInterval(sleepTimer); sleepTimer = null;
+        $('audio').pause();
+        $('pSleep').value = '0';
+        $('pSleepTip').textContent = '已定时停止';
+        sleepAt = 0;
+        return;
+      }
+      var m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
+      $('pSleepTip').textContent = '剩 ' + m + ':' + (s < 10 ? '0' : '') + s;
+    }, 1000);
+  });
+
+  $('pClose').addEventListener('click', function () {
+    var a = $('audio');
+    if (qi >= 0) savePos(queue[qi].trackId, a.currentTime, a.duration);
+    a.pause();
+    a.removeAttribute('src');
+    $('player').classList.remove('show');
+    if (document.body) document.body.classList.remove('has-player');
+    qi = -1;
+    queue = [];
+    curPlayingId = '';
+  });
+
+  // 快捷键：空格 播放/暂停，← → 前后 10 秒
+  document.addEventListener('keydown', function (e) {
+    var tag = (e.target && e.target.tagName) || '';
+    if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
+    if (!$('player').classList.contains('show')) return;
+    var a = $('audio');
+    if (e.code === 'Space' || e.key === ' ') {
+      e.preventDefault();
+      if (a.paused) a.play().catch(function () { }); else a.pause();
+    } else if (e.code === 'ArrowLeft') {
+      e.preventDefault();
+      a.currentTime = Math.max(0, (a.currentTime || 0) - 10);
+    } else if (e.code === 'ArrowRight') {
+      e.preventDefault();
+      a.currentTime = Math.min(a.duration || 1e9, (a.currentTime || 0) + 10);
+    }
+  });
+
+  // ---------- 搜索 ----------
+  var DEFAULT_KWS = ['郭德纲', '三国演义', '睡前故事', '财经', '历史', '英语听力'];
+  var results = [];
+  var selected = {};
+
+  function loadHistory() {
+    try { return JSON.parse(sGet('xm_kw_hist') || '[]'); } catch (e) { return []; }
+  }
+  function pushHistory(kw) {
+    var h = loadHistory().filter(function (x) { return x !== kw; });
+    h.unshift(kw);
+    sSet('xm_kw_hist', JSON.stringify(h.slice(0, 6)));
+  }
+  function renderChips(kws, onPick) {
+    var box = $('kwChips');
+    box.innerHTML = '';
+    (kws || []).slice(0, 10).forEach(function (k) {
+      if (!k) return;
+      var c = document.createElement('span');
+      c.className = 'chip';
+      c.textContent = k;
+      c.addEventListener('click', function () { onPick(k); });
+      box.appendChild(c);
+    });
+  }
+  function renderIdleChips() {
+    var h = loadHistory();
+    renderChips(h.length ? h : DEFAULT_KWS, doSearch);
+  }
+
+  function updateSelBar() {
+    var ids = Object.keys(selected).filter(function (k) { return selected[k]; });
+    $('selBar').classList.toggle('hide', results.length === 0);
+    $('selCount').textContent = '已选 ' + ids.length;
+    $('btnImportSel').disabled = ids.length === 0;
+    $('ckAll').checked = results.length > 0 && ids.length === results.length;
+    $('mergeName').classList.toggle('hide', $('selMode').value !== 'merge');
+  }
+
+  function renderResults(list) {
+    var el = $('searchResults');
+    el.innerHTML = '';
+    results = list || [];
+    selected = {};
+    if (!results.length) { el.textContent = '没有找到相关专辑，换个关键词试试'; updateSelBar(); return; }
+
+    results.forEach(function (a) {
+      var item = document.createElement('div');
+      item.className = 'res-item';
+
+      var ck = document.createElement('input');
+      ck.type = 'checkbox';
+      ck.className = 'ck';
+      ck.addEventListener('change', function () { selected[a.id] = ck.checked; updateSelBar(); });
+
+      var img = document.createElement('img');
+      img.src = a.cover || '';
+      img.alt = '';
+      img.onerror = function () { img.style.visibility = 'hidden'; };
+
+      var body = document.createElement('div');
+      body.className = 'body';
+      var t = document.createElement('div');
+      t.className = 't';
+      t.textContent = a.title;
+      var m = document.createElement('div');
+      m.className = 'm';
+      var bits = [];
+      if (a.isPaid) bits.push('VIP/付费');
+      if (a.category) bits.push(a.category);
+      if (a.author) bits.push(a.author);
+      if (a.tracks) bits.push(a.tracks + '集');
+      if (a.play) bits.push(fmtPlay(a.play) + '播放');
+      m.textContent = bits.join(' · ');
+      body.appendChild(t); body.appendChild(m);
+      body.addEventListener('click', function () { openDetail(a.id); });
+
+      var acts = document.createElement('div');
+      acts.className = 'acts';
+      var bDetail = document.createElement('button');
+      bDetail.className = 'small plain';
+      bDetail.textContent = '详情';
+      bDetail.addEventListener('click', function () { openDetail(a.id); });
+      var bImport = document.createElement('button');
+      bImport.className = 'small';
+      bImport.textContent = '导入';
+      bImport.addEventListener('click', function () { doImport(a.id, a.title, a.tracks); });
+      acts.appendChild(bImport); acts.appendChild(bDetail);
+
+      item.appendChild(ck); item.appendChild(img); item.appendChild(body); item.appendChild(acts);
+      el.appendChild(item);
+    });
+    updateSelBar();
+  }
+
+  async function doSearch(kw) {
+    if (!kw) return;
+    $('kw').value = kw;
+    $('searchMeta').textContent = '搜索中…';
+    $('searchResults').innerHTML = '';
+    $('kwChips').innerHTML = '';
+    $('detailCard').classList.add('hide');
+    $('searchCard').classList.remove('hide');
+    try {
+      var r = await api('POST', '/search', { kw: kw });
+      if (r.success === false) { $('searchMeta').innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
+      pushHistory(kw);
+      renderChips(r.keywords, doSearch);
+      $('searchMeta').textContent = '共 ' + (r.count || 0) + ' 个结果' + (r.source ? ' · 来源：' + r.source : '');
+      renderResults(r.data || []);
+    } catch (e) { $('searchMeta').innerHTML = '<span class="err">搜索失败: ' + esc(e.message) + '</span>'; }
+  }
+
+  $('btnSearch').addEventListener('click', function () { doSearch($('kw').value.trim()); });
+  $('kw').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch($('kw').value.trim()); });
+  $('ckAll').addEventListener('change', async function () {
+    var on = $('ckAll').checked;
+    document.querySelectorAll('#searchResults .ck').forEach(function (c, i) {
+      c.checked = on;
+      if (results[i]) selected[results[i].id] = on;
+    });
+    updateSelBar();
+  });
+  $('selMode').addEventListener('change', updateSelBar);
+
+  $('btnImportSel').addEventListener('click', async function () {
+    var albums = results.filter(function (a) { return selected[a.id]; });
+    if (!albums.length) return;
+    var mode = $('selMode').value;
+    if (albums.length > 3 && !confirm('将导入 ' + albums.length + ' 张专辑，耗时可能较长，继续？')) return;
+    try {
+      var r = await api('POST', '/import-multi', {
+        albums: albums.map(function (a) { return { id: String(a.id), name: a.title }; }),
+        mode: mode,
+        name: $('mergeName').value.trim()
+      });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ ' + r.data.message);
+      startPolling();
+    } catch (e) { msg('导入失败: ' + e.message, 'err'); }
+  });
+
+  async function doImport(albumId, name, tracks) {
+    if (tracks > 400 && !confirm('《' + name + '》共 ' + tracks + ' 集，导入需要一些时间，继续？')) return;
+    try {
+      var r = await api('POST', '/import', { album_id: String(albumId), name: name || '' });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ 已开始导入《' + name + '》');
+      startPolling();
+    } catch (e) { msg('导入失败: ' + e.message, 'err'); }
+  }
+
+  // ---------- 详情 ----------
+  var cur = { id: '', page: 1, hasMore: false, detail: null };
+
+  async function openDetail(albumId) {
+    cur.id = String(albumId);
+    cur.page = 1;
+    $('searchCard').classList.add('hide');
+    $('detailCard').classList.remove('hide');
+    $('dName').textContent = '载入中…';
+    $('dMeta').textContent = '';
+    $('dSubState').textContent = '';
+    $('dIntro').textContent = '';
+    $('dTracks').innerHTML = '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    try {
+      var r = await api('GET', '/album/' + cur.id);
+      if (r.success === false) { $('dName').textContent = '❌ ' + r.error; return; }
+      var d = r.data;
+      cur.detail = d;
+      cur.hasMore = d.hasMore;
+      $('dCover').src = d.cover || '';
+      $('dName').textContent = d.name || ('专辑 ' + cur.id);
+      var bits = [];
+      if (d.author) bits.push(d.author);
+      if (d.category) bits.push(d.category);
+      if (d.playCount) bits.push(fmtPlay(d.playCount) + '播放');
+      if (d.subscribeCount) bits.push(fmtPlay(d.subscribeCount) + '订阅');
+      if (d.updateDate) bits.push('更新于 ' + d.updateDate);
+      if (d.isPaid) bits.push('VIP/付费');
+      if (d.isFinished) bits.push('已完结');
+      $('dMeta').textContent = bits.join(' · ');
+      $('dIntro').textContent = d.introFull || d.intro || '（无简介）';
+      $('dIntroToggle').textContent = '展开简介';
+      $('dIntro').classList.remove('open');
+      renderSubState(d.subscription, d.subscribed);
+      renderTracks(d.tracks || []);
+      renderResume();
+      $('dPage').textContent = '第 1 页';
+      $('dPrev').disabled = true;
+      $('dNext').disabled = !d.hasMore;
+    } catch (e) { $('dName').textContent = '加载失败: ' + e.message; }
+  }
+
+  function renderSubState(sub, subscribed) {
+    if (!subscribed || !sub) {
+      $('dSubState').innerHTML = '<span class="muted">未订阅（订阅后可一键追加新集）</span>';
+      $('btnSub').textContent = '订阅并跟进更新';
+      return;
+    }
+    var txt = '已订阅，收录到第 ' + (sub.lastIndex || 0) + ' 集';
+    if (sub.newCount) txt += ' · <span class="badge new">有 ' + sub.newCount + ' 集更新</span>';
+    if (sub.lastCheckAt) txt += ' · 上次检查 ' + esc(sub.lastCheckAt);
+    $('dSubState').innerHTML = '<span class="ok">●</span> ' + txt;
+    $('btnSub').textContent = '取消订阅';
+  }
+
+  var curTracks = [];
+  var curLast = null;
+
+  function renderTracks(tracks) {
+    var el = $('dTracks');
+    el.innerHTML = '';
+    curTracks = tracks || [];
+    if (!tracks.length) { el.innerHTML = '<span class="muted">没有曲目</span>'; return; }
+    var album = { id: cur.id, name: (cur.detail && cur.detail.name) || '' };
+    tracks.forEach(function (t, i) {
+      var d = document.createElement('div');
+      d.className = 'trk';
+      var no = document.createElement('span');
+      no.className = 'no';
+      no.textContent = t.index;
+      var tt = document.createElement('span');
+      tt.className = 'tt';
+      tt.textContent = t.title;
+      var du = document.createElement('span');
+      du.className = 'du';
+      du.textContent = fmtDur(t.duration);
+      d.appendChild(no); d.appendChild(tt);
+
+      var pos = getPos(t.trackId);
+      if (pos && pos.t) {
+        var mk = document.createElement('span');
+        mk.className = 'small-txt';
+        mk.style.marginRight = '8px';
+        var done = pos.d && pos.t >= pos.d - 20;
+        mk.textContent = done ? '✓ 听完' : '⏱ ' + fmtTime(pos.t);
+        mk.style.color = done ? 'var(--ok)' : 'var(--muted)';
+        d.appendChild(mk);
+      }
+
+      var pl = document.createElement('button');
+      pl.className = 'small plain';
+      pl.textContent = '▶';
+      d.appendChild(du);
+      d.appendChild(pl);
+      d.addEventListener('click', function () { playQueue(curTracks, i, album); });
+      el.appendChild(d);
+    });
+  }
+
+  function renderResume() {
+    var bar = $('dResumeBar');
+    try { curLast = JSON.parse(sGet(lastKey(cur.id)) || 'null'); } catch (e) { curLast = null; }
+
+    if (!curLast || !curLast.trackId) {
+      if (!curTracks.length) { bar.style.display = 'none'; return; }
+      bar.style.display = '';
+      $('btnResume').textContent = '▶ 从第 1 集开始听';
+      curLast = null;
+      $('btnFromStart').style.display = 'none';
+      $('btnClearPos').style.display = 'none';
+      return;
+    }
+
+    bar.style.display = '';
+    $('btnFromStart').style.display = '';
+    $('btnClearPos').style.display = '';
+
+    var done = curLast.d && curLast.t >= curLast.d - 5;
+    if (done) {
+      var nIdx = -1;
+      for (var i = 0; i < curTracks.length; i++) {
+        if (Number(curTracks[i].index) === Number(curLast.index) + 1) { nIdx = i; break; }
+      }
+      curLast._next = nIdx;
+      $('btnResume').textContent = nIdx >= 0
+        ? '▶ 接着听 第 ' + curTracks[nIdx].index + ' 集'
+        : '▶ 重听 第 ' + (curLast.index || '?') + ' 集（已听完）';
+    } else {
+      curLast._next = -1;
+      $('btnResume').textContent = '▶ 继续听 第 ' + (curLast.index || '?') + ' 集（' + fmtTime(curLast.t || 0) + '）';
+    }
+  }
+
+  $('btnResume').addEventListener('click', function () {
+    var album = { id: cur.id, name: (cur.detail && cur.detail.name) || '' };
+    if (!curLast || !curLast.trackId) {
+      if (curTracks.length) playQueue(curTracks, 0, album);
+      return;
+    }
+    if (curLast._next >= 0) { playQueue(curTracks, curLast._next, album); return; }
+    for (var i = 0; i < curTracks.length; i++) {
+      if (String(curTracks[i].trackId) === String(curLast.trackId)) { playQueue(curTracks, i, album); return; }
+    }
+    // 目标集不在当前页：单独播，进度照常续上
+    playQueue([{ trackId: curLast.trackId, index: curLast.index, title: curLast.title }], 0, album);
+  });
+
+  $('btnFromStart').addEventListener('click', function () {
+    if (!curTracks.length) return;
+    curTracks.forEach(function (t) { sSet(posKey(t.trackId), ''); });
+    sSet(lastKey(cur.id), '');
+    renderTracks(curTracks);
+    renderResume();
+    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '' });
+    msg('已清除本专辑播放进度，从第 1 集开始');
+  });
+
+  $('btnClearPos').addEventListener('click', function () {
+    curTracks.forEach(function (t) { sSet(posKey(t.trackId), ''); });
+    sSet(lastKey(cur.id), '');
+    renderTracks(curTracks);
+    renderResume();
+    msg('已清除播放进度');
+  });
+
+  async function gotoPage(p) {
+    if (p < 1) return;
+    $('dTracks').innerHTML = '<span class="muted">载入中…</span>';
+    try {
+      var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
+      if (r.success === false) { $('dTracks').textContent = '加载失败: ' + r.error; return; }
+      cur.page = p;
+      cur.hasMore = r.data.hasMore;
+      renderTracks(r.data.tracks || []);
+      $('dPage').textContent = '第 ' + p + ' 页';
+      $('dPrev').disabled = p <= 1;
+      $('dNext').disabled = !r.data.hasMore;
+    } catch (e) { $('dTracks').textContent = '加载失败: ' + e.message; }
+  }
+
+  $('dPrev').addEventListener('click', function () { gotoPage(cur.page - 1); });
+  $('dNext').addEventListener('click', function () { gotoPage(cur.page + 1); });
+  $('btnPlayPage').addEventListener('click', function () {
+    if (!curTracks.length) { msg('本页没有曲目', 'err'); return; }
+    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '' });
+  });
+  $('btnBack').addEventListener('click', function () {
+    $('detailCard').classList.add('hide');
+    $('searchCard').classList.remove('hide');
+  });
+  $('dIntroToggle').addEventListener('click', function () {
+    var open = $('dIntro').classList.toggle('open');
+    $('dIntroToggle').textContent = open ? '收起简介' : '展开简介';
+  });
+
+  $('btnImportDetail').addEventListener('click', function () {
+    var d = cur.detail;
+    doImport(cur.id, d && d.name, 0);
+  });
+
+  $('btnImportRange').addEventListener('click', async function () {
+    var s = Number($('dStart').value) || 0, e2 = Number($('dEnd').value) || 0;
+    if (!s && !e2) { msg('请填写起始集或结束集', 'err'); return; }
+    try {
+      var r = await api('POST', '/import', { album_id: cur.id, start: s, end: e2, name: cur.detail && cur.detail.name });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ 已开始按区间导入');
+      startPolling();
+    } catch (e) { msg('导入失败: ' + e.message, 'err'); }
+  });
+
+  $('btnSub').addEventListener('click', async function () {
+    var d = cur.detail || {};
+    var sub = d.subscription;
+    try {
+      if (d.subscribed) {
+        if (!confirm('取消订阅《' + (d.name || cur.id) + '》？（歌单保留，不再自动跟进新集）')) return;
+        await api('POST', '/subs/remove', { album_id: cur.id });
+        d.subscribed = false;
+        d.subscription = null;
+        renderSubState(null, false);
+        msg('已取消订阅');
+        return;
+      }
+      if (!sub || !sub.playlistId) {
+        if (!confirm('该专辑还没有对应歌单。订阅会先导入现有全部集数并建歌单，继续？')) return;
+        await api('POST', '/import', { album_id: cur.id, name: d.name || '' });
+        msg('⏳ 正在导入并订阅');
+        startPolling();
+        setTimeout(function () { openDetail(cur.id); }, 4000);
+        return;
+      }
+      var r = await api('POST', '/subs', { album_id: cur.id, name: d.name || '' });
+      d.subscribed = true;
+      d.subscription = r.data;
+      renderSubState(r.data, true);
+      msg('✅ 已订阅', 'ok');
+    } catch (e) { msg('操作失败: ' + e.message, 'err'); }
+  });
+
+  $('btnPlayAll').addEventListener('click', function () {
+    var sub = cur.detail && cur.detail.subscription;
+    if (!sub || !sub.playlistId) { msg('该专辑还没有歌单，先导入吧', 'err'); return; }
+    playPlaylist(sub.playlistId, cur.detail.name);
+  });
+
+  // ---------- 订阅 ----------
+  var subsCache = [];
+
+  async function loadSubs() {
+    var el = $('subsList');
+    try {
+      var r = await api('GET', '/subs');
+      subsCache = r.data || [];
+      el.innerHTML = '';
+      if (!subsCache.length) {
+        el.innerHTML = '<span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span>';
+        updateSubBadge();
+        return;
+      }
+      subsCache.forEach(function (s) {
+        var line = document.createElement('div');
+        line.className = 'line';
+        var img = document.createElement('img');
+        img.src = s.cover || '';
+        img.onerror = function () { img.style.visibility = 'hidden'; };
+        var body = document.createElement('div');
+        body.className = 'body';
+        var n = document.createElement('div');
+        n.className = 'n';
+        n.textContent = s.name || ('专辑' + s.albumId);
+        var sub2 = document.createElement('div');
+        sub2.className = 's';
+        var bits = [];
+        if (s.newCount) bits.push('<span class="badge new">有 ' + s.newCount + ' 集更新</span>');
+        bits.push('收录到第 ' + (s.lastIndex || 0) + ' 集');
+        if (s.updateDate) bits.push('专辑更新 ' + s.updateDate);
+        if (s.lastCheckAt) bits.push('检查 ' + s.lastCheckAt);
+        if (!s.playlistId) bits.push('<span class="err">未绑定歌单</span>');
+        sub2.innerHTML = bits.join(' · ');
+        body.appendChild(n); body.appendChild(sub2);
+
+        var ops = document.createElement('div');
+        ops.className = 'ops';
+
+        var bSync = document.createElement('button');
+        bSync.className = 'small';
+        bSync.textContent = '同步';
+        bSync.addEventListener('click', async function () {
+          bSync.disabled = true;
+          try {
+            var r2 = await api('POST', '/subs/check', { album_id: s.albumId, import: true });
+            if (r2.success === false) { msg('❌ ' + r2.error, 'err'); }
+            else {
+              var d2 = r2.data || {};
+              msg(d2.added ? '✅ 《' + s.name + '》新增 ' + d2.added + ' 集' : '没有新内容', d2.added ? 'ok' : '');
+            }
+            loadSubs();
+          } catch (e) { msg('同步失败: ' + e.message, 'err'); }
+          bSync.disabled = false;
+        });
+
+        var bAuto = document.createElement('button');
+        bAuto.className = 'small plain';
+        bAuto.textContent = s.autoSync === false ? '自动:关' : '自动:开';
+        bAuto.addEventListener('click', async function () {
+          await api('POST', '/subs', { album_id: s.albumId, autoSync: s.autoSync === false });
+          loadSubs();
+        });
+
+        var bPlay = document.createElement('button');
+        bPlay.className = 'small plain';
+        bPlay.textContent = '▶';
+        bPlay.addEventListener('click', function () {
+          if (!s.playlistId) { msg('该订阅没有歌单', 'err'); return; }
+          playPlaylist(s.playlistId, s.name);
+        });
+
+        var bDel = document.createElement('button');
+        bDel.className = 'small plain';
+        bDel.textContent = '×';
+        bDel.title = '取消订阅';
+        bDel.addEventListener('click', async function () {
+          if (!confirm('取消订阅《' + s.name + '》？歌单保留。')) return;
+          await api('POST', '/subs/remove', { album_id: s.albumId });
+          loadSubs();
+        });
+
+        ops.appendChild(bSync); ops.appendChild(bAuto); ops.appendChild(bPlay); ops.appendChild(bDel);
+        line.appendChild(img); line.appendChild(body); line.appendChild(ops);
+        el.appendChild(line);
+      });
+      updateSubBadge();
+    } catch (e) {
+      el.innerHTML = '<span class="err">加载失败: ' + e.message + '</span>';
+    }
+  }
+
+  function updateSubBadge() {
+    var n = 0;
+    subsCache.forEach(function (s) { if (s.newCount) n += 1; });
+    $('subBadge').innerHTML = n ? '<span class="badge new">' + n + '</span>' : '';
+  }
+
+  // ---------- 我的订阅（喜马拉雅账号里的订阅） ----------
+  var meSubs = [], meSel = {}, meLoaded = false;
+  var mePage = 1, meHasMore = false, meTotal = 0;
+
+  function meUpdateSel() {
+    var ids = Object.keys(meSel).filter(function (k) { return meSel[k]; });
+    $('meSelBar').classList.toggle('hide', meSubs.length === 0);
+    $('meSelCount').textContent = '已选 ' + ids.length;
+    $('btnMeImport').disabled = ids.length === 0;
+    $('btnMeSub').disabled = ids.length === 0;
+    $('meCkAll').checked = meSubs.length > 0 && ids.length === meSubs.length;
+  }
+
+  function renderMeSubs(list, keepSel) {
+    var el = $('meSubsList');
+    el.innerHTML = '';
+    meSubs = list || [];
+    if (!keepSel) meSel = {};
+    if (!meSubs.length) {
+      el.innerHTML = '<span class="muted">没有读到订阅专辑。</span>';
+      meUpdateSel();
+      return;
+    }
+    meSubs.forEach(function (a) {
+      var item = document.createElement('div');
+      item.className = 'res-item';
+
+      var ck = document.createElement('input');
+      ck.type = 'checkbox';
+      ck.className = 'ck';
+      ck.addEventListener('change', function () { meSel[a.id] = ck.checked; meUpdateSel(); });
+
+      var img = document.createElement('img');
+      img.src = a.cover || '';
+      img.onerror = function () { img.style.visibility = 'hidden'; };
+
+      var body = document.createElement('div');
+      body.className = 'body';
+      var t = document.createElement('div');
+      t.className = 't';
+      t.textContent = a.title;
+      var m = document.createElement('div');
+      m.className = 'm';
+      var bits = [];
+      if (a.subscribed) bits.push('<span class="badge">已跟进</span>');
+      else if (a.playlistId) bits.push('<span class="badge gray">已导入</span>');
+      if (a.isPaid) bits.push('VIP/付费');
+      if (a.author) bits.push(escHtml(a.author));
+      if (a.tracks) bits.push(a.tracks + '集');
+      if (a.lastIndex) bits.push('已收录 ' + a.lastIndex);
+      if (a.updateDate) bits.push('更新 ' + escHtml(a.updateDate));
+      if (a.latest) bits.push('最新：' + escHtml(a.latest));
+      m.innerHTML = bits.join(' · ');
+      body.appendChild(t); body.appendChild(m);
+      body.addEventListener('click', function () {
+        document.querySelector('.tab[data-tab="search"]').click();
+        openDetail(a.id);
+      });
+
+      var acts = document.createElement('div');
+      acts.className = 'acts';
+      var bImp = document.createElement('button');
+      bImp.className = 'small';
+      bImp.textContent = a.playlistId ? '已在库' : '导入';
+      bImp.disabled = !!a.playlistId;
+      bImp.addEventListener('click', function () { doImport(a.id, a.title, a.tracks); });
+      var bSub = document.createElement('button');
+      bSub.className = 'small plain';
+      bSub.textContent = a.subscribed ? '已订阅' : '跟进';
+      bSub.disabled = !!a.subscribed;
+      bSub.addEventListener('click', async function () {
+        bSub.disabled = true;
+        try {
+          var r = await api('POST', '/subs', { album_id: String(a.id), name: a.title });
+          msg(r.success === false ? '❌ ' + r.error : '✅ 已订阅《' + a.title + '》', r.success === false ? 'err' : 'ok');
+          a.subscribed = true;
+          loadSubs();
+        } catch (e) { msg('订阅失败: ' + e.message, 'err'); }
+      });
+      acts.appendChild(bImp); acts.appendChild(bSub);
+
+      item.appendChild(ck); item.appendChild(img); item.appendChild(body); item.appendChild(acts);
+      el.appendChild(item);
+    });
+    if (meHasMore) {
+      var more = document.createElement('div');
+      more.style.cssText = 'text-align:center;margin-top:10px;';
+      var bMore = document.createElement('button');
+      bMore.className = 'small plain';
+      bMore.textContent = '加载更多（已显示 ' + meSubs.length + (meTotal ? ' / ' + meTotal : '') + '）';
+      bMore.addEventListener('click', function () {
+        bMore.disabled = true;
+        loadMySubs(false, mePage + 1);
+      });
+      more.appendChild(bMore);
+      el.appendChild(more);
+    }
+    meUpdateSel();
+  }
+
+  async function loadMySubs(force, page) {
+    page = page || 1;
+    var st = $('meStatus');
+    st.innerHTML = '<span class="muted">读取中…</span>';
+    try {
+      var r = await api('GET', '/me/subs?page=' + page + (force ? '&refresh=1' : ''));
+      var d = (r && r.data) || {};
+      if (r && r.success === false) {
+        if (r.needLogin) {
+          st.innerHTML = '<span class="err">未登录或登录态已失效</span> <span class="muted">· 请到「设置」粘贴网页版 Cookie 后重试（' + escHtml(r.error || '') + '）</span>';
+        } else {
+          st.innerHTML = '<span class="err">读取失败：' + escHtml(r.error || '未知错误') + '</span>';
+        }
+        $('meSubsList').innerHTML = '';
+        meSubs = []; meLoaded = false; meUpdateSel();
+        return;
+      }
+      var u = d.user || {};
+      var head = '<span class="ok">●</span> ' + escHtml(u.nickname || u.uid || '已登录');
+      if (u.uid) head += ' <span class="muted">(uid ' + escHtml(u.uid) + ')</span>';
+      head += ' <span class="muted">· ' + (d.total ? '共 ' + d.total + ' 张订阅专辑' : '读到 ' + (d.albums || []).length + ' 张') + '</span>';
+      if (d.source) head += ' <span class="muted">· 接口：' + escHtml(d.source) + '</span>';
+      st.innerHTML = head;
+      meLoaded = true;
+      mePage = Number(d.page) || page;
+      meHasMore = !!d.hasMore;
+      meTotal = Number(d.total) || 0;
+      var merged = page > 1 ? meSubs.concat(d.albums || []) : (d.albums || []);
+      // 追加时按 id 去重，避免接口重复分页
+      var seen = {}, uniq = [];
+      merged.forEach(function (a) {
+        if (!a || !a.id || seen[a.id]) return;
+        seen[a.id] = 1;
+        uniq.push(a);
+      });
+      renderMeSubs(uniq, page > 1);
+    } catch (e) {
+      st.innerHTML = '<span class="err">读取失败: ' + escHtml(e.message) + '</span>';
+    }
+  }
+
+  $('btnLoadMySubs').addEventListener('click', function () { loadMySubs(false); });
+  $('btnRefreshMySubs').addEventListener('click', function () { loadMySubs(true); });
+  $('btnGoSet').addEventListener('click', function () {
+    document.querySelector('.tab[data-tab="set"]').click();
+  });
+  $('meCkAll').addEventListener('change', function () {
+    var on = $('meCkAll').checked;
+    document.querySelectorAll('#meSubsList .ck').forEach(function (c, i) {
+      c.checked = on;
+      if (meSubs[i]) meSel[meSubs[i].id] = on;
+    });
+    meUpdateSel();
+  });
+
+  $('btnMeImport').addEventListener('click', async function () {
+    var albums = meSubs.filter(function (a) { return meSel[a.id]; });
+    if (!albums.length) return;
+    if (albums.length > 3 && !confirm('将导入 ' + albums.length + ' 张专辑，耗时可能较长，继续？')) return;
+    try {
+      var r = await api('POST', '/import-multi', {
+        albums: albums.map(function (a) { return { id: String(a.id), name: a.title }; }),
+        mode: $('meSelMode').value,
+        name: ''
+      });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ ' + r.data.message);
+      startPolling();
+      setTimeout(function () { loadMySubs(true); }, 3000);
+    } catch (e) { msg('导入失败: ' + e.message, 'err'); }
+  });
+
+  $('btnMeSub').addEventListener('click', async function () {
+    var albums = meSubs.filter(function (a) { return meSel[a.id] && !a.subscribed; });
+    if (!albums.length) { msg('所选专辑都已经在跟进列表里了'); return; }
+    if (!confirm('把所选 ' + albums.length + ' 张专辑加入跟进列表（不导入现有集数）？')) return;
+    var ok = 0, bad = 0;
+    for (var i = 0; i < albums.length; i++) {
+      try {
+        var r = await api('POST', '/subs', { album_id: String(albums[i].id), name: albums[i].title });
+        if (r && r.success !== false) ok += 1; else bad += 1;
+      } catch (e) { bad += 1; }
+    }
+    msg('✅ 已订阅 ' + ok + ' 张' + (bad ? '，失败 ' + bad + ' 张' : ''), bad ? 'err' : 'ok');
+    loadSubs();
+    loadMySubs(true);
+  });
+
+  async function loadAuto() {
+    try {
+      var r = await api('GET', '/config');
+      var a = (r.data && r.data.auto) || {};
+      $('autoEnabled').value = a.enabled ? '1' : '0';
+      $('autoTime').value = a.time || '08:30';
+      $('autoPush').value = a.pushDevice ? '1' : '0';
+    } catch (e) { /* */ }
+  }
+
+  $('btnSaveAuto').addEventListener('click', async function () {
+    try {
+      await api('POST', '/config', {
+        auto: {
+          enabled: $('autoEnabled').value === '1',
+          time: $('autoTime').value || '08:30',
+          pushDevice: $('autoPush').value === '1'
+        }
+      });
+      msg('✅ 自动同步设置已保存', 'ok');
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  });
+
+  $('btnSyncAll').addEventListener('click', async function () {
+    msg('⏳ 正在同步全部订阅…');
+    try {
+      var r = await api('POST', '/sync', { import: true });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('✅ ' + (r.lastSync ? r.lastSync.result : '同步完成'), 'ok');
+      subsCache = r.subs || subsCache;
+      loadSubs();
+    } catch (e) { msg('同步失败: ' + e.message, 'err'); }
+  });
+
+  $('btnCheckAll').addEventListener('click', async function () {
+    msg('⏳ 正在检查更新（不导入）…');
+    try {
+      var r = await api('POST', '/subs/check', { import: false });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      var d = r.data || {};
+      msg('检查完成：发现 ' + (d.newCount || 0) + ' 集更新', 'ok');
+      subsCache = r.subs || subsCache;
+      loadSubs();
+    } catch (e) { msg('检查失败: ' + e.message, 'err'); }
+  });
+
+  // ---------- 已导入 ----------
+  async function loadImported() {
+    var el = $('importedList');
+    try {
+      var r = await api('GET', '/imported');
+      var list = (r.data && r.data.imported) || [];
+      el.innerHTML = '';
+      if (!list.length) { el.innerHTML = '<span class="muted">还没有导入专辑。</span>'; return; }
+      list.forEach(function (a) {
+        var line = document.createElement('div');
+        line.className = 'line';
+        var body = document.createElement('div');
+        body.className = 'body';
+        var n = document.createElement('div');
+        n.className = 'n';
+        n.textContent = '《' + a.name + '》';
+        var s = document.createElement('div');
+        s.className = 's';
+        s.textContent = a.count + ' 集 · ' + a.importedAt;
+        body.appendChild(n); body.appendChild(s);
+
+        var ops = document.createElement('div');
+        ops.className = 'ops';
+        var bPlay = document.createElement('button');
+        bPlay.className = 'small';
+        bPlay.textContent = '▶ 音箱';
+        bPlay.addEventListener('click', function () { playPlaylist(a.playlistId, a.name); });
+        var bOpen = document.createElement('button');
+        bOpen.className = 'small plain';
+        bOpen.textContent = '详情';
+        bOpen.addEventListener('click', function () { openDetail(a.albumId); });
+        var bDel = document.createElement('button');
+        bDel.className = 'small plain';
+        bDel.textContent = '删除';
+        bDel.addEventListener('click', async function () {
+          if (!confirm('删除歌单《' + a.name + '》及其导入记录？歌曲库条目保留。')) return;
+          await api('POST', '/imported/delete', { playlist_id: a.playlistId });
+          loadImported();
+        });
+        ops.appendChild(bPlay); ops.appendChild(bOpen); ops.appendChild(bDel);
+        line.appendChild(body); line.appendChild(ops);
+        el.appendChild(line);
+      });
+    } catch (e) { el.innerHTML = '<span class="err">加载失败: ' + e.message + '</span>'; }
+  }
+
+  // ---------- 进度轮询 ----------
+  var jobActive = false;
+  var pollTimer = null;
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(poll, 2500);
+    poll();
+  }
+
+  function renderJob(j) {
+    if (j && j.running) {
+      jobActive = true;
+      $('jobBar').classList.add('show');
+      var pct = j.total ? Math.round(j.done * 100 / j.total) : 0;
+      $('jobFill').style.width = pct + '%';
+      var txt = '⏳ 正在导入' + (j.mode === 'merge' ? '（合并）' : '') + '《' + (j.current || j.title) + '》：' + j.done + '/' + j.total;
+      if (j.parts && j.parts.length > 1) {
+        var okCount = j.parts.filter(function (p) { return !p.error; }).length;
+        txt += ' · 已完成 ' + okCount + '/' + j.parts.length + ' 张';
+      }
+      $('jobText').className = 'txt';
+      $('jobText').textContent = txt;
+      return true;
+    }
+    if (jobActive) {
+      jobActive = false;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      $('jobFill').style.width = '100%';
+      $('jobText').className = 'txt ' + (j && j.error ? 'err' : 'ok');
+      $('jobText').textContent = (j && j.error ? '❌ ' : '✅ ') +
+        ((j && (j.title || j.current)) || '任务') + (j && j.error ? '：' + j.error : ' 完成') +
+        (j && j.total ? '（' + j.done + '/' + j.total + ' 集）' : '');
+      setTimeout(function () { if (!jobActive) $('jobBar').classList.remove('show'); }, 5000);
+      loadImported();
+      loadSubs();
+    }
+    return false;
+  }
+
+  async function poll() {
+    try {
+      var r = await api('GET', '/status');
+      var d = r.data || {};
+      var running = renderJob(d.job);
+      if (Array.isArray(d.subs)) { subsCache = d.subs; updateSubBadge(); }
+      if (d.lastSync && d.lastSync.at) {
+        $('lastSyncInfo').textContent = '最近同步：' + d.lastSync.at + '（' + d.lastSync.trigger + '）· ' + d.lastSync.result;
+      }
+      if (!running && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  // ---------- 启动 ----------
+  if (!sp && !token) {
+    var t = prompt('独立打开本页面。请粘贴 songloft 的访问 Token（网页端登录后的 JWT）：', '');
+    if (t) { token = t.replace(/^Bearer /, ''); sSet('xm_token', token); }
+  }
+
+  function boot() {
+    loadLogin();
+    loadDevices();
+    loadAuto();
+    loadSubs();
+    loadImported();
+    renderIdleChips();
+    poll();
+  }
+  // 任何初始化异常都不允许静默吞掉整个页面：把错误打到页面上
+  try { boot(); } catch (e) {
+    try {
+      var __el = document.querySelector('.card') || document.body;
+      var __d = document.createElement('div');
+      __d.className = 'err';
+      __d.style.margin = '10px 0';
+      __d.textContent = '初始化失败: ' + (e && e.message ? e.message : e);
+      __el.parentNode.insertBefore(__d, __el);
+    } catch (_e) { /* */ }
+  }
+})();
