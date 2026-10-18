@@ -1419,11 +1419,14 @@
   var cur = { id: '', page: 1, hasMore: false, detail: null };
 
   async function openDetail(albumId) {
-    // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去
+    // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去，并记住来源以便返回
     var activeTab = document.querySelector('.tab.active');
     if (!activeTab || activeTab.getAttribute('data-tab') !== 'search') {
+      cur.fromTab = activeTab ? activeTab.getAttribute('data-tab') : 'search';
       document.querySelector('.tab[data-tab="search"]').click();
     }
+    var TAB_NAME = { search: '搜索', recent: '收听', subs: '订阅', lib: '已导入', set: '设置' };
+    $('btnBack').textContent = '← 返回' + (TAB_NAME[cur.fromTab || 'search'] || '搜索');
     cur.id = String(albumId);
     cur.page = 1;
     $('searchCard').classList.add('hide');
@@ -1656,7 +1659,16 @@
   });
   $('btnBack').addEventListener('click', function () {
     $('detailCard').classList.add('hide');
-    $('searchCard').classList.remove('hide');
+    // 从哪个 tab 进来就回哪个（默认搜索）；切 tab 会自动刷新该页数据
+    var from = cur.fromTab || 'search';
+    cur.fromTab = 'search';
+    if (from === 'search') {
+      $('searchCard').classList.remove('hide');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    var btn = document.querySelector('.tab[data-tab="' + from + '"]');
+    if (btn) btn.click(); else $('searchCard').classList.remove('hide');
   });
   $('dIntroToggle').addEventListener('click', function () {
     var open = $('dIntro').classList.toggle('open');
