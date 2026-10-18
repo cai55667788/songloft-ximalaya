@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.14.0';
+var VERSION = '0.15.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -35,6 +35,7 @@ var SUB_KEY = 'subs:v1';
 var PROG_KEY = 'progress:v1';
 var STAT_KEY = 'stats:v1';
 var DL_KEY = 'download_job:v1';
+var COOKIE_CHK_KEY = 'cookie_check:v1';
 
 var UA_PC = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 var UA_M = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
@@ -52,12 +53,14 @@ var config = {
   },
   sync: { progress: true },
   dl: { targetDir: '喜马拉雅', format: 'mp3' },
+  // 每天检查一次登录态是否还有效，失效时界面上直接提醒
+  cookieCheck: true,
   // AI 智能整理：走本机 Agent2API 网关（OpenAI 兼容），不填 key 时功能自动隐藏
   ai: {
     enabled: false,
     url: 'http://127.0.0.1:3065/v1',
     key: '',
-    model: 'deepseek-v4.1-flash-0930',
+    model: 'deepseek-v4.1-flash',
     timeout: 45
   }
 };
@@ -136,9 +139,97 @@ function fetchT(url, init, timeoutSec) {
   ]);
 }
 
+// ---------- 事件日志（环形缓冲，最近 100 条） ----------
+// 目的：出问题时不用 SSH 翻宿主日志，界面上就能看到「什么时候、哪一步、什么错」。
+var LOG_KEY = 'logs:v1';
+var LOG_MAX = 100;
+var logBuf = [];      // [{t, lv, tag, msg}]，新的在前
+
+function logPush(level, tag, msg) {
+  try {
+    var e = { t: Date.now(), lv: level, tag: String(tag || ''), msg: String(msg || '').slice(0, 300) };
+    logBuf.unshift(e);
+    if (logBuf.length > LOG_MAX) logBuf.length = LOG_MAX;
+    // 只把 warn/error 落盘，info 留在内存里，避免频繁写存储
+    if (level !== 'info') persistLogs();
+    if (level === 'error') { try { songloft.log.error('[喜马拉雅] ' + e.tag + ' ' + e.msg); } catch (e1) { /* */ } }
+  } catch (e2) { /* */ }
+}
+
+function logInfo(tag, msg) { logPush('info', tag, msg); }
+function logWarn(tag, msg) { logPush('warn', tag, msg); }
+function logErr(tag, msg) { logPush('error', tag, msg); }
+
+var logTimer = null;
+function persistLogs() {
+  if (logTimer) return;
+  logTimer = setTimeout(function () {
+    logTimer = null;
+    // 只落盘 warn/error（最多 60 条），info 不落盘
+    var keep = logBuf.filter(function (e) { return e.lv !== 'info'; }).slice(0, 60);
+    try { songloft.storage.set(LOG_KEY, JSON.stringify(keep)); } catch (e) { /* */ }
+  }, 1500);
+}
+
+function logList(limit, level) {
+  var arr = logBuf;
+  if (level && level !== 'all') arr = arr.filter(function (e) { return e.lv === level; });
+  return arr.slice(0, Math.max(1, Math.min(Number(limit) || 100, LOG_MAX)));
+}
+
+function logClear() {
+  logBuf = [];
+  try { songloft.storage.set(LOG_KEY, '[]'); } catch (e) { /* */ }
+}
+
+// ---------- 带重试的请求 ----------
+// 喜马拉雅接口偶发抖动（连接重置 / 502 / 超时），单次失败不该让整条流程挂掉。
+// 只对可重试的情况重试：网络错误、timeout、5xx、429；4xx（尤其 403 风控）直接抛，重试只会更糟。
+function isRetryableStatus(code) {
+  return code === 429 || (code >= 500 && code <= 599);
+}
+
+async function fetchRetry(url, init, opts) {
+  var o = opts || {};
+  var tries = Math.max(1, Math.min(Number(o.retries) === undefined ? 3 : Number(o.retries), 4));
+  var timeoutSec = Number(o.timeout) || 15;
+  var base = Number(o.backoff) || 600;
+  var lastErr = null;
+  for (var i = 0; i < tries; i++) {
+    try {
+      var resp = await fetchT(url, init, timeoutSec);
+      if (resp && resp.ok) return resp;
+      if (resp && isRetryableStatus(resp.status) && i < tries - 1) {
+        lastErr = new Error('HTTP ' + resp.status);
+        logWarn('net', 'HTTP ' + resp.status + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
+      } else {
+        return resp;
+      }
+    } catch (e) {
+      lastErr = e;
+      var m = String(e && e.message || e);
+      // timeout 与网络层错误可重试
+      if (i < tries - 1) logWarn('net', m + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
+      else break;
+    }
+    await sleepMs(base * Math.pow(2, i));
+  }
+  throw lastErr || new Error('请求失败');
+}
+
+function shortUrl(u) {
+  var s = String(u || '');
+  var i = s.indexOf('?');
+  return (i > 0 ? s.slice(0, i) : s).slice(0, 90);
+}
+
+function sleepMs(ms) {
+  return new Promise(function (r) { setTimeout(r, Math.max(0, Number(ms) || 0)); });
+}
+
 async function getJSON(url, headers) {
-  var resp = await fetchT(url, { method: 'GET', headers: headers || {} }, 15);
-  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + url);
+  var resp = await fetchRetry(url, { method: 'GET', headers: headers || {} }, { retries: 2, timeout: 15 });
+  if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : '??') + ' ' + shortUrl(url));
   return resp.json();
 }
 
@@ -354,7 +445,18 @@ function extractAlbumId(input) {
 async function fetchShowPage(albumId, page) {
   var url = 'https://www.ximalaya.com/revision/play/v1/show?id=' + albumId +
     '&num=' + page + '&size=' + PAGE_SIZE + '&ptype=0';
-  var d = await getJSON(url, pcHeaders(albumId));
+  // 兜底：单页失败重试一次；仍失败就当作空页（上层会停止翻页，不至于整本导入崩掉）
+  var d = null;
+  try {
+    d = await getJSON(url, pcHeaders(albumId));
+  } catch (e) {
+    try {
+      d = await getJSON(url, pcHeaders(albumId));
+    } catch (e2) {
+      logWarn('album', '取第 ' + page + ' 页失败：' + String(e2 && e2.message || e2));
+      return [];
+    }
+  }
   if (d.ret !== 200) throw new Error('喜马拉雅接口异常 ret=' + d.ret + ' ' + (d.msg || ''));
   return (d.data && d.data.tracksAudioPlay) || [];
 }
@@ -461,7 +563,14 @@ async function fetchTrackUrl(trackId) {
   var url = 'https://m.ximalaya.com/tracks/' + trackId + '.json';
   var h = { 'User-Agent': UA_M, 'Referer': 'https://m.ximalaya.com/' };
   if (login.cookie) h['Cookie'] = login.cookie;
-  var d = await getJSON(url, h);
+  // 换源重试：移动端接口偶尔抖动，失败后用 PC 端 UA 再试一次（两个接口容忍度不同）
+  var d = null;
+  try {
+    d = await getJSON(url, h);
+  } catch (e1) {
+    logWarn('play', '单集地址失败（' + String(e1 && e1.message || e1) + '），换 UA 重试 ' + trackId);
+    d = await getJSON(url, { 'User-Agent': UA_PC, 'Referer': 'https://www.ximalaya.com/' });
+  }
   var link = d.play_path_64 || d.play_path_32 || d.play_path || '';
   if (!link) {
     if (d.is_paid) throw new Error('paid: 该集为付费/VIP内容（未登录或无权限）');
@@ -527,6 +636,79 @@ async function fetchCurrentUser() {
     }
   }
   return last;
+}
+
+// ---------- 登录态健康检查 ----------
+// Cookie 过期是「静默失效」：付费集拿不到地址、我的订阅拉不到，用户只看到「怎么没反应」。
+// 这里定期验一次登录态，失效就在界面上直接提醒（并把上次成功时间留在存储里）。
+var cookieCheck = { at: 0, ok: false, uid: '', nickname: '', error: '', cookieLength: 0, lastOkAt: 0 };
+
+// 从「最后成功验证」到现在过了多久，给一个体面的说法
+function agoText(ts) {
+  var t = Number(ts) || 0;
+  if (!t) return '从未验证';
+  var d = Math.max(0, Date.now() - t);
+  var mi = Math.floor(d / 60000);
+  if (mi < 1) return '刚刚';
+  if (mi < 60) return mi + ' 分钟前';
+  var h = Math.floor(mi / 60);
+  if (h < 24) return h + ' 小时前';
+  return Math.floor(h / 24) + ' 天前';
+}
+
+async function checkCookieHealth(force) {
+  var sane = cookieLooksValid(login.cookie);
+  if (!login.cookie) {
+    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: '未登录', cookieLength: 0 };
+    return cookieHealthOut();
+  }
+  if (!sane.ok) {
+    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: sane.reason, cookieLength: login.cookie.length };
+    logWarn('login', 'Cookie 格式异常：' + sane.reason);
+    return cookieHealthOut();
+  }
+  // 5 分钟内不重复验，避免每次打开面板都打一次接口
+  if (!force && cookieCheck.at && Date.now() - cookieCheck.at < 5 * 60 * 1000) return cookieHealthOut();
+  try {
+    var u = await fetchCurrentUser();
+    cookieCheck = {
+      at: Date.now(),
+      ok: !!u.ok,
+      uid: (u.user && u.user.uid) || '',
+      nickname: (u.user && u.user.nickname) || '',
+      error: u.ok ? '' : (u.error || '登录态无效，请重新扫码'),
+      cookieLength: login.cookie.length
+    };
+    if (!u.ok) logWarn('login', '登录态失效：' + cookieCheck.error);
+    else cookieCheck.lastOkAt = cookieCheck.at;
+  } catch (e) {
+    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: String(e), cookieLength: login.cookie.length };
+  }
+  return cookieHealthOut();
+}
+
+function cookieHealthOut() {
+  var o = {
+    loggedIn: !!login.cookie,
+    valid: !!cookieCheck.ok,
+    uid: cookieCheck.uid || '',
+    nickname: cookieCheck.nickname || '',
+    error: cookieCheck.error || '',
+    checkedAt: cookieCheck.at || 0,
+    checkedAgo: agoText(cookieCheck.at),
+    lastOkAgo: agoText(cookieCheck.lastOkAt || 0),
+    savedAt: login.savedAt || '',
+    cookieLength: cookieCheck.cookieLength || (login.cookie ? login.cookie.length : 0)
+  };
+  // 顺手落盘，重启后还能知道「上次什么时候还是好的」
+  try {
+    songloft.storage.set(COOKIE_CHK_KEY, JSON.stringify({
+      ok: cookieCheck.ok, uid: cookieCheck.uid, nickname: cookieCheck.nickname,
+      error: cookieCheck.error, at: cookieCheck.at, lastOkAt: cookieCheck.lastOkAt || 0,
+      lastCheckDay: cookieCheck.lastCheckDay || ''
+    }));
+  } catch (e) { /* */ }
+  return o;
 }
 
 function normMyAlbum(o) {
@@ -896,6 +1078,25 @@ async function loadAll() {
   try { var bmk = await songloft.storage.get(BM_KEY); if (bmk) bookmarks = typeof bmk === 'string' ? JSON.parse(bmk) : bmk; } catch (e) { /* */ }
   try { var hst = await songloft.storage.get(HIST_KEY); if (hst) history = typeof hst === 'string' ? JSON.parse(hst) : hst; } catch (e) { /* */ }
   try { var aic = await songloft.storage.get(AI_KEY); if (aic) aiCache = typeof aic === 'string' ? JSON.parse(aic) : aic; } catch (e) { /* */ }
+  try {
+    var lgs = await songloft.storage.get(LOG_KEY);
+    var larr = typeof lgs === 'string' ? JSON.parse(lgs) : lgs;
+    if (Array.isArray(larr)) logBuf = larr.slice(0, LOG_MAX);
+  } catch (e) { /* */ }
+  if (!Array.isArray(logBuf)) logBuf = [];
+  try {
+    var cch = await songloft.storage.get(COOKIE_CHK_KEY);
+    var cobj = typeof cch === 'string' ? JSON.parse(cch) : cch;
+    if (cobj && typeof cobj === 'object') {
+      cookieCheck.ok = !!cobj.ok;
+      cookieCheck.uid = String(cobj.uid || '');
+      cookieCheck.nickname = String(cobj.nickname || '');
+      cookieCheck.error = String(cobj.error || '');
+      cookieCheck.at = Number(cobj.at) || 0;
+      cookieCheck.lastOkAt = Number(cobj.lastOkAt) || 0;
+      cookieCheck.lastCheckDay = String(cobj.lastCheckDay || '');
+    }
+  } catch (e) { /* */ }
   if (!Array.isArray(bookmarks)) bookmarks = [];
   if (!Array.isArray(history)) history = [];
   if (!aiCache || typeof aiCache !== 'object' || Array.isArray(aiCache)) aiCache = {};
@@ -917,7 +1118,7 @@ async function loadAll() {
   if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '';
   if (config.dl.format !== '' && config.dl.format !== 'mp3') config.dl.format = 'mp3';
 
-  var dftAi = { enabled: false, url: 'http://127.0.0.1:3065/v1', key: '', model: 'deepseek-v4.1-flash-0930', timeout: 45 };
+  var dftAi = { enabled: false, url: 'http://127.0.0.1:3065/v1', key: '', model: 'deepseek-v4.1-flash', timeout: 45 };
   if (!config.ai || typeof config.ai !== 'object') config.ai = dftAi;
   for (var ak in dftAi) {
     if (Object.prototype.hasOwnProperty.call(dftAi, ak) && config.ai[ak] === undefined) config.ai[ak] = dftAi[ak];
@@ -1352,11 +1553,14 @@ async function persistAiCache() {
 }
 
 // 单次对话调用，返回纯文本；出错抛异常
-async function aiChat(sys, user, timeoutSec) {
+// 网关侧的「账号被限流」表现为 503 / 401，换个模型往往就好了 —— 这里做一次自动降级
+var AI_FALLBACK = ['deepseek-v4.1-flash', 'glm-5.3', 'deepseek-v4-pro-0813'];
+var aiLastModel = '';   // 上次真正应答的模型（降级后可看出来）
+
+async function aiChatOnce(model, sys, user, timeoutSec) {
   var cfg = config.ai || {};
-  if (!cfg.key) throw new Error('未配置 AI 密钥');
   var body = {
-    model: cfg.model || 'deepseek-v4.1-flash-0930',
+    model: model,
     stream: false,
     temperature: 0.3,
     messages: [
@@ -1369,11 +1573,41 @@ async function aiChat(sys, user, timeoutSec) {
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
     body: JSON.stringify(body)
   }, timeoutSec || cfg.timeout || 45);
-  if (!resp.ok) throw new Error('AI HTTP ' + resp.status);
+  if (!resp.ok) {
+    var err = new Error('AI HTTP ' + resp.status);
+    err.status = resp.status;
+    throw err;
+  }
   var data = await resp.json();
   var text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
   if (!text) throw new Error('AI 返回为空');
   return String(text).trim();
+}
+
+async function aiChat(sys, user, timeoutSec) {
+  var cfg = config.ai || {};
+  if (!cfg.key) throw new Error('未配置 AI 密钥');
+  var main = cfg.model || AI_FALLBACK[0];
+  var tries = [main];
+  // 只有主模型不是首选时才补上首选，其余按候选顺序挑两个
+  AI_FALLBACK.forEach(function (m) { if (m !== main && tries.length < 3) tries.push(m); });
+
+  var lastErr = null;
+  for (var i = 0; i < tries.length; i++) {
+    try {
+      var ok = await aiChatOnce(tries[i], sys, user, timeoutSec);
+      aiLastModel = tries[i];
+      return ok;
+    } catch (e) {
+      lastErr = e;
+      var st = Number(e && e.status) || 0;
+      // 只有「服务端不可用 / 限流 / 鉴权」这类换模型可能有效的错误才继续，超时不重试（等太久）
+      var retryable = st === 503 || st === 429 || st === 401 || st === 502 || /返回为空/.test(String(e && e.message || ''));
+      if (!retryable || i === tries.length - 1) break;
+      logWarn('ai', '模型 ' + tries[i] + ' 失败（' + (e && e.message || e) + '），换 ' + tries[i + 1] + ' 重试');
+    }
+  }
+  throw lastErr || new Error('AI 调用失败');
 }
 
 // 从 AI 回复里抠 JSON（模型常会包 ```json 或加解释）
@@ -1471,8 +1705,159 @@ async function aiClassifyBookmarks(list) {
   return out;
 }
 
+// ---------- AI 深度功能：分集简介 / 精彩片段 / 收听周报 ----------
+
+// 每集一句话简介：一次问 20 集，结果按专辑存进 aiCache[aid].eps
+// 目的：长书的标题往往很糊（「第 137 集」），有了一句话就知道这集值不值得听。
+async function aiEpisodeBlurbs(detail, tracks, force) {
+  var aid = String((detail && detail.albumId) || '');
+  if (!aid) throw new Error('缺少专辑 ID');
+  var list = (tracks || []).filter(function (t) { return t && t.title; });
+  if (!list.length) return { items: [], cached: false };
+
+  if (!aiCache[aid] || typeof aiCache[aid] !== 'object') aiCache[aid] = {};
+  var store = aiCache[aid].eps && typeof aiCache[aid].eps === 'object' ? aiCache[aid].eps : {};
+  var todo = list.filter(function (t) {
+    var k = String(t.trackId || t.index || '');
+    return force || !store[k];
+  }).slice(0, 60);   // 单次最多补 60 集，避免一次等太久
+  if (!todo.length) return { items: epsToList(store, list), cached: true, added: 0 };
+
+  // 分批 20 集问，某批失败不影响其他批
+  var added = 0;
+  for (var i = 0; i < todo.length; i += 20) {
+    var chunk = todo.slice(i, i + 20);
+    try {
+      var sys = '你是中文有声书编辑。给每一集写一句 20 字以内的内容提示，帮听众判断要不要听。' +
+        '只输出 JSON：{"items":[{"i":集号,"s":"一句话"}]}，不要解释。看不出内容就根据标题合理概括，不要编造具体人名地名。';
+      var user = JSON.stringify({
+        album: (detail && detail.name) || '',
+        episodes: chunk.map(function (t, j) {
+          return { i: Number(t.index) || (j + 1), t: String(t.title || '').slice(0, 60) };
+        })
+      });
+      var text = await aiChat(sys, user, 60);
+      var obj = aiParseJson(text);
+      if (obj && Array.isArray(obj.items)) {
+        obj.items.forEach(function (x) {
+          if (!x) return;
+          var idx = Number(x.i);
+          var hit = null;
+          for (var k = 0; k < chunk.length; k++) if (Number(chunk[k].index) === idx) { hit = chunk[k]; break; }
+          if (!hit) return;
+          var key = String(hit.trackId || hit.index || '');
+          if (!key) return;
+          store[key] = { s: String(x.s || '').slice(0, 40), at: Date.now() };
+          added += 1;
+        });
+      }
+    } catch (e) {
+      logWarn('ai', '分集简介第 ' + (Math.floor(i / 20) + 1) + ' 批失败：' + String(e && e.message || e));
+    }
+  }
+  aiCache[aid].eps = store;
+  aiCache[aid].epsAt = Date.now();
+  await persistAiCache();
+  return { items: epsToList(store, list), cached: false, added: added };
+}
+
+function epsToList(store, tracks) {
+  return (tracks || []).map(function (t) {
+    var k = String(t.trackId || t.index || '');
+    var hit = store && store[k];
+    return {
+      trackId: String(t.trackId || ''),
+      index: Number(t.index) || 0,
+      title: String(t.title || ''),
+      blurb: hit ? hit.s : ''
+    };
+  });
+}
+
+// 精彩片段推荐：让 AI 从分集里挑几集「最值得先听」的
+async function aiHighlights(detail, tracks) {
+  var aid = String((detail && detail.albumId) || '');
+  if (!aid) throw new Error('缺少专辑 ID');
+  if (!aiCache[aid] || typeof aiCache[aid] !== 'object') aiCache[aid] = {};
+  if (aiCache[aid].hl && Array.isArray(aiCache[aid].hl.items)) return aiCache[aid].hl;
+
+  var list = (tracks || []).slice(0, 120);
+  if (!list.length) throw new Error('没有分集数据');
+  var sys = '你是中文有声书编辑。从分集列表里挑出最值得先听的 3-5 集（新听众入口 / 最有干货 / 最出圈），' +
+    '只输出 JSON：{"items":[{"i":集号,"why":"为什么值得听，20字内"}],"tip":"给新听众的一句话建议，30字内"}，不要解释。';
+  var user = JSON.stringify({
+    album: (detail && detail.name) || '',
+    episodes: list.map(function (t) { return { i: Number(t.index) || 0, t: String(t.title || '').slice(0, 56) }; })
+  });
+  var obj = aiParseJson(await aiChat(sys, user, 50));
+  if (!obj || !Array.isArray(obj.items)) throw new Error('AI 返回格式不对，请再试一次');
+
+  var items = [];
+  obj.items.slice(0, 6).forEach(function (x) {
+    var idx = Number(x && x.i);
+    for (var i = 0; i < list.length; i++) {
+      if (Number(list[i].index) === idx) {
+        items.push({
+          index: idx,
+          trackId: String(list[i].trackId || ''),
+          title: String(list[i].title || ''),
+          why: String((x && x.why) || '').slice(0, 50)
+        });
+        return;
+      }
+    }
+  });
+  var out = { items: items, tip: String(obj.tip || '').slice(0, 60), at: Date.now() };
+  aiCache[aid].hl = out;
+  await persistAiCache();
+  return out;
+}
+
+// 收听周报：把最近 7 天的统计喂给 AI，让它写一段人话点评
+async function aiWeekly() {
+  var days = {}, total = 0;
+  var today = new Date();
+  for (var i = 0; i < 7; i++) {
+    var d = new Date(today.getTime() - i * 86400000);
+    var k = dayKeyOf(d.getTime());
+    var sec = Number(stats.days && stats.days[k]) || 0;
+    days[k] = sec;
+    total += sec;
+  }
+  if (total < 60) return { empty: true, total: total, note: '最近 7 天还没听够 1 分钟，多听两集再来看看。' };
+
+  var topAlbums = Object.keys(stats.albums || {}).map(function (id) {
+    var a = stats.albums[id] || {};
+    return { name: a.name || id, sec: Number(a.total) || 0 };
+  }).sort(function (x, y) { return y.sec - x.sec; }).slice(0, 5);
+
+  var weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  var byDay = [];
+  for (var j = 6; j >= 0; j--) {
+    var dd = new Date(today.getTime() - j * 86400000);
+    byDay.push(weekday[dd.getDay()] + ' ' + Math.round((days[dayKeyOf(dd.getTime())] || 0) / 60) + ' 分钟');
+  }
+
+  var sys = '你是中文有声书 App 的编辑，给用户写一段本周收听小结。要求：口语、有温度、不超过 130 字、' +
+    '不要 Markdown、不要编造数据之外的内容。可以给一条具体建议（比如换时段、补某本书、控制时长）。';
+  var user = JSON.stringify({
+    本周各天: byDay,
+    本周总时长分钟: Math.round(total / 60),
+    常听的书: topAlbums,
+    连续天数: calcStreak().now
+  });
+  var text = await aiChat(sys, user, 45);
+  return {
+    empty: false,
+    total: total,
+    days: byDay,
+    albums: topAlbums,
+    text: String(text).replace(/\s+/g, ' ').trim().slice(0, 400),
+    at: Date.now()
+  };
+}
+
 // ---------- 章节书签 ----------
-// 存「某集某个时间点 + 备注」，跨设备共用。上限 BM_MAX 条，超出按时间淘汰最旧。
 var BM_KEY = 'bookmarks:v1';
 var BM_MAX = 1000;
 var bookmarks = [];
@@ -1873,6 +2258,12 @@ async function runImportMulti(items, mode, mergedName) {
 
 // ---------- 订阅 / 增量更新 ----------
 
+// 一段错误信息像不像「登录失效」导致的（用来给出针对性提示，而不是让用户猜）
+function dataLooksLikeLoginError(msg) {
+  var s = String(msg || '');
+  return /ret=(4|5)\d\d|401|403|未登录|登录|鉴权|auth/i.test(s) && !/timeout|ETIMEDOUT|ECONNRESET/i.test(s);
+}
+
 async function syncOne(sub, opts) {
   opts = opts || {};
   var out = { albumId: sub.albumId, name: sub.name, newCount: 0, added: 0, error: '', titles: [] };
@@ -1908,6 +2299,7 @@ async function syncOne(sub, opts) {
     out.error = String(e);
     sub.lastCheckAt = nowStr();
     await persist();
+    if (dataLooksLikeLoginError(out.error)) logWarn('sync', '《' + (sub.name || sub.albumId) + '》同步失败，疑似登录态失效：' + out.error);
   }
   return out;
 }
@@ -1935,6 +2327,7 @@ async function runSyncAll(opts) {
       result: '检查 ' + checked + ' 张，新增 ' + totalAdded + ' 集' + (errors.length ? '，' + errors.length + ' 张出错' : ''),
       trigger: opts.trigger || '手动'
     };
+    if (errors.length) logWarn('sync', '同步有 ' + errors.length + ' 张失败：' + errors.slice(0, 3).join('；'));
     if (opts.markAuto) { config.auto.lastRunDate = todayStr(); }
     await persist();
 
@@ -2102,7 +2495,14 @@ async function tick() {
   var now = hhmmNow();
   var today = todayStr();
 
-  // ① 定时语音播报：到点先同步（内部会追加新集），再把结果读出来
+  // ⓪ 登录态巡检：每天一次（登录失效会让同步与播放静默失败，早点发现早点提醒）
+  if (login.cookie && config.cookieCheck !== false &&
+    (!cookieCheck.lastCheckDay || cookieCheck.lastCheckDay !== today)) {
+    cookieCheck.lastCheckDay = today;
+    try { await checkCookieHealth(true); } catch (e) { /* 巡检失败不影响主流程 */ }
+  }
+
+  // 定时语音播报：到点先同步（内部会追加新集），再把结果读出来
   var t = config.tts || {};
   if (t.enabled && t.lastRunDate !== today && now >= String(t.time || '07:30')) {
     var dev = ttsDevice();
@@ -2115,13 +2515,13 @@ async function tick() {
     songloft.log.warn('[喜马拉雅] 定时播报已开启但没有选音箱，已跳过');
   }
 
-  // ② 定时自动同步
+  // 定时自动同步
   if (config.auto && config.auto.enabled && config.auto.lastRunDate !== today && now >= String(config.auto.time || '08:30')) {
     songloft.log.info('[喜马拉雅] 触发定时同步（设定 ' + config.auto.time + '）');
     await runSyncAll({ import: true, markAuto: true, trigger: '定时' });
   }
 
-  // ③ 关键词追更（跟着定时同步的开关与时间走，避免一天多次抓取）
+  // 关键词追更（跟着定时同步的开关与时间走，避免一天多次抓取）
   var wc = config.watch || {};
   if (wc.enabled && watch.items.length && wc.lastRunDate !== today) {
     var at = String(wc.time || (config.auto && config.auto.time) || '08:30');
@@ -2417,6 +2817,7 @@ async function runDownload(playlistId, subDir, title) {
     if (lastErr && !dlJob.ok) dlJob.error = '全部失败，最后一条错误：' + lastErr;
     else if (dlJob.fail) dlJob.error = dlJob.fail + ' 集下载失败' + (lastErr ? '：' + lastErr : '');
     await persistDl();
+    if (dlJob.fail) logWarn('download', '《' + (dlJob.title || '') + '》失败 ' + dlJob.fail + ' 集：' + (lastErr || ''));
     songloft.log.info('[喜马拉雅] 下载完成：成功 ' + dlJob.ok + '，失败 ' + dlJob.fail + '，歌单 ' + playlistId);
     return { ok: true, ok_count: dlJob.ok, fail: dlJob.fail, total: dlJob.total };
   } catch (e) {
@@ -2431,6 +2832,262 @@ async function runDownload(playlistId, subDir, title) {
   }
 }
 
+// ---------- 专辑对比 ----------
+// 「这两本哪本更适合我」是选书时最真实的困惑。这里把两张专辑的关键指标摆在一起，
+// 再让 AI 用一句话说清差别（AI 没开就只给指标，不硬凑结论）。
+function cmpMetric(a, b) {
+  // 返回两边谁更「多」，用于界面上高亮
+  var na = Number(a) || 0, nb = Number(b) || 0;
+  if (na === nb) return 'tie';
+  return na > nb ? 'a' : 'b';
+}
+
+async function compareAlbums(idA, idB) {
+  var da = null, db = null;
+  var errs = [];
+  try { da = await fetchAlbumDetail(idA); } catch (e) { errs.push('第一张：' + String(e && e.message || e)); }
+  try { db = await fetchAlbumDetail(idB); } catch (e) { errs.push('第二张：' + String(e && e.message || e)); }
+  if (!da || !db) return { ok: false, error: errs.join('；') || '两张专辑都需要有效 ID' };
+
+  // 集数取接口给的 trackCount，拿不到就数第一页的规模
+  var cntA = Number(da.count) || 0, cntB = Number(db.count) || 0;
+  if (!cntA || !cntB) {
+    try {
+      var oa = await fetchAlbumOutline(idA);
+      cntA = oa.lastIndex || cntA;
+      da.count = cntA;
+    } catch (e) { /* 拿不到就空着 */ }
+    try {
+      var ob = await fetchAlbumOutline(idB);
+      cntB = ob.lastIndex || cntB;
+      db.count = cntB;
+    } catch (e) { /* */ }
+  }
+
+  function row(label, a, b, hint) {
+    return { label: label, a: a, b: b, better: cmpMetric(a, b), hint: hint || '' };
+  }
+  var rows = [
+    row('集数', cntA, cntB, '集'),
+    row('播放量', da.playCount, db.playCount, ''),
+    row('订阅数', da.subscribeCount, db.subscribeCount, '')
+  ];
+
+  var cmp = {
+    ok: true,
+    albums: [da, db],
+    rows: rows,
+    sameAuthor: !!da.author && da.author === db.author,
+    payDiff: (!!da.isPaid) !== (!!db.isPaid) ? (da.isPaid ? 'a' : 'b') : '',
+    dateA: da.updateDate || '', dateB: db.updateDate || '',
+    verdict: '', aiError: ''
+  };
+
+  if (aiReady()) {
+    try {
+      var sys = '你是中文有声书导购。比较两张专辑，用 80 字以内说清「什么情况下选 A、什么情况下选 B」，' +
+        '不要复述数字，不要 Markdown，不要编造资料外的信息。若两者其实差不多，就直接说差不多。';
+      var user = JSON.stringify({
+        A: { 标题: da.name, 主播: da.author, 集数: cntA, 付费: da.isPaid ? '是' : '否', 状态: da.finishedText, 更新: da.updateDate, 简介: String(da.intro || '').slice(0, 300) },
+        B: { 标题: db.name, 主播: db.author, 集数: cntB, 付费: db.isPaid ? '是' : '否', 状态: db.finishedText, 更新: db.updateDate, 简介: String(db.intro || '').slice(0, 300) }
+      });
+      cmp.verdict = String(await aiChat(sys, user, 40)).replace(/\s+/g, ' ').trim().slice(0, 240);
+    } catch (e) {
+      cmp.aiError = String(e && e.message || e);
+    }
+  }
+  return cmp;
+}
+
+// ---------- 导出订阅清单 ----------
+// 换设备、迁移、留档都可能要一份「我订了什么」。三种格式：
+// json 给程序用、csv 给表格用、md 给人看。
+function exportSubs(fmt) {
+  var list = (subs || []).map(function (s) {
+    return {
+      albumId: String(s.albumId || ''),
+      name: s.name || '',
+      author: s.author || '',
+      playlistId: s.playlistId || 0,
+      total: Number(s.lastIndex) || Number(s.songCount) || 0,
+      newCount: Number(s.newCount) || 0,
+      updateDate: s.updateDate || '',
+      lastCheckAt: s.lastCheckAt || '',
+      autoSync: s.autoSync !== false,
+      url: 'https://www.ximalaya.com/album/' + String(s.albumId || '')
+    };
+  });
+
+  if (fmt === 'json') {
+    return {
+      filename: 'ximalaya-subs-' + todayStr() + '.json',
+      mime: 'application/json;charset=utf-8',
+      content: JSON.stringify({ exportedAt: nowStr(), count: list.length, items: list }, null, 2)
+    };
+  }
+  if (fmt === 'csv') {
+    var head = ['专辑ID', '标题', '主播', '已导入集数', '待听新集', '更新日期', '最近检查', '自动同步', '链接'];
+    var lines = [head.join(',')];
+    list.forEach(function (x) {
+      lines.push([
+        x.albumId, csvCell(x.name), csvCell(x.author), x.total, x.newCount,
+        x.updateDate, x.lastCheckAt, x.autoSync ? '是' : '否', x.url
+      ].join(','));
+    });
+    // BOM：Excel 打开中文不乱码
+    return {
+      filename: 'ximalaya-subs-' + todayStr() + '.csv',
+      mime: 'text/csv;charset=utf-8',
+      content: '\ufeff' + lines.join('\r\n')
+    };
+  }
+  // markdown
+  var md = ['# 我的喜马拉雅订阅', '', '导出时间：' + nowStr() + '　共 ' + list.length + ' 张', ''];
+  md.push('| 专辑 | 主播 | 集数 | 更新 | 链接 |');
+  md.push('|---|---|---|---|---|');
+  list.forEach(function (x) {
+    md.push('| ' + mdCell(x.name) + ' | ' + mdCell(x.author) + ' | ' + x.total + ' | ' + (x.updateDate || '-') + ' | [打开](' + x.url + ') |');
+  });
+  return { filename: 'ximalaya-subs-' + todayStr() + '.md', mime: 'text/markdown;charset=utf-8', content: md.join('\n') };
+}
+
+function csvCell(s) {
+  var v = String(s == null ? '' : s);
+  if (/[",\r\n]/.test(v)) return '"' + v.replace(/"/g, '""') + '"';
+  return v;
+}
+
+function mdCell(s) {
+  return String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+// ---------- 已听 / 未听分离成两个歌单 ----------
+// 长书听到一半，混在一个列表里很难找「下一集该听哪个」。按收听进度分成两个歌单：
+// 「已听」= 进度 ≥ 时长-20 秒；「未听」= 其余（含没听过的）。
+async function splitPlaylistByHeard(albumId, opts) {
+  opts = opts || {};
+  var rec = null;
+  for (var i = 0; i < imported.length; i++) if (String(imported[i].albumId) === String(albumId)) { rec = imported[i]; break; }
+  if (!rec || !rec.playlistId) throw new Error('这张专辑还没导入成歌单，先在「已导入」里导入');
+
+  var songs = await collectPlaylistSongs(rec.playlistId);
+  if (!songs.length) throw new Error('歌单里没有歌曲');
+  var heard = [], unheard = [];
+  songs.forEach(function (s) {
+    var tid = songTrackId(s);
+    var p = tid ? (progress.tracks[tid] || null) : null;
+    var done = false;
+    if (p && p.d > 0) done = Number(p.t) >= Number(p.d) - 20;
+    if (done) heard.push(s); else unheard.push(s);
+  });
+  if (!heard.length || !unheard.length) {
+    return { ok: true, skipped: true, reason: (heard.length ? '所有集都听完了' : '还没有听完的集'), heard: heard.length, unheard: unheard.length };
+  }
+
+  async function makePlaylist(nameSuffix, list) {
+    var name = (rec.name || ('专辑' + albumId)) + ' · ' + nameSuffix;
+    var pid = await createOrReusePlaylist(name, '', '由喜马拉雅插件按收听进度自动生成');
+    var ids = list.map(function (s) { return s.id; }).filter(function (x) { return !!x; });
+    var added = 0;
+    // 复用已有歌单时，先移除里面不该在这儿的歌（比如上次分离后又被听了）
+    if (opts.replace && typeof songloft.playlists.setSongs === 'function') {
+      try { await songloft.playlists.setSongs(pid, ids); added = ids.length; }
+      catch (e3) { logWarn('split', '整表替换失败，改为追加：' + String(e3 && e3.message || e3)); added = -1; }
+    }
+    if (added < 0) {
+      added = 0;
+      for (var j = 0; j < ids.length; j += 200) {
+        try {
+          var r = await songloft.playlists.addSongs(pid, ids.slice(j, j + 200));
+          added += (r && typeof r.added === 'number') ? r.added : Math.min(200, ids.length - j);
+        } catch (e) { logWarn('split', '写入歌单失败：' + String(e && e.message || e)); }
+      }
+    }
+    return { pid: pid, name: name, added: added, total: ids.length };
+  }
+
+  var a = await makePlaylist('已听', heard);
+  var b = await makePlaylist('未听', unheard);
+  logInfo('split', '《' + rec.name + '》已拆成「已听」' + a.added + ' 集 / 「未听」' + b.added + ' 集');
+  return { ok: true, heard: a, unheard: b };
+}
+
+// ---------- 按主播追更 ----------
+// 看到一位喜欢的主播，通常想的是「他还有什么书」。
+// 用当前登录账号的订阅列表聚合成主播维度（免登录时退化为从已导入里聚合）。
+async function anchorList() {
+  var map = {};
+  function put(a, from) {
+    var key = String(a.author || a.anchorName || '未知主播');
+    if (!map[key]) map[key] = { name: key, count: 0, albums: [], subs: 0, imported: 0 };
+    if (map[key].albums.some(function (x) { return x.albumId === String(a.albumId || a.id); })) return;
+    map[key].albums.push({
+      albumId: String(a.albumId || a.id || ''),
+      name: a.name || a.title || '',
+      cover: a.cover || '',
+      total: Number(a.total || a.tracks || 0) || 0,
+      updateDate: a.updateDate || '',
+      from: from
+    });
+    map[key].count += 1;
+    if (from === 'sub') map[key].subs += 1; else map[key].imported += 1;
+  }
+
+  var out = { from: '', items: [], error: '' };
+  if (login.cookie) {
+    try {
+      var ms = await loadMySubs({ page: 1, size: 60, refresh: false });
+      if (ms.ok && ms.albums && ms.albums.length) {
+        ms.albums.forEach(function (x) { put({ albumId: x.id, name: x.title, author: x.author, cover: x.cover, total: x.tracks, updateDate: x.updateDate }, 'sub'); });
+        out.from = 'sub';
+      }
+    } catch (e) { out.error = String(e && e.message || e); }
+  }
+  if (!out.from) {
+    // 退化为已导入 + 订阅记录
+    subs.forEach(function (s) { put({ albumId: s.albumId, name: s.name, author: s.author, cover: s.cover, total: s.lastIndex }, 'sub'); });
+    imported.forEach(function (x) { put({ albumId: x.albumId, name: x.name, author: x.author, total: x.count }, 'imp'); });
+    out.from = 'local';
+  }
+
+  out.items = Object.keys(map).map(function (k) { return map[k]; })
+    .sort(function (a, b) { return b.count - a.count; });
+  return out;
+}
+
+// 主播的作品很多只是「订阅了」，未必导入了。这里给一键批量订阅
+async function bulkSubscribe(albumIds) {
+  var added = 0, existed = 0, failed = [];
+  for (var i = 0; i < albumIds.length; i++) {
+    var id = String(albumIds[i] || '');
+    if (!id) continue;
+    if (findSub(id)) { existed += 1; continue; }
+    try {
+      var d = await fetchAlbumDetail(id);
+      upsertSub({
+        albumId: id,
+        name: d.name || ('专辑' + id),
+        playlistId: 0,
+        lastIndex: 0,
+        songCount: 0,
+        cover: d.cover || '',
+        author: d.author || '',
+        updateDate: d.updateDate || '',
+        lastCheckAt: '',
+        newCount: 0,
+        newTitles: [],
+        autoSync: true
+      });
+      added += 1;
+    } catch (e) {
+      failed.push(id + ': ' + String(e && e.message || e));
+    }
+  }
+  if (added) await persist();
+  logInfo('anchor', '批量订阅 ' + added + ' 张' + (failed.length ? '，失败 ' + failed.length : ''));
+  return { added: added, existed: existed, failed: failed };
+}
+
 // ---------- HTTP 路由 ----------
 
 function normPath(p) {
@@ -2441,6 +3098,120 @@ function normPath(p) {
   if (qi >= 0) p = p.slice(0, qi);
   return p;
 }
+
+// ---------- 自检 ----------
+// 把「出问题了该看什么」固化成一份清单：每项 {key, name, ok, level, detail}
+// level: ok 正常 / warn 能跑但有隐患 / bad 直接不可用
+async function runSelfCheck(deep) {
+  var items = [];
+  function add(key, name, level, detail) { items.push({ key: key, name: name, ok: level === 'ok', level: level, detail: String(detail || '') }); }
+
+  // 1 宿主能力
+  var canDownload = typeof songloft.songs.download === 'function';
+  var canCreate = typeof songloft.songs.create === 'function';
+  var canListPl = typeof songloft.playlists.list === 'function';
+  var canGetSongs = typeof songloft.playlists.getSongs === 'function';
+  var canStorage = typeof songloft.storage.get === 'function';
+  if (!canCreate || !canListPl || !canStorage) {
+    add('host', '宿主基础能力', 'bad', '缺少 songs.create / playlists.list / storage，插件无法工作，请升级 Songloft');
+  } else if (!canDownload) {
+    add('host', '宿主基础能力', 'warn', 'songs.download 缺失，下载到本地不可用（其余功能正常）');
+  } else {
+    add('host', '宿主基础能力', 'ok', '全部可用');
+  }
+  if (!canGetSongs) add('hostSongs', '读取歌单歌曲', 'warn', 'playlists.getSongs 缺失，增量同步与本地库扫描会失效');
+
+  // 2 存储写入
+  try {
+    await songloft.storage.set('selfcheck:v1', String(Date.now()));
+    add('storage', '存储读写', 'ok', '正常');
+  } catch (e) {
+    add('storage', '存储读写', 'bad', '写入失败：' + String(e));
+  }
+
+  // 3 喜马拉雅连通性
+  try {
+    var t0 = Date.now();
+    await fetchShowPage('4156778', 1);
+    add('xm', '喜马拉雅接口', 'ok', '正常（' + (Date.now() - t0) + 'ms）');
+  } catch (e) {
+    add('xm', '喜马拉雅接口', 'bad', String(e && e.message || e));
+  }
+
+  // 4 登录态
+  var ch = await checkCookieHealth(deep);
+  if (!ch.loggedIn) add('login', '登录态', 'warn', '未登录：付费/VIP 内容与「我的订阅」不可用，免费内容不受影响');
+  else if (ch.valid) add('login', '登录态', 'ok', (ch.nickname ? ch.nickname + '（uid ' + ch.uid + '）' : 'uid ' + ch.uid) + '，' + ch.checkedAgo + ' 验证');
+  else add('login', '登录态', 'bad', '已失效：' + (ch.error || '请重新扫码') + '（上次正常：' + ch.lastOkAgo + '）');
+
+  // 5 单集播放地址
+  if (deep) {
+    try {
+      var u1 = await fetchTrackUrl('529200192');
+      add('play', '单集播放地址', u1 ? 'ok' : 'bad', u1 ? '可获取' : '未取到地址');
+    } catch (e) {
+      add('play', '单集播放地址', 'warn', String(e && e.message || e));
+    }
+  }
+
+  // 6 AI（未启用算正常，只是没开）
+  if (!config.ai || !config.ai.enabled) add('ai', 'AI 智能整理', 'ok', '未启用（不影响其他功能）');
+  else if (!config.ai.key) add('ai', 'AI 智能整理', 'warn', '已启用但没填 key，功能会自动隐藏');
+  else {
+    try {
+      var t1 = Date.now();
+      await aiChat('只回复 OK', 'ping', 30);
+      add('ai', 'AI 智能整理', 'ok', '连通（' + (Date.now() - t1) + 'ms，模型 ' + config.ai.model + (aiLastModel && aiLastModel !== config.ai.model ? '，实际用 ' + aiLastModel : '') + '）');
+    } catch (e) {
+      var em = String(e && e.message || e);
+      add('ai', 'AI 智能整理', 'bad', em + (/HTTP 401|HTTP 403/.test(em) ? '　检查密钥是否有效' : '　检查地址是否填了宿主 IP（插件在容器内，127.0.0.1 指向容器自己）'));
+    }
+  }
+
+  // 7 音箱
+  var dev = config.device || {};
+  if (!dev.account_id || !dev.device_id) add('miot', '小爱音箱', 'warn', '未绑定设备，语音播报与语音控制不可用');
+  else {
+    try {
+      var st0 = await miotPost('/mina/status', { account_id: dev.account_id, device_id: dev.device_id });
+      add('miot', '小爱音箱', st0.ok ? 'ok' : 'warn', st0.ok ? ((dev.device_name || '设备') + ' 可访问') : '设备无响应（可稍后重试）');
+    } catch (e) {
+      add('miot', '小爱音箱', 'warn', '调用失败：' + String(e && e.message || e));
+    }
+  }
+
+  // 8 定时任务状态
+  var autoOk = !config.auto.enabled || (config.auto.time && /^\d{1,2}:\d{2}$/.test(config.auto.time));
+  add('auto', '定时同步', config.auto.enabled ? (autoOk ? 'ok' : 'warn') : 'ok',
+    config.auto.enabled ? '每天 ' + config.auto.time + '，上次 ' + (config.auto.lastRunDate || '未执行')
+      : '未启用');
+  add('tts', '定时播报', config.tts && config.tts.enabled ? (dev.account_id ? 'ok' : 'warn') : 'ok',
+    config.tts && config.tts.enabled ? ('每天 ' + config.tts.time + '，上次 ' + (config.tts.lastRunDate || '未执行')) : '未启用');
+
+  // 9 数据量
+  add('data', '本地数据', 'ok',
+    '订阅 ' + subs.length + ' · 已导入 ' + imported.length + ' · 进度 ' + Object.keys(progress.tracks).length +
+    ' 集 · 书签 ' + bookmarks.length + ' · AI 缓存 ' + Object.keys(aiCache).length);
+
+  // 10 近期错误
+  var errs = logBuf.filter(function (e) { return e.lv === 'error'; }).length;
+  var warns = logBuf.filter(function (e) { return e.lv === 'warn'; }).length;
+  add('logs', '近期异常', errs ? 'warn' : 'ok', errs || warns ? ('错误 ' + errs + ' 条 · 警告 ' + warns + ' 条（最近 ' + LOG_MAX + ' 条内）') : '无异常记录');
+
+  var bad = items.filter(function (i) { return i.level === 'bad'; }).length;
+  var warn = items.filter(function (i) { return i.level === 'warn'; }).length;
+  return {
+    version: VERSION,
+    at: Date.now(),
+    atText: nowStr(),
+    ok: bad === 0,
+    bad: bad,
+    warn: warn,
+    summary: bad ? (bad + ' 项需要处理') : (warn ? ('一切正常，' + warn + ' 项可选优化') : '全部正常'),
+    items: items
+  };
+}
+
 
 async function handleHTTPRequest(req) {
   var path = normPath(req.path || '');
@@ -2647,6 +3418,53 @@ async function handleHTTPRequest(req) {
     }
   }
 
+  // ---------- AI 深度功能 ----------
+  // 分集一句话简介（分批补，可强制重来）
+  if (path === '/ai/episodes' && method === 'GET') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    var eaid = String(q.albumId || '');
+    if (!eaid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    try {
+      var ed = null;
+      try { ed = await fetchAlbumDetail(eaid); } catch (e) { ed = { albumId: eaid, name: '' }; }
+      var et = [], ep = Number(q.page) || 1;
+      try { var etp = await fetchAlbumTracks(eaid, ep); et = (etp && etp.tracks) || []; } catch (e) { et = []; }
+      if (!et.length) return jsonResp({ success: false, error: '没有分集数据' }, 502);
+      var er = await aiEpisodeBlurbs(ed, et, q.refresh === '1');
+      return jsonResp({ success: true, data: { albumId: eaid, page: ep, items: er.items, cached: !!er.cached, added: er.added || 0 } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // 精彩片段推荐
+  if (path === '/ai/highlights' && method === 'GET') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    var haid = String(q.albumId || '');
+    if (!haid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    try {
+      var hd = null;
+      try { hd = await fetchAlbumDetail(haid); } catch (e) { hd = { albumId: haid, name: '' }; }
+      var ht = [];
+      try { var htp = await fetchAlbumTracks(haid, 1); ht = (htp && htp.tracks) || []; } catch (e) { ht = []; }
+      var hr = await aiHighlights(hd, ht);
+      return jsonResp({ success: true, data: hr });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // 收听周报（AI 点评）
+  if (path === '/ai/weekly' && method === 'GET') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    try {
+      var wr2 = await aiWeekly();
+      return jsonResp({ success: true, data: wr2 });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
   // ---------- 章节书签 ----------
   if (path === '/bookmarks' && method === 'GET') {
     return jsonResp({ success: true, data: { items: bmList(q.albumId || ''), total: bookmarks.length } });
@@ -2762,6 +3580,38 @@ async function handleHTTPRequest(req) {
       libCached: libMap ? Object.keys(libMap).length : 0
     };
     return jsonResp({ success: true, data: caps });
+  }
+
+  // ---------- 事件日志 ----------
+  if (path === '/logs' && method === 'GET') {
+    var lim2 = Number(q.limit) || 100;
+    return jsonResp({
+      success: true,
+      data: {
+        items: logList(lim2, q.level || 'all'),
+        total: logBuf.length,
+        warn: logBuf.filter(function (e) { return e.lv === 'warn'; }).length,
+        error: logBuf.filter(function (e) { return e.lv === 'error'; }).length,
+        max: LOG_MAX
+      }
+    });
+  }
+
+  if (path === '/logs' && method === 'POST') {
+    var lbg = readBodyJson(req);
+    if (lbg.action === 'clear') { logClear(); return jsonResp({ success: true, data: { cleared: true } }); }
+    if (lbg.action === 'mark') {
+      // 前端把浏览器端发生的错误也交给这里统一收口，便于一处排查
+      logPush(String(lbg.level || 'error') === 'warn' ? 'warn' : 'error', 'ui', String(lbg.msg || ''));
+      return jsonResp({ success: true, data: { total: logBuf.length } });
+    }
+    return jsonResp({ success: false, error: '未知操作' }, 400);
+  }
+
+  // ---------- 自检：一次把「能不能用」全查一遍 ----------
+  if (path === '/selfcheck' && method === 'GET') {
+    var sc = await runSelfCheck(q.deep === '1' || q.deep === 'true');
+    return jsonResp({ success: true, data: sc });
   }
 
   // ---------- 跨设备收听进度 ----------
@@ -3071,6 +3921,12 @@ async function handleHTTPRequest(req) {
     }
   }
 
+  // ---------- 登录态健康检查（供定时任务与界面提醒用） ----------
+  if (path === '/cookie/health' && method === 'GET') {
+    var hh = await checkCookieHealth(q.refresh === '1' || q.refresh === 'true');
+    return jsonResp({ success: true, data: hh });
+  }
+
   // 调试用：只允许转发到喜马拉雅域名（排查接口变更），不暴露任意 URL
   if (path === '/me/probe' && method === 'GET') {
     var target = String(q.url || '');
@@ -3151,6 +4007,70 @@ async function handleHTTPRequest(req) {
     // 异步跑，避免宿主 60 秒超时
     runDownload(entry.playlistId, entry.name || faid, entry.name || '').catch(function () {});
     return jsonResp({ success: true, data: { message: '补下任务已启动（已下载过的会自动跳过）', playlistId: entry.playlistId } });
+  }
+
+  // ---------- 内容整理 ----------
+  // 两张专辑对比（可带 AI 一句话结论）
+  if (path === '/compare' && method === 'GET') {
+    var ca = extractAlbumId(q.a || '');
+    var cb = extractAlbumId(q.b || '');
+    if (!ca || !cb) return jsonResp({ success: false, error: '需要两张专辑的 ID 或链接（参数 a、b）' }, 400);
+    if (ca === cb) return jsonResp({ success: false, error: '两张是同一张专辑' }, 400);
+    try {
+      var cmpRes = await compareAlbums(ca, cb);
+      return jsonResp({ success: !!cmpRes.ok, error: cmpRes.ok ? '' : cmpRes.error, data: cmpRes });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // 导出订阅清单：返回内容本身，由前端触发下载
+  if (path === '/subs/export' && method === 'GET') {
+    try {
+      var fmt = String(q.format || 'json');
+      var ex = exportSubs(fmt);
+      return jsonResp({ success: true, data: { filename: ex.filename, mime: ex.mime, content: ex.content, count: subs.length } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // 按收听进度把一本书拆成「已听 / 未听」两个歌单
+  if (path === '/split-heard' && method === 'POST') {
+    var sb = readBodyJson(req);
+    var said2 = String(sb.albumId || '');
+    if (!said2) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    try {
+      var sp = await splitPlaylistByHeard(said2);
+      return jsonResp({ success: true, data: sp });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 400);
+    }
+  }
+
+  // 主播聚合：某位主播有哪些书
+  if (path === '/anchors' && method === 'GET') {
+    try {
+      var al = await anchorList();
+      var only = String(q.name || '');
+      if (only) al.items = al.items.filter(function (x) { return x.name === only; });
+      return jsonResp({ success: true, data: al });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // 批量订阅（前端勾选主播的作品后调用）
+  if (path === '/anchors/subscribe' && method === 'POST') {
+    var ab2 = readBodyJson(req);
+    var ids = Array.isArray(ab2.albumIds) ? ab2.albumIds : [];
+    if (!ids.length) return jsonResp({ success: false, error: '没有勾选专辑' }, 400);
+    try {
+      var bs = await bulkSubscribe(ids.slice(0, 50));
+      return jsonResp({ success: true, data: bs });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
   }
 
   if (path === '/api/music/url' && method === 'POST') {
