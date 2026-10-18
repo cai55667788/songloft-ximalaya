@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.17.0';
+var VERSION = '0.18.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -1623,13 +1623,18 @@ async function persistHistory() {
   catch (e) { songloft.log.warn('[喜马拉雅] 历史落盘失败: ' + String(e)); }
 }
 
-// 按天分组，返回 [{day, items:[...], count}]，最近在前
-function histTimeline(days, limit) {
+// 按天分组，返回 [{day, items:[...], count}]，最近在前；kw 可按书名/集名过滤（v0.18.0）
+function histTimeline(days, limit, kw) {
   var dayN = Math.max(1, Number(days) || 30);
   var cut = Date.now() - dayN * 86400000;
+  var kwN = String(kw || '').trim().toLowerCase();
   var groups = {}, order = [];
   history.forEach(function (h) {
     if (Number(h.at) < cut) return;
+    if (kwN) {
+      var hay = ((h.title || '') + ' ' + (h.albumName || '')).toLowerCase();
+      if (hay.indexOf(kwN) < 0) return;
+    }
     var dk = dayKeyOf(h.at);
     if (!groups[dk]) { groups[dk] = { day: dk, items: [], count: 0, sec: 0 }; order.push(dk); }
     groups[dk].items.push(h);
@@ -1751,6 +1756,7 @@ function stampAuthor(tracks, author, albumName) {
 
 async function addTracksToPlaylist(playlistId, tracks, onProgress) {
   var added = 0, failed = 0;
+  var failedTracks = [];   // v0.18.0：记下写入失败的具体集，支持一键重试
   for (var i = 0; i < tracks.length; i += BATCH) {
     var slice = tracks.slice(i, i + BATCH);
     try {
@@ -1762,11 +1768,12 @@ async function addTracksToPlaylist(playlistId, tracks, onProgress) {
       }
     } catch (e) {
       failed += slice.length;
+      slice.forEach(function (t) { failedTracks.push(t); });
       songloft.log.warn('[喜马拉雅] 批量写入失败(' + i + '): ' + String(e));
     }
     if (onProgress) onProgress(slice.length);
   }
-  return { added: added, failed: failed };
+  return { added: added, failed: failed, failedTracks: failedTracks };
 }
 
 // ---------- 导入 ----------
@@ -1827,6 +1834,7 @@ async function runImport(albumId, name, start, end) {
 
     job.running = false;
     job.finishedAt = nowStr();
+    job.failedTracks = (res.failedTracks || []).slice(0, 200);   // 上限 200，免得 job 落盘膨胀
     if (res.failed) job.error = '有 ' + res.failed + ' 集写入失败';
     await persist();
     songloft.log.info('[喜马拉雅] 导入完成: ' + title + ' → 歌单 ' + playlist.id + '（' + job.done + '/' + job.total + '）');
@@ -1883,6 +1891,11 @@ async function runImportMulti(items, mode, mergedName) {
           job.done += n;
           persist().catch(function () { });
         });
+        if (res.failedTracks && res.failedTracks.length) {
+          // 多专辑模式下失败集挂在 job 上统一重试（歌单可能不止一个，retry 只补最后一个失败歌单）
+          job.failedTracks = (job.failedTracks || []).concat(res.failedTracks).slice(0, 200);
+          job.retryPlaylistId = pl.id;
+        }
 
         var lastIdx = 0;
         fetched.tracks.forEach(function (t) { if (t.index > lastIdx) lastIdx = t.index; });
@@ -3162,7 +3175,7 @@ async function handleHTTPRequest(req) {
     var hdays = Number(q.days) || 30;
     return jsonResp({
       success: true,
-      data: { days: hdays, total: history.length, groups: histTimeline(hdays, Number(q.limit) || 0) }
+      data: { days: hdays, total: history.length, groups: histTimeline(hdays, Number(q.limit) || 0, q.kw) }
     });
   }
 
@@ -3985,6 +3998,22 @@ async function handleHTTPRequest(req) {
     runImportMulti(items, bm.mode === 'merge' ? 'merge' : 'separate', bm.name || '')
       .finally(function () { importing = false; });
     return jsonResp({ success: true, data: { message: '已开始导入 ' + items.length + ' 张专辑', count: items.length } });
+  }
+
+  // 重试上次导入写入失败的集（v0.18.0）
+  if (path === '/import/retry' && method === 'POST') {
+    if (importing || (job && job.running)) return jsonResp({ success: false, error: '已有导入任务进行中' }, 409);
+    var ft = (job && (job.failedTracks || [])) || [];
+    if (!ft.length) return jsonResp({ success: true, data: { added: 0, left: 0, message: '没有需要重试的集' } });
+    var rpid = Number(job.retryPlaylistId || job.playlistId) || 0;
+    if (!rpid) return jsonResp({ success: false, error: '原歌单不存在，无法重试' }, 400);
+    var rr = await addTracksToPlaylist(rpid, ft, null);
+    job.failedTracks = rr.failedTracks || [];
+    if (job.failedTracks.length) job.error = '仍有 ' + job.failedTracks.length + ' 集写入失败';
+    else job.error = '';
+    await persist();
+    songloft.log.info('[喜马拉雅] 重试失败集: 补上 ' + rr.added + ' 集，剩 ' + job.failedTracks.length + ' 集');
+    return jsonResp({ success: true, data: { added: rr.added, left: job.failedTracks.length } });
   }
 
   if (path === '/imported' && method === 'GET') {
