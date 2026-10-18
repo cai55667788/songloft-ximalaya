@@ -112,6 +112,31 @@
     #player .pbar button { padding: 2px 8px; }
     #player .pbar select { padding: 2px 4px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
     #player .pbar .psep { width: 1px; height: 14px; background: var(--border); }
+
+    /* 播放队列面板 */
+    #qPanel { position: fixed; left: 0; right: 0; bottom: 0; top: 0; background: rgba(0,0,0,.32); z-index: 60; display: none; }
+    #qPanel.show { display: block; }
+    #qPanel .sheet {
+      position: absolute; left: 0; right: 0; bottom: 0; max-height: 72vh; background: var(--card);
+      border-radius: 16px 16px 0 0; border-top: 1px solid var(--border); display: flex; flex-direction: column;
+      max-width: 720px; margin: 0 auto;
+    }
+    #qPanel .qhead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; border-bottom: 1px solid var(--border); }
+    #qPanel .qhead .qt { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #qPanel .qhead .qs { font-size: 11px; color: var(--muted); font-weight: 400; }
+    #qPanel .qlist { overflow-y: auto; padding: 6px 0; }
+    #qPanel .qrow { display: flex; align-items: center; gap: 8px; padding: 7px 14px; cursor: pointer; }
+    #qPanel .qrow:hover { background: var(--accent-soft); }
+    #qPanel .qrow.on { background: var(--accent-soft); }
+    #qPanel .qrow.on .qtt { color: var(--accent); font-weight: 600; }
+    #qPanel .qrow .qno { flex: none; width: 34px; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    #qPanel .qrow.on .qno { color: var(--accent); }
+    #qPanel .qrow .qtt { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #qPanel .qrow .qmk { flex: none; font-size: 11px; color: var(--muted); }
+    #qPanel .qrow .qdel { flex: none; color: var(--muted); font-size: 15px; padding: 0 2px; line-height: 1; cursor: pointer; }
+    #qPanel .qrow .qdel:hover { color: var(--err); }
+    #qPanel .qfoot { display: flex; gap: 8px; padding: 8px 14px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+    #qPanel .qempty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
     .hide { display: none !important; }
   </style>
 </head>
@@ -401,6 +426,7 @@
     <button class="small plain" id="pPrev" title="上一集">⏮</button>
     <button class="small plain" id="pNext" title="下一集">⏭</button>
     <button class="small plain" id="pOrder" title="切换正序 / 倒序">↑ 正序</button>
+    <button class="small plain" id="pQueue" title="查看播放队列">☰ 队列</button>
     <span class="muted" id="pProg">—</span>
     <span class="psep"></span>
     <span class="muted">倍速</span>
@@ -424,6 +450,22 @@
       <option value="90">90 分钟</option>
     </select>
     <span class="muted" id="pSleepTip"></span>
+  </div>
+</div>
+
+<!-- 播放队列 -->
+<div id="qPanel">
+  <div class="sheet">
+    <div class="qhead">
+      <div class="qt" id="qTitle">播放队列 <span class="qs" id="qStat"></span></div>
+      <button class="small plain" id="qOrder" title="切换正序 / 倒序">↑ 正序</button>
+      <span class="x" id="qClose" style="cursor:pointer;color:var(--muted);font-size:18px;line-height:1;">×</span>
+    </div>
+    <div class="qlist" id="qList"></div>
+    <div class="qfoot">
+      <button class="small plain" id="qClear" title="清空队列（不影响已听进度）">清空队列</button>
+      <button class="small plain" id="qDropDone" title="把已听完的集从队列里去掉">移除已听完</button>
+    </div>
   </div>
 </div>
 
