@@ -102,7 +102,7 @@
         if (!meLoaded) loadMySubs(false);
         loadWatch();
       }
-      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); }
+      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); renderTimeline(); }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
     });
@@ -794,11 +794,15 @@
     pendingSeek = null;
     if (qi >= 0 && queue[qi]) curPlayingId = queue[qi].trackId;
     updateProg();
+    abRestore();
+    if (fpOpen) syncFull(true);
   });
 
   var lastSaveAt = 0;
   $('audio').addEventListener('timeupdate', function () {
     updateProg();
+    abCheck();
+    if (fpOpen) syncFull(false);
     var now = Date.now();
     if (now - lastSaveAt < 5000 || qi < 0) return;
     lastSaveAt = now;
@@ -811,8 +815,10 @@
     flushListened();
     flushProg();
     if (qPanelOpen()) renderQueue();
+    if (fpOpen) syncFull(true);
   });  $('audio').addEventListener('play', function () {
     if (qPanelOpen()) renderQueue();
+    if (fpOpen) syncFull(true);
   });
 
   // 播到队列末尾时，先把当前页后面的集补齐，再翻下一页，长书可以一直听下去
@@ -1095,12 +1101,420 @@
     qi = -1;
     queue = [];
     curPlayingId = '';
+    abReset(true);
+    closeFull();
+    closeBm();
   });
 
-  // 快捷键：空格 播放/暂停，← → 前后 10 秒
+  // ================= 播放界面增强：书签 / A-B 复读 / 全屏页 / 时间线 =================
+  var AB_KEY = 'xm_ab';
+  var abA = 0, abB = 0, abLoop = 0, abEnabled = false;
+
+  function curTrack() { return qi >= 0 ? queue[qi] : null; }
+
+  function trackTag() {
+    var t = curTrack();
+    if (!t) return '';
+    var bits = [];
+    if (t.index) bits.push('第 ' + t.index + ' 集');
+    if (t.albumName) bits.push(t.albumName);
+    return bits.join(' · ');
+  }
+
+  // ---------- 书签 ----------
+  var bmPanelOpenFlag = false;
+  var bmFilterAlbum = false;
+  var bmItems = [];
+
+  function openBm() {
+    if (!curTrack()) { msg('先播一集再打书签', 'err'); return; }
+    bmPanelOpenFlag = true;
+    $('bmPanel').classList.add('show');
+    renderBm();
+  }
+  function closeBm() {
+    bmPanelOpenFlag = false;
+    $('bmPanel').classList.remove('show');
+  }
+
+  function bmTimeLabel(t) { return fmtTime(t); }
+
+  async function renderBm() {
+    var t = curTrack();
+    $('bmStat').textContent = t ? ('当前：' + (t.title || '') + ' ' + fmtTime($('audio').currentTime || 0)) : '';
+    $('bmOnlyAlbum').classList.toggle('active', bmFilterAlbum);
+    $('bmOnlyAlbum').disabled = !t || !t.albumId;
+    var q = bmFilterAlbum && t && t.albumId ? ('?albumId=' + encodeURIComponent(t.albumId)) : '';
+    try {
+      var r = await api('GET', '/bookmarks' + q);
+      bmItems = (r && r.data && r.data.items) || [];
+    } catch (e) { bmItems = []; }
+    var box = $('bmList');
+    box.innerHTML = '';
+    if (!bmItems.length) {
+      box.innerHTML = '<div class="bmempty">还没有书签。听到想记的地方，点「＋ 在当前位置打书签」。</div>';
+      return;
+    }
+    $('bmStat').textContent = (t ? '当前 ' + fmtTime($('audio').currentTime || 0) + ' · ' : '') + '共 ' + bmItems.length + ' 条';
+    var lastDay = '';
+    bmItems.forEach(function (b) {
+      var dk = dayKey(b.at);
+      if (dk !== lastDay) {
+        lastDay = dk;
+        var hd = document.createElement('div');
+        hd.className = 'bmday';
+        hd.textContent = dayLabel(dk);
+        box.appendChild(hd);
+      }
+      var row = document.createElement('div');
+      row.className = 'bmrow';
+      var tm = document.createElement('div');
+      tm.className = 'bmt';
+      tm.textContent = bmTimeLabel(b.t);
+      tm.title = '从这个时间点开始听';
+      tm.addEventListener('click', function () { playBookmark(b); });
+      var mid = document.createElement('div');
+      mid.className = 'bmm';
+      var tt = document.createElement('div');
+      tt.className = 'bmtitle';
+      tt.textContent = b.title || ('第 ' + (b.index || '?') + ' 集');
+      var sub = document.createElement('div');
+      sub.className = 'bmsub';
+      var bits = [];
+      if (b.index) bits.push('第 ' + b.index + ' 集');
+      if (b.albumName) bits.push(b.albumName);
+      bits.push(agoText(b.at));
+      sub.textContent = bits.join(' · ');
+      mid.appendChild(tt);
+      if (b.note) {
+        var nn = document.createElement('div');
+        nn.className = 'bmnote';
+        nn.textContent = '📝 ' + b.note;
+        mid.appendChild(nn);
+      }
+      mid.appendChild(sub);
+      mid.addEventListener('click', function () { playBookmark(b); });
+      var del = document.createElement('span');
+      del.className = 'bmdel';
+      del.textContent = '×';
+      del.title = '删除书签';
+      del.addEventListener('click', async function (e) {
+        e.stopPropagation();
+        try {
+          await api('POST', '/bookmarks', { remove: b.id });
+          msg('书签已删除');
+          renderBm();
+        } catch (err) { msg('删除失败: ' + err.message, 'err'); }
+      });
+      row.appendChild(tm); row.appendChild(mid); row.appendChild(del);
+      box.appendChild(row);
+    });
+  }
+
+  function playBookmark(b) {
+    if (!b || !b.trackId) return;
+    var same = curTrack() && String(curTrack().trackId) === String(b.trackId);
+    if (same) {
+      $('audio').currentTime = Number(b.t) || 0;
+      msg('跳到 ' + fmtTime(b.t));
+      return;
+    }
+    pendingSeek = { t: Number(b.t) || 0 };
+    playQueue([{ trackId: b.trackId, index: b.index, title: b.title, albumId: b.albumId, albumName: b.albumName, cover: b.cover }], 0,
+      { id: b.albumId, name: b.albumName, cover: b.cover });
+    closeBm();
+  }
+
+  async function addBmNow() {
+    var t = curTrack();
+    if (!t) { msg('先在下方播放器播一集', 'err'); return; }
+    var a = $('audio');
+    if (!a.duration) { msg('还没加载好，等一下再试', 'err'); return; }
+    var note = ($('bmNote').value || '').trim();
+    var body = {
+      trackId: t.trackId, albumId: t.albumId || '', albumName: t.albumName || '',
+      title: t.title || '', index: t.index || 0, cover: t.cover || '',
+      t: Math.round(a.currentTime || 0), note: note
+    };
+    try {
+      var r = await api('POST', '/bookmarks', body);
+      if (!r.success) { msg('❌ ' + (r.error || '保存失败'), 'err'); return; }
+      msg((r.data && r.data.dup ? '📍 这个时间点已有书签，已更新备注' : '📍 已加书签 ' + fmtTime(body.t)), 'ok');
+      $('bmNote').value = '';
+      renderBm();
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  }
+
+  function dayKey(ts) {
+    var d = new Date(Number(ts) || Date.now());
+    var m = d.getMonth() + 1, dd = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (dd < 10 ? '0' : '') + dd;
+  }
+  function dayLabel(k) {
+    var today = dayKey(Date.now());
+    var y = new Date(Date.now() - 86400000);
+    var yk = dayKey(y.getTime());
+    if (k === today) return '今天 ' + k;
+    if (k === yk) return '昨天 ' + k;
+    return k;
+  }
+
+  $('pBm').addEventListener('click', openBm);
+  $('bmClose').addEventListener('click', closeBm);
+  $('bmAddNow').addEventListener('click', addBmNow);
+  $('bmOnlyAlbum').addEventListener('click', function () {
+    bmFilterAlbum = !bmFilterAlbum;
+    renderBm();
+  });
+  $('bmPanel').addEventListener('click', function (e) {
+    if (e.target === $('bmPanel')) closeBm();
+  });
+  $('bmNote').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); addBmNow(); }
+  });
+
+  // ---------- A-B 复读 ----------
+  function abTip() {
+    var txt = '';
+    if (abA && !abB) txt = 'A ' + fmtTime(abA) + ' → 再点设 B';
+    else if (abA && abB) txt = 'A ' + fmtTime(abA) + ' - B ' + fmtTime(abB) + (abLoop ? ' ×' + abLoop : '');
+    $('pAbTip').textContent = txt;
+    if ($('fpAbTip')) $('fpAbTip').textContent = txt;
+    $('pAb').classList.toggle('active', !!abEnabled);
+    if ($('fpAb')) $('fpAb').classList.toggle('active', !!abEnabled);
+    $('pAb').textContent = abEnabled ? '🔁 复读中' : '🔁 复读';
+    if ($('fpAb')) $('fpAb').textContent = abEnabled ? '🔁 复读中' : '🔁';
+  }
+
+  function abReset(silent) {
+    abA = 0; abB = 0; abEnabled = false;
+    sSet(AB_KEY, '');
+    abTip();
+    if (!silent) msg('已取消 A-B 复读');
+  }
+
+  // 三态循环：无 A → 设 A；有 A 无 B → 设 B 并开播复读；已有 A/B → 取消
+  function abToggle() {
+    var a = $('audio');
+    if (!curTrack() || !a.duration) { msg('先播一集再用复读', 'err'); return; }
+    var t = Math.round(a.currentTime || 0);
+    if (!abA) {
+      abA = t; abB = 0; abEnabled = false;
+      msg('🅰 起点 ' + fmtTime(t) + '，听到终点再点一次', 'ok');
+      abTip();
+      return;
+    }
+    if (!abB) {
+      if (t - abA < 2) { msg('终点要比起点晚 2 秒以上，再往后听一点', 'err'); return; }
+      abB = t; abEnabled = true; abLoop = 0;
+      msg('🔁 开始复读 ' + fmtTime(abA) + ' - ' + fmtTime(abB), 'ok');
+      a.currentTime = abA;
+      abTip();
+      return;
+    }
+    abReset(false);
+  }
+
+  // timeupdate 里检查是否越过 B 点
+  function abCheck() {
+    if (!abEnabled || !abA || !abB) return;
+    var a = $('audio');
+    var t = a.currentTime || 0;
+    if (t >= abB - 0.15 || t < abA - 1.5) {
+      abLoop += 1;
+      a.currentTime = abA;
+      abTip();
+    }
+  }
+
+  // 记到 localStorage，切集后同一集还能继续复读
+  function abPersist() {
+    var c = curTrack();
+    if (!c) return;
+    sSet(AB_KEY, abA && abB ? JSON.stringify({ trackId: c.trackId, a: abA, b: abB }) : '');
+  }
+
+  function abRestore() {
+    abA = 0; abB = 0; abEnabled = false; abLoop = 0;
+    var c = curTrack();
+    if (!c) { abTip(); return; }
+    try {
+      var o = JSON.parse(sGet(AB_KEY) || 'null');
+      if (o && String(o.trackId) === String(c.trackId) && o.a < o.b) {
+        abA = o.a; abB = o.b; abEnabled = true;
+        msg('🔁 恢复复读 ' + fmtTime(abA) + ' - ' + fmtTime(abB));
+      }
+    } catch (e) { /* */ }
+    abTip();
+  }
+
+  $('pAb').addEventListener('click', abToggle);
+  if ($('fpAb')) $('fpAb').addEventListener('click', abToggle);
+
+  // ---------- 全屏播放页 ----------
+  var fpOpen = false;
+  var fpDragging = false;
+
+  function openFull() {
+    if (!curTrack()) { msg('先播一集', 'err'); return; }
+    fpOpen = true;
+    $('fullPlayer').classList.add('show');
+    if (document.body) document.body.style.overflow = 'hidden';
+    syncFull(true);
+  }
+  function closeFull() {
+    fpOpen = false;
+    $('fullPlayer').classList.remove('show');
+    if (document.body) document.body.style.overflow = '';
+  }
+
+  function syncFull(force) {
+    if (!fpOpen && !force) return;
+    var a = $('audio');
+    var t = curTrack();
+    $('fpAlbum').textContent = (t && t.albumName) || '—';
+    $('fpTitle').textContent = (t && t.title) || '—';
+    $('fpCover').src = (t && t.cover) || (t && t.albumId ? '' : '');
+    var meta = [];
+    if (t && t.index) meta.push('第 ' + t.index + ' 集');
+    if (qi >= 0 && queue.length > 1) meta.push('队列 ' + (qi + 1) + ' / ' + queue.length);
+    if (playOrder === 'desc') meta.push('倒序');
+    $('fpMeta').textContent = meta.join(' · ');
+    var d = a.duration || 0, cur = a.currentTime || 0;
+    $('fpDur').textContent = d ? fmtTime(d) : '0:00';
+    $('fpCur').textContent = fmtTime(cur);
+    if (!fpDragging) $('fpSeek').value = d ? Math.round(cur / d * 1000) : 0;
+    $('fpPlay').textContent = a.paused ? '▶' : '⏸';
+    if ($('fpRate').value !== String(a.playbackRate)) $('fpRate').value = String(a.playbackRate || 1);
+    if ($('fpQueue')) $('fpQueue').textContent = queue.length > 1 ? '☰ ' + (qi + 1) + '/' + queue.length : '☰';
+  }
+
+  $('pFull').addEventListener('click', openFull);
+  $('fpClose').addEventListener('click', closeFull);
+  $('fpQueue').addEventListener('click', function () { openQueue(); });
+  $('fpPlay').addEventListener('click', function () {
+    var a = $('audio');
+    if (a.paused) a.play().catch(function () { }); else a.pause();
+  });
+  $('fpPrev').addEventListener('click', function () { if (qi > 0) playAt(qi - 1); else msg('已经是队列第 1 集'); });
+  $('fpNext').addEventListener('click', function () { if (qi + 1 < queue.length) playAt(qi + 1); else msg('已经是队列最后一集'); });
+  $('fpBack15').addEventListener('click', function () {
+    var a = $('audio'); a.currentTime = Math.max(0, (a.currentTime || 0) - 15);
+  });
+  $('fpFwd30').addEventListener('click', function () {
+    var a = $('audio'); a.currentTime = Math.min(a.duration || 1e9, (a.currentTime || 0) + 30);
+  });
+  $('fpBm').addEventListener('click', function () { addBmNowQuick(); });
+  $('fpRate').addEventListener('change', function () {
+    var v = Number(this.value) || 1;
+    $('audio').playbackRate = v;
+    sSet(RATE_KEY, String(v));
+    $('pRate').value = String(v);
+    msg('倍速 ' + v + 'x');
+  });
+  $('fpSeek').addEventListener('input', function () { fpDragging = true; });
+  $('fpSeek').addEventListener('change', function () {
+    var a = $('audio');
+    var d = a.duration || 0;
+    if (d) a.currentTime = d * (Number(this.value) || 0) / 1000;
+    fpDragging = false;
+    syncFull(true);
+  });
+
+  // 全屏页里打书签：不弹面板，直接记一条带时间点的
+  async function addBmNowQuick() {
+    var t = curTrack();
+    if (!t) { msg('先播一集', 'err'); return; }
+    var a = $('audio');
+    if (!a.duration) { msg('还没加载好，等一下再试', 'err'); return; }
+    var body = {
+      trackId: t.trackId, albumId: t.albumId || '', albumName: t.albumName || '',
+      title: t.title || '', index: t.index || 0, cover: t.cover || '',
+      t: Math.round(a.currentTime || 0), note: ''
+    };
+    try {
+      var r = await api('POST', '/bookmarks', body);
+      msg(r.success ? '📍 已加书签 ' + fmtTime(body.t) : '❌ ' + (r.error || '失败'), r.success ? 'ok' : 'err');
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  }
+
+  // ---------- 播放历史时间线 ----------
+  var tlDays = 1;
+
+  function renderTimeline() {
+    var box = $('tlBody');
+    if (!box) return;
+    api('GET', '/history?days=' + tlDays).then(function (r) {
+      var groups = (r && r.data && r.data.groups) || [];
+      box.innerHTML = '';
+      if (!groups.length) {
+        $('tlStat').textContent = '这个时间段还没有收听记录。';
+        return;
+      }
+      var totalSec = 0, totalCnt = 0;
+      groups.forEach(function (g) { totalSec += Number(g.listSec) || 0; totalCnt += Number(g.count) || 0; });
+      $('tlStat').textContent = '共 ' + totalCnt + ' 条记录，实际收听 ' + fmtHM(totalSec) + '（跨设备合并）';
+      groups.forEach(function (g) {
+        var hd = document.createElement('div');
+        hd.className = 'bmday';
+        hd.textContent = dayLabel(g.day) + (g.listSec ? ' · 听了 ' + fmtHM(g.listSec) : '') + ' · ' + g.items.length + ' 条';
+        box.appendChild(hd);
+        g.items.forEach(function (it) {
+          var row = document.createElement('div');
+          row.className = 'tlitem';
+          var tm = document.createElement('div');
+          tm.className = 'tlt';
+          tm.textContent = fmtHMTime(it.at);
+          var b = document.createElement('div');
+          b.className = 'tlb';
+          var n = document.createElement('div');
+          n.className = 'tln';
+          n.textContent = (it.index ? it.index + '. ' : '') + (it.title || '');
+          var s = document.createElement('div');
+          s.className = 'tls';
+          var bits = [];
+          if (it.albumName) bits.push(it.albumName);
+          bits.push('听到 ' + fmtTime(it.t || 0));
+          s.textContent = bits.join(' · ');
+          b.appendChild(n); b.appendChild(s);
+          b.addEventListener('click', function () {
+            pendingSeek = { t: Number(it.t) || 0 };
+            playQueue([{ trackId: it.trackId, index: it.index, title: it.title, albumId: it.albumId, albumName: it.albumName, cover: it.cover }], 0,
+              { id: it.albumId, name: it.albumName, cover: it.cover });
+          });
+          row.appendChild(tm); row.appendChild(b);
+          box.appendChild(row);
+        });
+      });
+    }).catch(function () { $('tlStat').textContent = '读取失败，稍后再试'; });
+  }
+
+  function fmtHMTime(ts) {
+    var d = new Date(Number(ts) || Date.now());
+    var h = d.getHours(), m = d.getMinutes();
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+
+  document.querySelectorAll('.tlBtn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.querySelectorAll('.tlBtn').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      tlDays = Number(b.getAttribute('data-days')) || 1;
+      renderTimeline();
+    });
+  });
+  if ($('btnTlRefresh')) $('btnTlRefresh').addEventListener('click', renderTimeline);
+
+
+  // 快捷键：空格 播放/暂停，← → 前后 10 秒，B 打书签，A 复读，Esc 逐层收起
   document.addEventListener('keydown', function (e) {
     var tag = (e.target && e.target.tagName) || '';
     if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
+    if (e.key === 'Escape') {
+      if (fpOpen) { e.preventDefault(); closeFull(); return; }
+      if (bmPanelOpenFlag) { e.preventDefault(); closeBm(); return; }
+      if (qPanelOpen()) { e.preventDefault(); closeQueue(); return; }
+    }
     if (!$('player').classList.contains('show')) return;
     var a = $('audio');
     if (e.code === 'Space' || e.key === ' ') {
@@ -1112,6 +1526,12 @@
     } else if (e.code === 'ArrowRight') {
       e.preventDefault();
       a.currentTime = Math.min(a.duration || 1e9, (a.currentTime || 0) + 10);
+    } else if (e.key === 'b' || e.key === 'B') {
+      e.preventDefault();
+      addBmNowQuick();
+    } else if (e.key === 'a' || e.key === 'A') {
+      e.preventDefault();
+      abToggle();
     }
   });
 
@@ -2577,6 +2997,11 @@
     renderIdleChips();
     poll();
     pullRecent();
+    renderTimeline();
+    abTip();
+    document.querySelectorAll('.tlBtn').forEach(function (b) {
+      b.classList.toggle('active', Number(b.getAttribute('data-days')) === tlDays);
+    });
   }
   // 任何初始化异常都不允许静默吞掉整个页面：把错误打到页面上
   try { boot(); } catch (e) {
