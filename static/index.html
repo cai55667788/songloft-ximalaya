@@ -152,6 +152,49 @@
     /* A-B 复读提示 */
     .pabtip { font-size: 11px; color: var(--accent); font-variant-numeric: tabular-nums; }
     .pabtip:empty { display: none; }
+    /* 拖动进度时的时间预览气泡 */
+    .seekview { position: fixed; z-index: 9600; transform: translate(-50%, -100%); background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 3px 9px; font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: 0 4px 14px rgba(0,0,0,.18); pointer-events: none; white-space: nowrap; }
+    .seekview.hide { display: none; }
+    #pVol { accent-color: var(--accent, #3b82f6); }
+    /* 日志 / 自检 */
+    .logrow { display: flex; gap: 8px; align-items: flex-start; padding: 6px 2px; border-bottom: 1px dashed var(--border); font-size: 12px; }
+    .logrow:last-child { border-bottom: none; }
+    .loglv { flex: 0 0 34px; font-size: 11px; text-align: center; border-radius: 4px; padding: 1px 0; }
+    .loglv.warn { background: #fef3c7; color: #92400e; }
+    .loglv.error { background: #fee2e2; color: #991b1b; }
+    .loglv.info { background: var(--border); color: var(--muted); }
+    .logtime { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .logmsg { flex: 1; word-break: break-all; }
+    .logtag { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+    .schk { display: flex; gap: 8px; align-items: flex-start; padding: 7px 2px; border-bottom: 1px dashed var(--border); font-size: 13px; }
+    .schk:last-child { border-bottom: none; }
+    .schk .dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; }
+    .schk .dot.ok { background: #16a34a; }
+    .schk .dot.warn { background: #f59e0b; }
+    .schk .dot.bad { background: #dc2626; }
+    .schk .nm { flex: 0 0 108px; font-weight: 600; }
+    .schk .dt { flex: 1; color: var(--muted); word-break: break-all; }
+    /* 专辑对比 */
+    .cmpgrid { display: grid; grid-template-columns: 1fr 92px 1fr; gap: 6px 8px; align-items: center; font-size: 13px; }
+    .cmpgrid .h { text-align: center; font-size: 11px; color: var(--muted); }
+    .cmpgrid .cell { padding: 6px 8px; background: var(--bg); border-radius: 8px; }
+    .cmpgrid .cell.win { outline: 1.5px solid #16a34a; }
+    .cmpgrid .lb { text-align: center; font-size: 11px; color: var(--muted); }
+    .cmpverdict { margin-top: 10px; padding: 9px 11px; background: var(--bg); border-left: 3px solid var(--accent, #3b82f6); border-radius: 6px; font-size: 13px; line-height: 1.6; }
+    /* AI 分集简介 / 精彩片段 */
+    .blurb { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .hlitem { display: flex; gap: 9px; align-items: flex-start; padding: 7px 0; border-bottom: 1px dashed var(--border); cursor: pointer; }
+    .hlitem:last-child { border-bottom: none; }
+    .hlitem:hover { background: var(--bg); }
+    .hlitem .ix { flex: 0 0 34px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .hlitem .tt2 { flex: 1; font-size: 13px; }
+    .hlitem .why { color: var(--accent, #3b82f6); font-size: 12px; }
+    .aitip { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    /* 搜索历史 */
+    .hsrow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    .hsrow .hslb { font-size: 11px; color: var(--muted); }
+    .hschip { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); cursor: pointer; }
+    .hschip:hover { border-color: var(--accent, #3b82f6); }
     /* 书签面板：复用 #qPanel 的 sheet 结构 */
     #bmPanel { position: fixed; left: 0; right: 0; bottom: 0; top: 0; background: rgba(0,0,0,.32); z-index: 62; display: none; }
     #bmPanel.show { display: block; }
@@ -269,7 +312,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.14.0</span>
+    <span class="ver" id="ver">v0.15.0</span>
   </div>
 
   <div class="tabs">
@@ -292,6 +335,15 @@
         <span class="chip" id="modeTrack">搜单集</span>
       </div>
       <div id="kwChips" class="chips"></div>
+      <div class="hsrow hide" id="hsRow">
+        <span class="hslb">最近搜过</span>
+        <span id="hsChips" style="display:flex;gap:6px;flex-wrap:wrap;"></span>
+        <button class="small plain" id="btnHsClear" style="padding:1px 8px;font-size:11px;">清空</button>
+      </div>
+      <div class="btns" style="margin-top:8px;">
+        <button class="small plain" id="btnCompare" title="把两张专辑放进一起比">⇄ 专辑对比</button>
+      </div>
+      <div class="hide" id="cmpBox"></div>
       <div id="searchMeta" class="muted small-txt" style="margin-top:8px;"></div>
       <div id="searchResults"></div>
       <div class="btns hide" id="trackMore">
@@ -344,6 +396,16 @@
         </div>
         <div class="aians hide" id="aiAns"></div>
       </div>
+      <!-- AI 精彩片段 -->
+      <div class="aicard hide" id="aiHlCard">
+        <div class="aihead">
+          <span class="aititle">🎯 精彩片段</span>
+          <span class="muted small-txt" id="hlMeta"></span>
+          <button class="small plain" id="btnHlGen">推荐</button>
+        </div>
+        <div id="hlBody"></div>
+      </div>
+
       <div class="btns" id="dResumeBar" style="display:none;">
         <button class="small" id="btnResume">▶ 继续听</button>
         <button class="small plain" id="btnFromStart">从头听</button>
@@ -354,6 +416,7 @@
           <input type="checkbox" id="ckUnheard" style="accent-color:var(--accent)" /> 只看未听
         </label>
         <button class="small plain" id="btnOrder" title="按集数正序 / 倒序排列">↓ 倒序</button>
+        <button class="small plain" id="btnBlurbs" title="让 AI 给每集写一句话简介，一眼看出这集讲什么">✨ 分集简介</button>
         <span class="muted small-txt" id="dProgStat"></span>
       </div>
       <div class="btns">
@@ -361,7 +424,9 @@
         <button class="small ghost" id="btnSub">订阅并跟进更新</button>
         <button class="small plain" id="btnPlayAll">▶ 音箱播放</button>
         <button class="small plain" id="btnDownload">⬇ 下载到本地</button>
+        <button class="small plain" id="btnSplit" title="按收听进度把这本书拆成「已听 / 未听」两个歌单">✂ 拆已听/未听</button>
       </div>
+      <div id="dHl" class="hide" style="margin-top:10px;"></div>
       <div class="muted small-txt" id="dDlTip" style="margin-top:6px;"></div>
       <div class="row" style="margin-top:10px;">
         <div><label>起始集</label><input type="number" id="dStart" min="1" placeholder="1" /></div>
@@ -454,6 +519,26 @@
         <button class="small" id="btnMeImport">导入所选</button>
         <button class="small ghost" id="btnMeSub">只订阅不导入</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>🎙 按主播追更</h2>
+      <div class="muted small-txt" id="anchorStat">点「刷新」按钮，把订阅/导入里出现过的主播聚起来，一次看他还有什么书。</div>
+      <div class="btns">
+        <button class="small plain" id="btnAnchorRefresh">刷新</button>
+      </div>
+      <div id="anchorBody" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>📤 导出清单</h2>
+      <div class="muted small-txt">把订阅列表导出成文件，换设备、备份或交给别人都方便。</div>
+      <div class="btns">
+        <button class="small plain" id="btnExpJson">导出 JSON</button>
+        <button class="small plain" id="btnExpCsv">导出 CSV（Excel）</button>
+        <button class="small plain" id="btnExpMd">导出 Markdown</button>
+      </div>
+      <div class="muted small-txt" id="expStat" style="margin-top:6px;"></div>
     </div>
 
     <div class="card">
@@ -592,7 +677,7 @@
         <div><label>开关</label>
           <select id="aiEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
         </div>
-        <div><label>模型</label><input type="text" id="aiModel" placeholder="deepseek-v4.1-flash-0930" /></div>
+        <div><label>模型</label><input type="text" id="aiModel" placeholder="deepseek-v4.1-flash" /></div>
       </div>
       <label>网关地址（OpenAI 兼容，填到 /v1 为止）</label>
       <input type="text" id="aiUrl" placeholder="http://127.0.0.1:3065/v1" />
@@ -605,6 +690,33 @@
       </div>
       <div class="muted small-txt" id="aiTestOut" style="margin-top:8px;"></div>
       <div class="muted small-txt" style="margin-top:4px;">开启后：专辑详情页会多出「AI 速览」（一句话简介、内容标签、全书主题分段）和「问这本书」（基于简介与标题作答，不做联网检索）；书签也能交给 AI 归类。结果按专辑缓存，同一本不重复花钱。</div>
+    </div>
+
+    <div class="card">
+      <h2>🩺 自检</h2>
+      <div class="muted small-txt" id="scSummary">检查中…</div>
+      <div class="btns">
+        <button class="small plain" id="btnScRun">重新检查</button>
+        <button class="small plain" id="btnScDeep" title="额外验证一次单集播放地址与 AI 连通">深度检查</button>
+      </div>
+      <div id="scBody" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>📝 运行日志</h2>
+      <div class="muted small-txt" id="logStat">—</div>
+      <div class="btns">
+        <button class="small plain" id="btnLogRefresh">刷新</button>
+        <select id="logLevel" style="font-size:12px;padding:2px 6px;">
+          <option value="all">全部</option>
+          <option value="warn">只看警告</option>
+          <option value="error">只看错误</option>
+          <option value="info">只看记录</option>
+        </select>
+        <button class="small ghost" id="btnLogClear">清空</button>
+      </div>
+      <div id="logBody" style="margin-top:8px;max-height:280px;overflow:auto;"></div>
+      <div class="muted small-txt" style="margin-top:4px;">保留最近 100 条（警告与错误重启后仍在）。遇到「怎么没反应」，先看这里。</div>
     </div>
 
     <div class="card">
@@ -672,6 +784,7 @@
       <span class="palbum" id="pAlbum"></span>
     </div>
     <audio id="audio" controls preload="none"></audio>
+    <div class="seekview hide" id="seekView"></div>
     <span class="x" id="pClose">×</span>
   </div>
   <div class="pbar">
@@ -682,8 +795,13 @@
     <button class="small plain" id="pBm" title="给当前时间点打个书签（快捷键 B）">🔖 书签</button>
     <button class="small plain" id="pAb" title="A-B 复读：点一下设起点，再点一下设终点">🔁 复读</button>
     <button class="small plain" id="pFull" title="全屏播放页">⛶ 全屏</button>
+    <button class="small plain" id="pLoopOne" title="单集循环：当前这集循环播放">🔂 单集</button>
+    <button class="small plain" id="pSkip" title="跳过片头片尾（默认各 0 秒，可在设置里改）">⏩ 跳片头</button>
     <span class="pabtip" id="pAbTip"></span>
     <span class="muted" id="pProg">—</span>
+    <span class="psep"></span>
+    <span class="muted">音量</span>
+    <input type="range" id="pVol" min="0" max="100" step="5" value="100" title="音量（会记住上次的设置）" style="width:80px;vertical-align:middle;" />
     <span class="psep"></span>
     <span class="muted">倍速</span>
     <select id="pRate">
@@ -782,6 +900,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.14.0"></script>
+<script src="static/app.js?v=0.15.0"></script>
 </body>
 </html>
