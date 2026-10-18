@@ -119,7 +119,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.8.0</span>
+    <span class="ver" id="ver">v0.9.0</span>
   </div>
 
   <div class="tabs">
@@ -137,9 +137,17 @@
         <div><input type="text" id="kw" placeholder="关键词，如：股票、三国演义、郭德纲" /></div>
         <div style="flex:none"><button class="small" id="btnSearch" style="padding:9px 16px">搜索</button></div>
       </div>
+      <div class="tabs" style="margin-top:10px;margin-bottom:2px;">
+        <span class="chip on" id="modeAlbum">搜专辑</span>
+        <span class="chip" id="modeTrack">搜单集</span>
+      </div>
       <div id="kwChips" class="chips"></div>
       <div id="searchMeta" class="muted small-txt" style="margin-top:8px;"></div>
       <div id="searchResults"></div>
+      <div class="btns hide" id="trackMore">
+        <button class="small plain" id="btnMoreTracks">加载更多单集</button>
+        <button class="small" id="btnImportAllTracks">把这些单集加进歌单</button>
+      </div>
       <div class="selbar hide" id="selBar">
         <label class="muted small-txt" style="margin:0;display:flex;align-items:center;gap:6px;">
           <input type="checkbox" id="ckAll" style="accent-color:var(--accent)" /> 全选
@@ -183,7 +191,9 @@
         <button class="small" id="btnImportDetail">导入全部</button>
         <button class="small ghost" id="btnSub">订阅并跟进更新</button>
         <button class="small plain" id="btnPlayAll">▶ 音箱播放</button>
+        <button class="small plain" id="btnDownload">⬇ 下载到本地</button>
       </div>
+      <div class="muted small-txt" id="dDlTip" style="margin-top:6px;"></div>
       <div class="row" style="margin-top:10px;">
         <div><label>起始集</label><input type="number" id="dStart" min="1" placeholder="1" /></div>
         <div><label>结束集</label><input type="number" id="dEnd" min="1" placeholder="默认全部" /></div>
@@ -257,6 +267,25 @@
     </div>
 
     <div class="card">
+      <h2>🗣️ 定时语音播报</h2>
+      <div class="row">
+        <div><label>每天几点播报</label><input type="time" id="ttsTime" value="07:30" /></div>
+        <div><label>开关</label>
+          <select id="ttsEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
+        </div>
+        <div><label>播报音箱</label><select id="ttsDevice"><option value="">跟随设置里的设备</option></select></div>
+      </div>
+      <label>开场白</label>
+      <input type="text" id="ttsPrefix" placeholder="喜马拉雅更新提醒" />
+      <div class="btns">
+        <button class="small" id="btnTtsSave">保存设置</button>
+        <button class="small plain" id="btnTtsPreview">预览播报稿</button>
+        <button class="small ghost" id="btnTtsPlay">现在播一次</button>
+      </div>
+      <div class="muted small-txt" style="margin-top:8px;" id="ttsInfo">开启后每天到点先同步订阅，有新集就用音箱念出来（没新集不打扰）。</div>
+    </div>
+
+    <div class="card">
       <h2>📌 我的订阅</h2>
       <div id="subsList"><span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span></div>
     </div>
@@ -267,6 +296,25 @@
     <div class="card">
       <h2>📚 已导入专辑</h2>
       <div id="importedList"><span class="muted">还没有导入专辑。</span></div>
+    </div>
+
+    <div class="card">
+      <h2>⬇️ 下载到本地音乐目录</h2>
+      <div id="dlStat" class="muted small-txt">还没有下载任务。在专辑行点「下载」，就会把整本存到 Songloft 的音乐目录。</div>
+      <div class="row" style="margin-top:10px;">
+        <div><label>子目录（相对音乐库根目录，留空 = 直接放根目录）</label><input type="text" id="dlDir" placeholder="喜马拉雅" /></div>
+        <div><label>下载格式</label>
+          <select id="dlFormat">
+            <option value="mp3">转成 mp3（推荐）</option>
+            <option value="">保留源格式</option>
+          </select>
+        </div>
+      </div>
+      <div class="btns">
+        <button class="small" id="btnDlSave">保存目录</button>
+        <button class="small plain" id="btnDlStop">停止下载</button>
+      </div>
+      <div class="muted small-txt" style="margin-top:6px;">下载后这些歌会变成本地文件，断网也能听；默认按「主播/专辑/集名」自动分目录。</div>
     </div>
   </section>
 
@@ -279,6 +327,22 @@
         <div><label>播放方式</label><select id="mode"><option value="order">顺序</option><option value="random">随机</option></select></div>
       </div>
       <div class="muted small-txt" style="margin-top:6px;">来自「智能音箱（miot）」插件的设备列表。</div>
+    </div>
+
+    <div class="card">
+      <h2>☁️ 跨设备收听进度</h2>
+      <div class="row">
+        <div><label>把听书进度同步到 NAS</label>
+          <select id="progSync"><option value="1">开启（推荐）</option><option value="0">关闭</option></select>
+        </div>
+      </div>
+      <div class="btns">
+        <button class="small" id="btnProgSave">保存</button>
+        <button class="small plain" id="btnProgPull">从 NAS 拉一次</button>
+        <button class="small ghost" id="btnProgClear">清空 NAS 上的进度</button>
+      </div>
+      <div class="muted small-txt" id="progStat" style="margin-top:8px;">—</div>
+      <div class="muted small-txt" style="margin-top:4px;">开启后手机、平板、电脑共用同一份进度：在 A 设备听到第 37 集 05:20，换 B 设备打开同一张专辑会自动接着播。</div>
     </div>
 
     <div class="card">
@@ -361,6 +425,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.8.0"></script>
+<script src="static/app.js?v=0.9.0"></script>
 </body>
 </html>
