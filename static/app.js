@@ -1088,6 +1088,11 @@
   var cur = { id: '', page: 1, hasMore: false, detail: null };
 
   async function openDetail(albumId) {
+    // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去
+    var activeTab = document.querySelector('.tab.active');
+    if (!activeTab || activeTab.getAttribute('data-tab') !== 'search') {
+      document.querySelector('.tab[data-tab="search"]').click();
+    }
     cur.id = String(albumId);
     cur.page = 1;
     $('searchCard').classList.add('hide');
