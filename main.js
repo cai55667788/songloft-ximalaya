@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.15.0';
+var VERSION = '0.16.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -1100,6 +1100,12 @@ async function loadAll() {
   if (!Array.isArray(bookmarks)) bookmarks = [];
   if (!Array.isArray(history)) history = [];
   if (!aiCache || typeof aiCache !== 'object' || Array.isArray(aiCache)) aiCache = {};
+  try {
+    var td = await songloft.storage.get(TODO_KEY);
+    var tarr = typeof td === 'string' ? JSON.parse(td) : td;
+    if (Array.isArray(tarr)) todoItems = tarr.filter(function (x) { return x && x.albumId; }).slice(0, 200);
+  } catch (e) { /* */ }
+  if (!Array.isArray(todoItems)) todoItems = [];
 
   if (!config || typeof config !== 'object') config = {};
   if (!config.device) config.device = { account_id: '', device_id: '', device_name: '' };
@@ -1618,6 +1624,21 @@ function aiParseJson(text) {
   var a = s.indexOf('{'), b = s.lastIndexOf('}');
   if (a >= 0 && b > a) s = s.slice(a, b + 1);
   try { return JSON.parse(s); } catch (e) { return null; }
+}
+
+// 模型很爱把「60字内」「30字以内」这类字数约束原样写进内容里，用之前先剃掉。
+// 只处理句子末尾/括号里的量词约束，不动正文中间的数字。
+function cleanAiText(s, max) {
+  var t = String(s == null ? '' : s).trim();
+  t = t.replace(/[（(]\s*(不超过|少于|控制在)?\s*[0-9一二三四五六七八九十]+\s*(个)?\s*字(以内|内|左右|以下)?\s*[）)]/g, '');
+  t = t.replace(/[，,、]?\s*(不超过|少于|控制在)?\s*[0-9一二三四五六七八九十]+\s*(个)?\s*字(以内|内|左右|以下)?\s*$/g, '');
+  t = t.replace(/[，,、]?\s*[0-9]+\s*字$/g, '');
+  t = t.replace(/\s{2,}/g, ' ').trim();
+  // 剃完可能尾巴上留个逗号/句号
+  t = t.replace(/[，,、：:]\s*$/, '').trim();
+  // 整句都是「提示：控制在 50 字」这种，剃完只剩个「提示」，就没必要留了
+  if (/^[^，。！？,!.?]{0,4}$/.test(t) && /字/.test(String(s))) t = '';
+  return max ? t.slice(0, max) : t;
 }
 
 // 给一本书生成「摘要 + 标签 + 主题分组」，结果按专辑缓存，换设备可复用
@@ -2246,7 +2267,15 @@ async function runImportMulti(items, mode, mergedName) {
     job.running = false;
     job.finishedAt = nowStr();
     await persist();
+    // 从待听清单来的：导完就出清单，成功的才清
+    try {
+      var okIds = [];
+      (job.parts || []).forEach(function (p) { if (!p.error) okIds.push(String(p.albumId)); });
+      var dropped = todoDrop(okIds);
+      if (dropped) songloft.log.info('[喜马拉雅] 待听清单已划掉 ' + dropped + ' 张专辑');
+    } catch (e) { /* */ }
     songloft.log.info('[喜马拉雅] 批量导入完成: ' + job.done + '/' + job.total);
+
   } catch (e) {
     job.running = false;
     job.error = String(e);
@@ -2494,6 +2523,16 @@ async function tick() {
   if (syncing) return;
   var now = hhmmNow();
   var today = todayStr();
+
+  // 语音设的定时停止：到点就停音箱，只停一次
+  if (sleepArmed && Date.now() >= sleepArmed.until) {
+    var sdv = ttsDevice();
+    if (sdv.account_id && sdv.device_id) {
+      try { await miotPost('/mina/pause', { account_id: sdv.account_id, device_id: sdv.device_id }); } catch (e) { /* */ }
+    }
+    logInfo('voice', '定时停止已执行（' + sleepArmed.minutes + ' 分钟）');
+    sleepArmed = null;
+  }
 
   // ⓪ 登录态巡检：每天一次（登录失效会让同步与播放静默失败，早点发现早点提醒）
   if (login.cookie && config.cookieCheck !== false &&
@@ -3088,7 +3127,386 @@ async function bulkSubscribe(albumIds) {
   return { added: added, existed: existed, failed: failed };
 }
 
-// ---------- HTTP 路由 ----------
+// ---------- AI 推荐下一本 ----------
+// 素材：我听过的（progress）+ 订阅的（subs）+ 本地 AI 摘要里的标签。
+// 输出：三类建议 —— 接着听（同一本还没听完的邻域）、同口味、换口味。
+// 不直接推歌单，推的是「往哪个方向搜」，因为宿主没有可靠的跨源推荐接口。
+async function aiRecommend(force) {
+  var cacheKey = 'rec';
+  if (aiCache && aiCache['__' + cacheKey] && !force) {
+    var c0 = aiCache['__' + cacheKey];
+    if (Date.now() - (c0.at || 0) < 6 * 3600 * 1000) return c0;
+  }
+
+  // 1) 正在听 / 听过的
+  var heard = [];
+  var albs = (progress && progress.albums) || {};
+  Object.keys(albs).forEach(function (aid) {
+    var a = albs[aid] || {};
+    if (!a.trackId) return;
+    heard.push({
+      albumId: aid, name: a.albumName || a.name || aid,
+      index: Number(a.index) || 0, title: a.title || '',
+      at: Number(a.at) || 0
+    });
+  });
+  heard.sort(function (a, b) { return b.at - a.at; });
+  heard = heard.slice(0, 12);
+
+  // 2) 订阅但没开听的
+  var notStarted = subs.filter(function (s) { return !(Number(s.lastIndex) > 0); }).slice(0, 10)
+    .map(function (s) { return { albumId: s.albumId, name: s.name, author: s.author, total: Number(s.lastIndex) || 0 }; });
+
+  // 3) 已有 AI 摘要的标签池（只取本轮对话能用的）
+  var tagPool = [];
+  Object.keys(aiCache || {}).forEach(function (k) {
+    if (k.indexOf('__') === 0) return;
+    var v = aiCache[k];
+    if (v && v.tags && v.tags.length) {
+      tagPool.push({ name: v.name || k, tags: v.tags, summary: v.summary || '' });
+    }
+  });
+  tagPool = tagPool.slice(0, 20);
+
+  var sys = '你是中文有声书的选书顾问。根据用户最近的收听记录、订阅清单和内容标签，给出三条方向性的推荐。' +
+    '只输出 JSON：{"now":"眼下该优先听哪本、为什么，60字内","same":[{"kw":"搜索关键词","why":"为什么合口味，30字内"}],' +
+    '"new":[{"kw":"搜索关键词","why":"换口味的方向，30字内"}],"note":"一句话提醒，30字内"}。' +
+    'same 给 2-3 个关键词，new 给 2 个；关键词要是能在喜马拉雅搜到东西的具体词（作者名、书名、题材词），不要「好书」「热门」这类空话。' +
+    '不要编造你没把握存在的书名，宁可给题材词。';
+
+  var user = JSON.stringify({
+    最近在听: heard.map(function (h) { return h.name + (h.index ? '（听到第 ' + h.index + ' 集）' : ''); }),
+    订阅了但还没开听: notStarted.map(function (x) { return x.name + (x.author ? ' / ' + x.author : ''); }),
+    内容标签池: tagPool.map(function (x) { return x.name + '：' + x.tags.join('、'); }),
+    已导入专辑数: imported.length,
+    书签数: bookmarks.length
+  });
+
+  if (!heard.length && !subs.length && !imported.length) {
+    throw new Error('还没有收听或订阅记录，先听一会儿或导入几本书再来');
+  }
+
+  var text = await aiChat(sys, user, (config.ai && config.ai.timeout) || 50);
+  var obj = aiParseJson(text);
+  if (!obj) throw new Error('AI 返回格式不对，请再试一次');
+
+  function cleanKw(arr, n) {
+    return (Array.isArray(arr) ? arr : []).slice(0, n).map(function (x) {
+      return {
+        kw: String((x && x.kw) || '').slice(0, 20),
+        why: String((x && x.why) || '').slice(0, 60)
+      };
+    }).filter(function (x) { return x.kw; });
+  }
+
+  var out = {
+    now: cleanAiText(obj.now, 120),
+    same: cleanKw(obj.same, 3),
+    new: cleanKw(obj['new'], 2),
+    note: cleanAiText(obj.note, 60),
+    basedOn: { heard: heard.length, subs: subs.length, imported: imported.length, tags: tagPool.length },
+    at: Date.now(),
+    model: aiLastModel || (config.ai && config.ai.model) || ''
+  };
+  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
+  aiCache['__rec'] = out;
+  await persistAiCache();
+  return out;
+}
+
+// ---------- AI 按主题把长书切成几个歌单 ----------
+// 一本 300 集的书，一次听不完，也没法按主题跳。这里让 AI 看分集标题，
+// 把它切 2-5 段，每段给一个主题名，前端可以「只把这一段加进歌单」。
+async function aiThemeSplit(albumId, force) {
+  var aid = String(albumId || '');
+  if (!aid) throw new Error('缺少 albumId');
+  var ck = '__theme_' + aid;
+  if (aiCache && aiCache[ck] && !force) return aiCache[ck];
+
+  var detail = null;
+  try { detail = await fetchAlbumDetail(aid); } catch (e) { detail = { albumId: aid, name: '' }; }
+  var tracks = [];
+  // 只看前 120 集：足够看出结构，也不会把 prompt 撑爆
+  for (var pg = 1; pg <= 2 && tracks.length < 120; pg++) {
+    try {
+      var tp = await fetchAlbumTracks(aid, pg);
+      var list = (tp && tp.tracks) || [];
+      if (!list.length) break;
+      tracks = tracks.concat(list);
+    } catch (e) { break; }
+  }
+  if (!tracks.length) throw new Error('没有分集数据，无法按主题切分');
+
+  var total = Number((detail && detail.trackCount) || tracks.length) || tracks.length;
+  var lines = tracks.slice(0, 120).map(function (t, i) {
+    return (Number(t.index) || i + 1) + '. ' + String(t.title || '').slice(0, 40);
+  }).join('\n');
+
+  var sys = '你是中文有声书的编辑。根据分集标题，把这本书按内容主题切成 2-5 段，方便听众按兴趣跳着听。' +
+    '只输出 JSON：{"segments":[{"name":"主题名（8字内）","from":起始集数,"to":结束集数,"note":"这段讲什么，25字内","count":段内集数}]}。' +
+    '要求：区间必须首尾相接、覆盖全书、不重叠；from/to 用阿拉伯数字；如果内容看不出主题（比如纯音乐合集），就按集数均分并说明。';
+
+  var user = JSON.stringify({
+    name: (detail && detail.name) || '',
+    author: (detail && detail.author) || '',
+    totalEpisodes: total,
+    intro: String((detail && (detail.introFull || detail.intro)) || '').slice(0, 800),
+    titles: lines
+  });
+
+  var text = await aiChat(sys, user, (config.ai && config.ai.timeout) || 50);
+  var obj = aiParseJson(text);
+  if (!obj || !Array.isArray(obj.segments)) throw new Error('AI 返回格式不对，请再试一次');
+
+  var segs = obj.segments.slice(0, 6).map(function (x) {
+    var f = Math.max(1, Number(x && x.from) || 1);
+    var t2 = Math.min(total, Number(x && x.to) || total);
+    return {
+      name: String((x && x.name) || '').slice(0, 20),
+      from: f, to: Math.max(f, t2),
+      note: cleanAiText(x && x.note, 60),
+      count: Math.max(0, (Math.max(f, t2) - f + 1))
+    };
+  }).filter(function (x) { return x.name; });
+
+  var out = {
+    albumId: aid,
+    name: (detail && detail.name) || '',
+    total: total,
+    segments: segs,
+    at: Date.now(),
+    model: aiLastModel || (config.ai && config.ai.model) || ''
+  };
+  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
+  aiCache[ck] = out;
+  await persistAiCache();
+  return out;
+}
+
+// ---------- AI 跨专辑问答 ----------
+// 「我订阅的书里，有哪些适合开车听」「我听到的书里有没有讲明清的」
+// 把手上所有书的元信息（名字/主播/标签/摘要）喂进去，让它指出在哪几本里找。
+async function aiCrossAsk(question) {
+  var qs = String(question || '').trim();
+  if (!qs) throw new Error('问题不能为空');
+
+  var pool = [];
+  subs.forEach(function (s) {
+    pool.push({ kind: '订阅', albumId: String(s.albumId), name: s.name || '', author: s.author || '',
+      extra: (Number(s.newCount) ? '有新集' : ''), tags: [] });
+  });
+  imported.forEach(function (x) {
+    if (!pool.some(function (p) { return p.albumId === String(x.albumId); })) {
+      pool.push({ kind: '已导入', albumId: String(x.albumId), name: x.name || '', author: '', extra: x.count + '集', tags: [] });
+    }
+  });
+  // 补上 AI 摘要给的标签，这是判断题材的关键
+  Object.keys(aiCache || {}).forEach(function (k) {
+    if (k.indexOf('__') === 0) return;
+    var v = aiCache[k];
+    if (!v) return;
+    var hit = null;
+    for (var i = 0; i < pool.length; i++) if (pool[i].albumId === k) { hit = pool[i]; break; }
+    if (!hit) {
+      pool.push({ kind: '整理过', albumId: k, name: v.name || k, author: '', extra: '', tags: [] });
+      hit = pool[pool.length - 1];
+    }
+    hit.tags = v.tags || [];
+    hit.summary = v.summary || '';
+    hit.fit = v.fit || '';
+  });
+  pool = pool.slice(0, 80);
+  if (!pool.length) throw new Error('还没有任何订阅或导入记录，先去搜几本书');
+
+  var sys = '你是用户的私人听书助理。用户会问一个关于「我手上这些书」的问题，你要在给定清单里找答案。' +
+    '只输出 JSON：{"answer":"直接回答，100字内，口语化","picks":[{"albumId":"清单里的albumId","name":"书名","why":"为什么相关，20字内"}],"none":false}。' +
+    '规则：只能从清单里挑，不许编造清单里没有的书或 ID；如果清单里确实没有相关的，none 设为 true 并把 answer 写清楚「你手上的书里没有这类」并建议一句搜索词。';
+
+  var user = JSON.stringify({
+    问题: qs,
+    我的书: pool.map(function (p) {
+      return { albumId: p.albumId, name: p.name, author: p.author, 来源: p.kind,
+        tags: p.tags, summary: p.summary || '', fit: p.fit || '', 备注: p.extra };
+    })
+  });
+
+  var text = await aiChat(sys, user, (config.ai && config.ai.timeout) || 50);
+  var obj = aiParseJson(text);
+  if (!obj || !obj.answer) throw new Error('AI 返回格式不对，请再试一次');
+
+  var valid = {};
+  pool.forEach(function (p) { valid[p.albumId] = p; });
+  var picks = (Array.isArray(obj.picks) ? obj.picks : []).slice(0, 5).map(function (x) {
+    var id = String((x && x.albumId) || '');
+    if (!valid[id]) return null;
+    return {
+      albumId: id,
+      name: valid[id].name || String((x && x.name) || ''),
+      why: String((x && x.why) || '').slice(0, 50),
+      kind: valid[id].kind
+    };
+  }).filter(Boolean);
+
+  return {
+    question: qs,
+    answer: cleanAiText(obj.answer, 400),
+    picks: picks,
+    none: !!obj.none || !picks.length,
+    poolSize: pool.length,
+    at: Date.now()
+  };
+}
+
+// 手上只有「最近一次更新日期」，所以只能做两件事：
+//   1) 按周几归档，看出哪几天你最忙（更新扎堆）；
+//   2) 按「距今多少天」分档，把久没更新的挑出来（可能完结了、可能该取关了）。
+function parseDateSafe(s) {
+  var t = String(s || '').trim();
+  if (!t) return null;
+  var m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/.exec(t);
+  if (!m) return null;
+  var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (isNaN(d.getTime())) return null;
+  // 明显不合理的（1970、未来的）都不要
+  if (d.getFullYear() < 2000) return null;
+  if (d.getTime() > Date.now() + 86400000 * 2) return null;
+  return d;
+}
+
+function dayDiff(d) {
+  var a = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  var b = new Date();
+  var n = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime();
+  return Math.round((n - a) / 86400000);
+}
+
+function updateCalendar() {
+  var items = [];
+  var noDate = 0;
+  subs.forEach(function (s) {
+    var d = parseDateSafe(s.updateDate);
+    if (!d) { noDate += 1; return; }
+    var dd = dayDiff(d);
+    items.push({
+      albumId: String(s.albumId),
+      name: s.name || ('专辑' + s.albumId),
+      author: s.author || '',
+      cover: s.cover || '',
+      date: s.updateDate,
+      days: dd,
+      dow: d.getDay(),              // 0=周日
+      bucket: dd <= 1 ? 'today' : dd <= 7 ? 'week' : dd <= 30 ? 'month' : dd <= 90 ? 'quarter' : 'old'
+    });
+  });
+
+  // 按周几聚合
+  var dowName = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  var dow = [];
+  for (var i = 0; i < 7; i++) dow.push({ dow: i, name: dowName[i], count: 0 });
+  items.forEach(function (x) { dow[x.dow].count += 1; });
+
+  // 分档聚合
+  var buckets = [
+    { key: 'today', name: '今天/昨天更新', count: 0 },
+    { key: 'week', name: '一周内', count: 0 },
+    { key: 'month', name: '一个月内', count: 0 },
+    { key: 'quarter', name: '三个月内', count: 0 },
+    { key: 'old', name: '三个月以上没动', count: 0 }
+  ];
+  var bmap = {};
+  buckets.forEach(function (b) { bmap[b.key] = b; });
+  items.forEach(function (x) { if (bmap[x.bucket]) bmap[x.bucket].count += 1; });
+
+  // 找出「更得最勤的那天」和「该取关的」
+  var busiest = null;
+  dow.forEach(function (d) { if (!busiest || d.count > busiest.count) busiest = d; });
+  var stale = items.filter(function (x) { return x.days > 90; })
+    .sort(function (a, b) { return b.days - a.days; })
+    .slice(0, 20);
+
+  items.sort(function (a, b) { return a.days - b.days; });
+
+  return {
+    total: subs.length,
+    dated: items.length,
+    noDate: noDate,
+    dow: dow,
+    busiest: busiest && busiest.count > 0 ? busiest : null,
+    buckets: buckets,
+    stale: stale,
+    items: items.slice(0, 200),
+    tip: items.length
+      ? (busiest && busiest.count > 0
+        ? busiest.name + ' 更新最多（' + busiest.count + ' 本），那天可以顺手点一次「只检查不导入」。'
+        : '还看不出规律，多同步几次就有了。')
+      : '订阅里还没有可用的更新日期，先去「读取我的订阅」或者同步一次。'
+  };
+}
+
+// ---------- 订阅分组：分类 / 状态 / 主播 ----------
+// 分组不落盘——它是视图，不是数据。每次按当前 subs 现算，避免和真实数据不一致。
+function subsGroups(by) {
+  by = by || 'cat';
+  var map = {};
+  function put(key, label, s) {
+    if (!map[key]) map[key] = { key: key, label: label, count: 0, items: [] };
+    map[key].count += 1;
+    map[key].items.push({
+      albumId: String(s.albumId), name: s.name || '', author: s.author || '',
+      cover: s.cover || '', updateDate: s.updateDate || '', newCount: Number(s.newCount) || 0,
+      total: Number(s.lastIndex) || 0, playlistId: Number(s.playlistId) || 0
+    });
+  }
+  subs.forEach(function (s) {
+    if (by === 'anchor') {
+      var a = String(s.author || '').trim() || '未知主播';
+      put('a:' + a, a, s);
+    } else if (by === 'status') {
+      var nc = Number(s.newCount) || 0;
+      var lib = Number(s.playlistId) || 0;
+      if (nc > 0) put('new', '有新集未处理', s);
+      else if (lib) put('in', '已导入歌单', s);
+      else put('wait', '只在订阅里，没导入', s);
+    } else {
+      var d = parseDateSafe(s.updateDate);
+      if (!d) put('na', '没有更新日期', s);
+      else {
+        var dd = dayDiff(d);
+        if (dd <= 7) put('hot', '一周内有更新', s);
+        else if (dd <= 30) put('mid', '一个月内更新过', s);
+        else if (dd <= 90) put('cold', '三个月内更新过', s);
+        else put('dead', '三个月以上没更新', s);
+      }
+    }
+  });
+  var order = ['new', 'hot', 'in', 'mid', 'wait', 'cold', 'dead', 'na', 'a:'];
+  var list = Object.keys(map).map(function (k) { return map[k]; });
+  list.sort(function (a, b) {
+    var ia = order.indexOf(a.key), ib = order.indexOf(b.key);
+    if (by === 'anchor') return b.count - a.count || (a.label < b.label ? -1 : 1);
+    if (ia < 0) ia = 99;
+    if (ib < 0) ib = 99;
+    return ia - ib || b.count - a.count;
+  });
+  list.forEach(function (g) {
+    g.items.sort(function (a, b) {
+      if (by === 'anchor') return String(b.updateDate).localeCompare(String(a.updateDate));
+      return (b.newCount - a.newCount) || String(b.updateDate).localeCompare(String(a.updateDate));
+    });
+  });
+  return { by: by, groups: list, total: subs.length };
+}
+
+// ---------- 批量：取消订阅 ----------
+function unsubBatch(albumIds) {
+  var set = {};
+  (albumIds || []).forEach(function (x) { set[String(x)] = 1; });
+  var before = subs.length;
+  var hit = subs.filter(function (s) { return set[String(s.albumId)]; });
+  subs = subs.filter(function (s) { return !set[String(s.albumId)]; });
+  // 顺手把待听里的也保留（那是另一份清单，不动）
+  return { removed: before - subs.length, names: hit.map(function (s) { return s.name; }) };
+}
 
 function normPath(p) {
   var prefix = '/api/v1/jsplugin/' + ENTRY;
@@ -3460,6 +3878,42 @@ async function handleHTTPRequest(req) {
     try {
       var wr2 = await aiWeekly();
       return jsonResp({ success: true, data: wr2 });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // AI 推荐下一本
+  if (path === '/ai/recommend' && method === 'GET') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    try {
+      var rc = await aiRecommend(q.refresh === '1');
+      return jsonResp({ success: true, data: rc });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // AI 按主题切分段
+  if (path === '/ai/themes' && method === 'GET') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    var taid = String(q.albumId || '');
+    if (!taid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    try {
+      var ts = await aiThemeSplit(taid, q.refresh === '1');
+      return jsonResp({ success: true, data: ts });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // AI 跨专辑问答
+  if (path === '/ai/cross' && method === 'POST') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    try {
+      var xs = readBodyJson(req);
+      var xr = await aiCrossAsk(xs.q || xs.question || '');
+      return jsonResp({ success: true, data: xr });
     } catch (e) {
       return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
     }
@@ -4073,6 +4527,65 @@ async function handleHTTPRequest(req) {
     }
   }
 
+  // ---------- 待听清单：想听但先存着，不占歌单 ----------
+  if (path === '/todo' && method === 'GET') {
+    try {
+      var tl = todoList();
+      return jsonResp({ success: true, data: { items: tl, total: tl.length } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  if (path === '/todo' && method === 'POST') {
+    try {
+      var tb = readBodyJson(req);
+      if (tb.clear) {
+        var n0 = todoItems.length;
+        todoItems = [];
+        persistTodo();
+        return jsonResp({ success: true, data: { cleared: n0 } });
+      }
+      if (tb.remove) {
+        var ok = todoRemove(String(tb.remove));
+        return jsonResp({ success: true, data: { removed: ok, total: todoItems.length } });
+      }
+      var aid = String(tb.albumId || '').trim();
+      if (!aid) return jsonResp({ success: false, error: 'albumId required' }, 400);
+      var added = todoAdd({
+        albumId: aid,
+        name: String(tb.name || '').trim(),
+        author: String(tb.author || '').trim(),
+        cover: String(tb.cover || ''),
+        note: String(tb.note || '')
+      });
+      return jsonResp({ success: true, data: { added: added, total: todoItems.length } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // 待听清单 → 建歌单并批量导入（沿用已有的导入流水线）
+  if (path === '/todo/import' && method === 'POST') {
+    if (importing || job.running) return jsonResp({ success: false, error: '已有导入任务进行中' }, 409);
+    var tb2 = readBodyJson(req);
+    var picked = Array.isArray(tb2.albumIds) && tb2.albumIds.length
+      ? tb2.albumIds.map(String)
+      : todoItems.map(function (x) { return String(x.albumId); });
+    picked = picked.slice(0, 20);
+    if (!picked.length) return jsonResp({ success: false, error: '待听清单是空的' }, 400);
+    var items2 = picked.map(function (id) {
+      var hit = null;
+      for (var k = 0; k < todoItems.length; k++) { if (String(todoItems[k].albumId) === id) { hit = todoItems[k]; break; } }
+      return { id: id, name: (hit && hit.name) || '' };
+    });
+    var plName = String(tb2.playlistName || '').trim() ||
+      ('待听 ' + new Date().toISOString().slice(5, 10).replace('-', '/'));
+    importing = true;
+    runImportMulti(items2, 'merge', plName).finally(function () { importing = false; });
+    return jsonResp({ success: true, data: { message: '已开始导入 ' + items2.length + ' 张专辑到「' + plName + '」', count: items2.length, playlistName: plName } });
+  }
+
   if (path === '/api/music/url' && method === 'POST') {
     try {
       var b = readBodyJson(req);
@@ -4307,6 +4820,35 @@ async function handleHTTPRequest(req) {
     return jsonResp({ success: true });
   }
 
+  // ---------- 追更日历：按周几 / 按新旧看更新规律 ----------
+  if (path === '/subs/calendar' && method === 'GET') {
+    try {
+      return jsonResp({ success: true, data: updateCalendar() });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // ---------- 订阅分组（视图，不落盘） ----------
+  if (path === '/subs/groups' && method === 'GET') {
+    try {
+      return jsonResp({ success: true, data: subsGroups(q.by || 'cat') });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // ---------- 批量取消订阅 ----------
+  if (path === '/subs/unsub' && method === 'POST') {
+    var bu = readBodyJson(req);
+    var uids = Array.isArray(bu.albumIds) ? bu.albumIds : [];
+    if (!uids.length) return jsonResp({ success: false, error: '没有勾选专辑' }, 400);
+    var ures = unsubBatch(uids);
+    await persist();
+    logInfo('subs', '批量取消订阅 ' + ures.removed + ' 张');
+    return jsonResp({ success: true, data: ures, subs: subs });
+  }
+
   // 单张检查/同步：/subs/check {album_id, import?}
   if (path === '/subs/check' && method === 'POST') {
     var bc = readBodyJson(req);
@@ -4499,6 +5041,27 @@ function cnToNum(s) {
 }
 
 // 从指令里拆出「集号」与「专辑名」
+// 语音里的「一分钟 / 三十秒 / 两分」→ 秒。没给单位时按秒算，说了「分」就乘 60。
+function voiceSec(numTxt, unitTxt) {
+  var n = cnToNum(numTxt);
+  if (!n || n <= 0) n = 30;                       // 只说「快进一点」就给 30 秒
+  var u = String(unitTxt || '');
+  var sec = (u === '分钟' || u === '分') ? n * 60 : n;
+  return Math.max(5, Math.min(3600, Math.round(sec)));
+}
+
+// 语音里的时长 → 分钟（定时停止用）。「半小时」特判。
+function voiceMinute(numTxt, unitTxt) {
+  var s = normCnNum(numTxt);
+  // 「个钟头」「个小时」——口语里的量词要剥掉，否则判断不到「小时」
+  var u = String(unitTxt || '').replace(/^个/, '');
+  // 「半小时」「半钟头」都是 30 分钟
+  if (/半/.test(s)) return 30;
+  var n = cnToNum(s) || 0;
+  if (!n) n = 30;
+  var min = (u === '小时' || u === '钟头') ? n * 60 : n;
+  return Math.max(1, Math.min(600, Math.round(min)));
+}
 function parseVoiceIntent(text) {
   var raw = String(text || '').trim();
   var t = raw
@@ -4522,8 +5085,55 @@ function parseVoiceIntent(text) {
   if (/^(停止|停下|关掉)/.test(t)) { intent.action = 'stop'; return intent; }
   if (/^(下一集|下一个|跳下一集)/.test(t)) { intent.action = 'next'; return intent; }
   if (/^(上一集|上一个|跳上一集)/.test(t)) { intent.action = 'prev'; return intent; }
+  // 定时停止要先判：「听半小时后关」去掉「听」就成了「半小时后关」，
+  // 会被后面的播放兜底规则当成书名，所以放在播放类之前。
+  // 注意两点：①「后」不能写成 \s*(后)?\s*，会回溯失败；②长词要放前面，
+  // 否则「关闭」里的「关」先被「关」匹配掉，剩下的「闭」对不上就整条失败。
+  var mSleep = /^(.{0,8}?)(半|[0-9零〇一二两三四五六七八九十百]{1,6})\s*个?\s*(分钟|小时|钟头)[后之]?\s*(关闭|关掉|停止|结束|停|关)/.exec(t);
+  if (mSleep) {
+    intent.action = 'sleep';
+    intent.minutes = voiceMinute(mSleep[2], mSleep[3]);
+    return intent;
+  }
+  // 快进 / 快退：「快进一分钟」「倒退 30 秒」「往后跳两分钟」
+  var mSkip = /(快进|前进|往后|向后|跳到后面)\s*([0-9零〇一二两三四五六七八九十百]{1,6})?\s*(秒|分钟|分)?/.exec(t);
+  if (mSkip) {
+    intent.action = 'seek_forward';
+    intent.seconds = voiceSec(mSkip[2], mSkip[3]);
+    return intent;
+  }
+  var mBack = /(快退|倒退|后退|往回|往前倒|回到前面)\s*([0-9零〇一二两三四五六七八九十百]{1,6})?\s*(秒|分钟|分)?/.exec(t);
+  if (mBack) {
+    intent.action = 'seek_back';
+    intent.seconds = voiceSec(mBack[2], mBack[3]);
+    return intent;
+  }
+  // 直接跳到第 N 集（不带书名，指当前播的这本）
+  var mJump = /^(跳到|放到|切到|去)\s*第\s*([0-9零〇一二两三四五六七八九十百千]{1,8})\s*[集回期话讲节]/.exec(t);
+  if (mJump) {
+    intent.action = 'jump';
+    intent.index = cnToNum(mJump[2]) || 0;
+    return intent;
+  }
+  // 收藏 / 打书签（记下当前时间点）
+  if (/^(收藏|标记|记一下|打个?书签|加书签)/.test(t)) { intent.action = 'bookmark'; return intent; }
+  // 加入待听（收藏专辑，不立刻播）
+  var mTodo = /^(把)?(.+?)(加入|加到|放进|收进)(待听|待播|稍后再听|回头听)/.exec(t);
+  if (mTodo) {
+    intent.action = 'todo';
+    intent.kw = String(mTodo[2] || '').replace(/^[《「『]|[》」』]$/g, '').trim();
+    return intent;
+  }
+  // 定时停止：「30 分钟后停止」「听半小时后关」「一小时后停」（真正的判定挪到前面了，这里不再处理）
   if (/(声音|音量).*(大|响)/.test(t)) { intent.action = 'volume_up'; return intent; }
   if (/(声音|音量).*(小|轻)/.test(t)) { intent.action = 'volume_down'; return intent; }
+  // 音量给具体数值：「音量调到 60」——这里必须用惰性匹配，否则 .* 会把数字一起吃掉
+  var mVol = /(声音|音量)[^0-9]{0,8}?([0-9]{1,3})/.exec(t);
+  if (mVol) {
+    intent.action = 'volume_set';
+    intent.volume = Math.max(0, Math.min(100, Number(mVol[2]) || 0));
+    return intent;
+  }
   if (/有什么(更新|新)/.test(t) || /^(更新|新集)/.test(t)) { intent.action = 'updates'; return intent; }
   // 「我听到哪了 / 上次听到哪 / 现在在听什么」——查最近收听位置
   if (/(听到|播到|讲到|念到)哪/.test(t) || /(在听|听到).*(什么|哪本)/.test(t) || /^上次听/.test(t) || /^(我)?(听|看)到哪了?$/.test(t)) {
@@ -4557,6 +5167,82 @@ function parseVoiceIntent(text) {
   intent.kw = t.replace(/[的了吗呢吧啊呀～~]+$/g, '').replace(/^[《「『]|[》」』]$/g, '').trim();
   return intent;
 }
+
+// 最近在听的那本（按 progress.albums 里的时间取最新）
+function latestProgressAlbum() {
+  var best = null;
+  var albs = (progress && progress.albums) || {};
+  Object.keys(albs).forEach(function (aid) {
+    var a = albs[aid];
+    if (!a || !a.trackId) return;
+    var at = Number(a.at) || 0;
+    if (!best || at > best.at) {
+      best = { albumId: aid, trackId: a.trackId, index: a.index, title: a.title,
+        t: a.t, d: a.d, at: at, albumName: a.albumName };
+    }
+  });
+  return best;
+}
+
+// ---------- 待听清单（想听但先存着，不占歌单） ----------
+var TODO_KEY = 'todo:v1';
+var todoItems = [];
+
+// 「两」「俩」在口语里就是 2，但 cnToNum 对它们的处理要看上下文，数字解析前先统一成阿拉伯数字
+function normCnNum(s) {
+  return String(s || '').replace(/两/g, '2').replace(/俩/g, '2');
+}
+
+function todoList() { return todoItems; }
+
+function todoAdd(it) {
+  if (!it || !it.albumId) return false;
+  for (var i = 0; i < todoItems.length; i++) {
+    if (String(todoItems[i].albumId) === String(it.albumId)) {
+      todoItems[i].at = Date.now();
+      if (!todoItems[i].cover && it.cover) todoItems[i].cover = it.cover;
+      if (it.note) todoItems[i].note = it.note;
+      persistTodo();
+      return true;
+    }
+  }
+  todoItems.unshift({
+    albumId: String(it.albumId), name: it.name || '', author: it.author || '',
+    cover: it.cover || '', note: it.note || '', at: Date.now()
+  });
+  if (todoItems.length > 200) todoItems.length = 200;
+  persistTodo();
+  return true;
+}
+
+// 待听 → 导入成功后自动出清单（免得同一本反复出现）
+function todoDrop(albumIds) {
+  var set = {};
+  (albumIds || []).forEach(function (x) { set[String(x)] = 1; });
+  var before = todoItems.length;
+  todoItems = todoItems.filter(function (x) { return !set[String(x.albumId)]; });
+  if (todoItems.length !== before) persistTodo();
+  return before - todoItems.length;
+}
+
+function todoRemove(albumId) {
+  var n = todoItems.length;
+  todoItems = todoItems.filter(function (x) { return String(x.albumId) !== String(albumId); });
+  persistTodo();
+  return todoItems.length < n;
+}
+
+var todoSaveTimer = null;
+function persistTodo() {
+  if (todoSaveTimer) clearTimeout(todoSaveTimer);
+  todoSaveTimer = setTimeout(function () {
+    todoSaveTimer = null;
+    try { songloft.storage.set(TODO_KEY, JSON.stringify(todoItems)); } catch (e) { /* */ }
+  }, 300);
+}
+
+// 定时停止（语音设的），由 60s tick 检查
+var sleepArmed = null;
 
 function pickDevice(opts) {
   var d = config.device || {};
@@ -4622,14 +5308,101 @@ async function runVoiceCommand(text, opts) {
     return out;
   }
 
-  if (it.action === 'volume_up' || it.action === 'volume_down') {
-    var st = await miotGet('/player/status');
-    var cur = (st.data && (st.data.volume || (st.data.data && st.data.data.volume))) || 40;
-    var nv = Math.max(0, Math.min(100, Number(cur) + (it.action === 'volume_up' ? 15 : -15)));
+  if (it.action === 'volume_up' || it.action === 'volume_down' || it.action === 'volume_set') {
+    var nv;
+    if (it.action === 'volume_set') {
+      nv = Math.max(0, Math.min(100, Number(it.volume) || 30));
+    } else {
+      var st = await miotGet('/player/status');
+      var cur = (st.data && (st.data.volume || (st.data.data && st.data.data.volume))) || 40;
+      nv = Math.max(0, Math.min(100, Number(cur) + (it.action === 'volume_up' ? 15 : -15)));
+    }
     var rv = await miotPost('/mina/volume', { account_id: acc, device_id: dv, volume: nv });
     out.text = '音量调到 ' + nv;
     out.played = !!(rv.ok && (!rv.data || rv.data.success !== false));
     if (!out.played) out.error = '调节音量失败';
+    return out;
+  }
+
+  // --- 快进 / 快退：取当前进度 ± N 秒再 seek ---
+  if (it.action === 'seek_forward' || it.action === 'seek_back') {
+    var st2 = await miotGet('/player/status');
+    var sd = (st2.data && st2.data.data) || st2.data || {};
+    var pos = Number(sd.position || sd.current_position || sd.progress) || 0;
+    var dur = Number(sd.duration) || 0;
+    var delta = Number(it.seconds) || 30;
+    var target = it.action === 'seek_forward' ? pos + delta : Math.max(0, pos - delta);
+    if (dur && target > dur - 3) target = Math.max(0, dur - 3);
+    var rs = await miotPost('/mina/seek', { account_id: acc, device_id: dv, position: Math.round(target) });
+    out.played = !!(rs.ok && (!rs.data || rs.data.success !== false));
+    if (!out.played) {
+      out.error = '音箱不支持跳转，这条指令暂时只能用页面播放器';
+      return out;
+    }
+    out.text = (it.action === 'seek_forward' ? '快进到 ' : '退回 ') + fmtClock(Math.round(target));
+    return out;
+  }
+
+  // --- 跳到第 N 集（当前正在播的那本） ---
+  if (it.action === 'jump') {
+    var last = latestProgressAlbum();
+    if (!last) { out.error = '还没有收听记录，先随便播一本'; return out; }
+    var pl2 = playlistForAlbum(last.albumId);
+    if (!pl2) { out.error = '《' + (last.albumName || '') + '》还没导入成歌单'; return out; }
+    var idx2 = await indexInPlaylist(pl2, '', it.index);
+    var rj = await miotPost('/player/play', {
+      account_id: acc, device_id: dv, playlist_id: pl2,
+      start_index: idx2 >= 0 ? idx2 : Math.max(0, it.index - 1)
+    });
+    if (!rj.ok || (rj.data && rj.data.success === false)) {
+      out.error = '跳转失败：' + ((rj.data && rj.data.error) || 'HTTP ' + rj.status);
+      return out;
+    }
+    out.played = true;
+    out.episode = it.index;
+    out.text = '跳到第 ' + it.index + ' 集';
+    return out;
+  }
+
+  // --- 收藏 / 打书签：在当前时间点记一笔 ---
+  if (it.action === 'bookmark') {
+    var lp = latestProgressAlbum();
+    if (!lp) { out.error = '还没有收听记录，先听一段再收藏'; return out; }
+    var rb = bmAdd({
+      albumId: lp.albumId, albumName: lp.albumName || '', trackId: lp.trackId,
+      title: lp.title || '', index: lp.index || 0, t: Number(lp.t) || 0,
+      note: '语音收藏', source: 'voice'
+    });
+    if (!rb.ok) { out.error = rb.error || '记录失败'; return out; }
+    logInfo('voice', '语音收藏 ' + (lp.albumName || '') + ' 第' + (lp.index || '?') + '集 ' + fmtClock(lp.t || 0));
+    out.text = '已在《' + String(lp.albumName || '').replace(/[《》]/g, '') + '》' +
+      (lp.index ? '第 ' + lp.index + ' 集' : '') + ' ' + fmtClock(lp.t || 0) + ' 打了书签';
+    out.played = false;
+    if (opts.speak) await speakOnDevice(dev, '好的，已经记下来了');
+    out.spoken = true;
+    return out;
+  }
+
+  // --- 加入待听：只收藏专辑，不立刻播 ---
+  if (it.action === 'todo') {
+    if (!it.kw) { out.error = '没听清要收藏哪一本'; return out; }
+    var hit = await searchAlbumsSmart(it.kw);
+    var ca = (hit.albums || [])[0];
+    if (!ca) { out.error = '没找到《' + it.kw + '》'; return out; }
+    todoAdd({ albumId: String(ca.id), name: ca.title, author: ca.author || '', cover: ca.cover || '' });
+    out.text = '已把《' + ca.title + '》加入待听（共 ' + todoList().length + ' 本）';
+    if (opts.speak) await speakOnDevice(dev, '已经加入待听');
+    out.spoken = true;
+    return out;
+  }
+
+  // --- 定时停止 ---
+  if (it.action === 'sleep') {
+    var mins = Number(it.minutes) || 30;
+    sleepArmed = { until: Date.now() + mins * 60000, minutes: mins };
+    out.text = mins + ' 分钟后自动停止';
+    if (opts.speak) await speakOnDevice(dev, mins + '分钟后我会停下');
+    out.spoken = true;
     return out;
   }
 
