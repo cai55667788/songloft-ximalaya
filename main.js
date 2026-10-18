@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.16.0';
+var VERSION = '0.17.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -54,15 +54,7 @@ var config = {
   sync: { progress: true },
   dl: { targetDir: '喜马拉雅', format: 'mp3' },
   // 每天检查一次登录态是否还有效，失效时界面上直接提醒
-  cookieCheck: true,
-  // AI 智能整理：走本机 Agent2API 网关（OpenAI 兼容），不填 key 时功能自动隐藏
-  ai: {
-    enabled: false,
-    url: 'http://127.0.0.1:3065/v1',
-    key: '',
-    model: 'deepseek-v4.1-flash',
-    timeout: 45
-  }
+  cookieCheck: true
 };
 var imported = [];   // [{albumId, name, playlistId, count, importedAt}]
 var subs = [];       // [{albumId, name, playlistId, lastIndex, songCount, cover, author, updateDate, lastCheckAt, newCount, newTitles, autoSync}]
@@ -1077,7 +1069,8 @@ async function loadAll() {
   try { var w = await songloft.storage.get(WATCH_KEY); if (w) watch = typeof w === 'string' ? JSON.parse(w) : w; } catch (e) { /* */ }
   try { var bmk = await songloft.storage.get(BM_KEY); if (bmk) bookmarks = typeof bmk === 'string' ? JSON.parse(bmk) : bmk; } catch (e) { /* */ }
   try { var hst = await songloft.storage.get(HIST_KEY); if (hst) history = typeof hst === 'string' ? JSON.parse(hst) : hst; } catch (e) { /* */ }
-  try { var aic = await songloft.storage.get(AI_KEY); if (aic) aiCache = typeof aic === 'string' ? JSON.parse(aic) : aic; } catch (e) { /* */ }
+  // v0.17.0 起移除 AI 功能，旧版本留下的 AI 缓存顺手清掉，别占着存储
+  try { await songloft.storage.delete('ai_cache:v1'); } catch (e) { /* */ }
   try {
     var lgs = await songloft.storage.get(LOG_KEY);
     var larr = typeof lgs === 'string' ? JSON.parse(lgs) : lgs;
@@ -1099,7 +1092,6 @@ async function loadAll() {
   } catch (e) { /* */ }
   if (!Array.isArray(bookmarks)) bookmarks = [];
   if (!Array.isArray(history)) history = [];
-  if (!aiCache || typeof aiCache !== 'object' || Array.isArray(aiCache)) aiCache = {};
   try {
     var td = await songloft.storage.get(TODO_KEY);
     var tarr = typeof td === 'string' ? JSON.parse(td) : td;
@@ -1124,12 +1116,8 @@ async function loadAll() {
   if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '';
   if (config.dl.format !== '' && config.dl.format !== 'mp3') config.dl.format = 'mp3';
 
-  var dftAi = { enabled: false, url: 'http://127.0.0.1:3065/v1', key: '', model: 'deepseek-v4.1-flash', timeout: 45 };
-  if (!config.ai || typeof config.ai !== 'object') config.ai = dftAi;
-  for (var ak in dftAi) {
-    if (Object.prototype.hasOwnProperty.call(dftAi, ak) && config.ai[ak] === undefined) config.ai[ak] = dftAi[ak];
-  }
-  if (typeof config.ai.timeout !== 'number' || config.ai.timeout < 5) config.ai.timeout = 45;
+  // v0.17.0 起不再有 AI，旧配置里的 ai 段直接丢掉
+  if (config.ai) delete config.ai;
 
   if (!login || typeof login.cookie !== 'string') login = { cookie: '', savedAt: '' };
   if (!Array.isArray(subs)) subs = [];
@@ -1351,8 +1339,11 @@ function statRange(fromTs, toTs) {
   var keys = Object.keys(stats.days).sort();
   var out = { sec: 0, days: 0, list: [] };
   keys.forEach(function (k) {
-    var t = new Date(k + 'T12:00:00').getTime();
-    if (t < fromTs || t > toTs) return;
+    // 用「当天 00:00 ~ 23:59」判断落在区间内。之前锚定 12:00，
+    // 结果早上 8 点前的收听会被当成未来时间漏出报告。
+    var t0 = new Date(k + 'T00:00:00').getTime();
+    if (isNaN(t0)) return;
+    if (t0 + 86400000 - 1 < fromTs || t0 > toTs) return;
     var sec = Number(stats.days[k]) || 0;
     if (!sec) return;
     out.sec += sec;
@@ -1534,348 +1525,6 @@ function calcRemain() {
   });
   items.sort(function (x, y) { return y.remainSec - x.remainSec; });
   return { totalSec: totalRemain, totalText: secToHM(totalRemain), items: items.slice(0, 10) };
-}
-
-// ---------- AI 智能整理（可选能力：配置了网关才启用） ----------
-var AI_KEY = 'ai_cache:v1';
-var AI_MAX = 120;
-var aiCache = {};   // {albumId: {summary, tags, themes, at, model}}
-
-function aiReady() {
-  return !!(config.ai && config.ai.enabled && config.ai.key && config.ai.url);
-}
-
-async function persistAiCache() {
-  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
-  var ids = Object.keys(aiCache);
-  if (ids.length > AI_MAX) {
-    ids.sort(function (a, b) { return (aiCache[b].at || 0) - (aiCache[a].at || 0); });
-    var keep = {};
-    ids.slice(0, AI_MAX).forEach(function (k) { keep[k] = aiCache[k]; });
-    aiCache = keep;
-  }
-  try { await songloft.storage.set(AI_KEY, JSON.stringify(aiCache)); }
-  catch (e) { songloft.log.warn('[喜马拉雅] AI 缓存落盘失败: ' + String(e)); }
-}
-
-// 单次对话调用，返回纯文本；出错抛异常
-// 网关侧的「账号被限流」表现为 503 / 401，换个模型往往就好了 —— 这里做一次自动降级
-var AI_FALLBACK = ['deepseek-v4.1-flash', 'glm-5.3', 'deepseek-v4-pro-0813'];
-var aiLastModel = '';   // 上次真正应答的模型（降级后可看出来）
-
-async function aiChatOnce(model, sys, user, timeoutSec) {
-  var cfg = config.ai || {};
-  var body = {
-    model: model,
-    stream: false,
-    temperature: 0.3,
-    messages: [
-      { role: 'system', content: sys },
-      { role: 'user', content: user }
-    ]
-  };
-  var resp = await fetchT(cfg.url.replace(/\/+$/, '') + '/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
-    body: JSON.stringify(body)
-  }, timeoutSec || cfg.timeout || 45);
-  if (!resp.ok) {
-    var err = new Error('AI HTTP ' + resp.status);
-    err.status = resp.status;
-    throw err;
-  }
-  var data = await resp.json();
-  var text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-  if (!text) throw new Error('AI 返回为空');
-  return String(text).trim();
-}
-
-async function aiChat(sys, user, timeoutSec) {
-  var cfg = config.ai || {};
-  if (!cfg.key) throw new Error('未配置 AI 密钥');
-  var main = cfg.model || AI_FALLBACK[0];
-  var tries = [main];
-  // 只有主模型不是首选时才补上首选，其余按候选顺序挑两个
-  AI_FALLBACK.forEach(function (m) { if (m !== main && tries.length < 3) tries.push(m); });
-
-  var lastErr = null;
-  for (var i = 0; i < tries.length; i++) {
-    try {
-      var ok = await aiChatOnce(tries[i], sys, user, timeoutSec);
-      aiLastModel = tries[i];
-      return ok;
-    } catch (e) {
-      lastErr = e;
-      var st = Number(e && e.status) || 0;
-      // 只有「服务端不可用 / 限流 / 鉴权」这类换模型可能有效的错误才继续，超时不重试（等太久）
-      var retryable = st === 503 || st === 429 || st === 401 || st === 502 || /返回为空/.test(String(e && e.message || ''));
-      if (!retryable || i === tries.length - 1) break;
-      logWarn('ai', '模型 ' + tries[i] + ' 失败（' + (e && e.message || e) + '），换 ' + tries[i + 1] + ' 重试');
-    }
-  }
-  throw lastErr || new Error('AI 调用失败');
-}
-
-// 从 AI 回复里抠 JSON（模型常会包 ```json 或加解释）
-function aiParseJson(text) {
-  var s = String(text || '');
-  var fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(s);
-  if (fenced) s = fenced[1];
-  var a = s.indexOf('{'), b = s.lastIndexOf('}');
-  if (a >= 0 && b > a) s = s.slice(a, b + 1);
-  try { return JSON.parse(s); } catch (e) { return null; }
-}
-
-// 模型很爱把「60字内」「30字以内」这类字数约束原样写进内容里，用之前先剃掉。
-// 只处理句子末尾/括号里的量词约束，不动正文中间的数字。
-function cleanAiText(s, max) {
-  var t = String(s == null ? '' : s).trim();
-  t = t.replace(/[（(]\s*(不超过|少于|控制在)?\s*[0-9一二三四五六七八九十]+\s*(个)?\s*字(以内|内|左右|以下)?\s*[）)]/g, '');
-  t = t.replace(/[，,、]?\s*(不超过|少于|控制在)?\s*[0-9一二三四五六七八九十]+\s*(个)?\s*字(以内|内|左右|以下)?\s*$/g, '');
-  t = t.replace(/[，,、]?\s*[0-9]+\s*字$/g, '');
-  t = t.replace(/\s{2,}/g, ' ').trim();
-  // 剃完可能尾巴上留个逗号/句号
-  t = t.replace(/[，,、：:]\s*$/, '').trim();
-  // 整句都是「提示：控制在 50 字」这种，剃完只剩个「提示」，就没必要留了
-  if (/^[^，。！？,!.?]{0,4}$/.test(t) && /字/.test(String(s))) t = '';
-  return max ? t.slice(0, max) : t;
-}
-
-// 给一本书生成「摘要 + 标签 + 主题分组」，结果按专辑缓存，换设备可复用
-async function aiSummarize(detail, tracks, force) {
-  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
-  var aid = String((detail && (detail.albumId || detail.id)) || '');
-  if (!aid) throw new Error('缺少专辑 ID');
-  if (!force && aiCache[aid] && aiCache[aid].summary) return aiCache[aid];
-
-  var titles = (tracks || []).slice(0, 60).map(function (t, i) {
-    return (Number(t.index) || i + 1) + '. ' + String(t.title || '').slice(0, 60);
-  }).join('\n');
-
-  var intro = String((detail && (detail.introFull || detail.intro)) || '').slice(0, 1200);
-  var sys = '你是中文有声书编辑。根据用户给的专辑资料，输出严格的 JSON（不要 Markdown 代码块、不要任何解释），结构：' +
-    '{"summary":"一句话简介，40字内","tags":["标签1","标签2","标签3"],"fit":"适合什么人听，25字内","themes":[{"name":"主题名","range":"第1-20集","note":"这部分讲什么，20字内"}]}。' +
-    '要求：tags 给 3-5 个，须是内容领域词（如 历史/悬疑/职场/儿童/相声/财经），不要「精彩」「推荐」这类空话；themes 给 2-5 组，按集数把整本书切块概括；资料不足时基于标题合理推断，不要编造具体事实。';
-
-  var user = JSON.stringify({
-    name: (detail && detail.name) || '',
-    author: (detail && detail.author) || '',
-    category: (detail && detail.category) || '',
-    episodeCount: (detail && detail.trackCount) || (tracks || []).length,
-    finished: Number(detail && detail.isFinished) ? '已完结' : '连载中',
-    intro: intro,
-    firstTitles: titles
-  });
-
-  var text = await aiChat(sys, user);
-  var obj = aiParseJson(text);
-  if (!obj || !obj.summary) throw new Error('AI 返回格式不对，请再试一次');
-
-  var out = {
-    albumId: aid,
-    name: (detail && detail.name) || '',
-    summary: String(obj.summary || '').slice(0, 120),
-    tags: (Array.isArray(obj.tags) ? obj.tags : []).slice(0, 6).map(function (t) { return String(t).slice(0, 12); }),
-    fit: String(obj.fit || '').slice(0, 60),
-    themes: (Array.isArray(obj.themes) ? obj.themes : []).slice(0, 6).map(function (x) {
-      return {
-        name: String((x && x.name) || '').slice(0, 20),
-        range: String((x && x.range) || '').slice(0, 24),
-        note: String((x && x.note) || '').slice(0, 60)
-      };
-    }),
-    at: Date.now(),
-    model: (config.ai && config.ai.model) || ''
-  };
-  aiCache[aid] = out;
-  await persistAiCache();
-  return out;
-}
-
-// 对着一本书提问：基于简介与分集标题回答，答案里标注不确定
-async function aiAsk(detail, tracks, question) {
-  var qs = String(question || '').trim();
-  if (!qs) throw new Error('问题不能为空');
-  var titles = (tracks || []).slice(0, 80).map(function (t, i) {
-    return (Number(t.index) || i + 1) + '. ' + String(t.title || '').slice(0, 50);
-  }).join('\n');
-  var sys = '你是中文有声书的导听助手。只根据用户给的专辑简介和分集标题回答，不要编造剧情细节；' +
-    '如果资料里看不出来，就直说「从简介和标题看不太出来」，并给出你推测的方向。回答口语化、150字以内、不要 Markdown。';
-  var user = '专辑：' + ((detail && detail.name) || '') + '\n作者/主播：' + ((detail && detail.author) || '') +
-    '\n简介：' + String((detail && (detail.introFull || detail.intro)) || '（无）').slice(0, 1500) +
-    '\n分集标题：\n' + titles + '\n\n我的问题：' + qs;
-  return String(await aiChat(sys, user, (config.ai && config.ai.timeout) || 45)).replace(/\s+/g, ' ').trim().slice(0, 600);
-}
-
-// 把一批书签按「类别」归类，返回 {id: 类别}
-async function aiClassifyBookmarks(list) {
-  var arr = (list || []).slice(0, 60);
-  if (!arr.length) return {};
-  var sys = '你是笔记整理助手。给每个书签判断类别，只能从这几个里选：干货、情节、笑点、疑问、待复查。' +
-    '只输出 JSON：{"items":[{"id":"书签id","cat":"类别"}]}，不要解释。';
-  var user = JSON.stringify(arr.map(function (b) {
-    return { id: b.id, title: String(b.title || '').slice(0, 40), note: String(b.note || '').slice(0, 40), t: b.t };
-  }));
-  var text = await aiChat(sys, user, 40);
-  var obj = aiParseJson(text);
-  if (!obj || !Array.isArray(obj.items)) throw new Error('AI 返回格式不对');
-  var out = {};
-  obj.items.forEach(function (x) {
-    if (x && x.id) out[String(x.id)] = String(x.cat || '').slice(0, 8);
-  });
-  return out;
-}
-
-// ---------- AI 深度功能：分集简介 / 精彩片段 / 收听周报 ----------
-
-// 每集一句话简介：一次问 20 集，结果按专辑存进 aiCache[aid].eps
-// 目的：长书的标题往往很糊（「第 137 集」），有了一句话就知道这集值不值得听。
-async function aiEpisodeBlurbs(detail, tracks, force) {
-  var aid = String((detail && detail.albumId) || '');
-  if (!aid) throw new Error('缺少专辑 ID');
-  var list = (tracks || []).filter(function (t) { return t && t.title; });
-  if (!list.length) return { items: [], cached: false };
-
-  if (!aiCache[aid] || typeof aiCache[aid] !== 'object') aiCache[aid] = {};
-  var store = aiCache[aid].eps && typeof aiCache[aid].eps === 'object' ? aiCache[aid].eps : {};
-  var todo = list.filter(function (t) {
-    var k = String(t.trackId || t.index || '');
-    return force || !store[k];
-  }).slice(0, 60);   // 单次最多补 60 集，避免一次等太久
-  if (!todo.length) return { items: epsToList(store, list), cached: true, added: 0 };
-
-  // 分批 20 集问，某批失败不影响其他批
-  var added = 0;
-  for (var i = 0; i < todo.length; i += 20) {
-    var chunk = todo.slice(i, i + 20);
-    try {
-      var sys = '你是中文有声书编辑。给每一集写一句 20 字以内的内容提示，帮听众判断要不要听。' +
-        '只输出 JSON：{"items":[{"i":集号,"s":"一句话"}]}，不要解释。看不出内容就根据标题合理概括，不要编造具体人名地名。';
-      var user = JSON.stringify({
-        album: (detail && detail.name) || '',
-        episodes: chunk.map(function (t, j) {
-          return { i: Number(t.index) || (j + 1), t: String(t.title || '').slice(0, 60) };
-        })
-      });
-      var text = await aiChat(sys, user, 60);
-      var obj = aiParseJson(text);
-      if (obj && Array.isArray(obj.items)) {
-        obj.items.forEach(function (x) {
-          if (!x) return;
-          var idx = Number(x.i);
-          var hit = null;
-          for (var k = 0; k < chunk.length; k++) if (Number(chunk[k].index) === idx) { hit = chunk[k]; break; }
-          if (!hit) return;
-          var key = String(hit.trackId || hit.index || '');
-          if (!key) return;
-          store[key] = { s: String(x.s || '').slice(0, 40), at: Date.now() };
-          added += 1;
-        });
-      }
-    } catch (e) {
-      logWarn('ai', '分集简介第 ' + (Math.floor(i / 20) + 1) + ' 批失败：' + String(e && e.message || e));
-    }
-  }
-  aiCache[aid].eps = store;
-  aiCache[aid].epsAt = Date.now();
-  await persistAiCache();
-  return { items: epsToList(store, list), cached: false, added: added };
-}
-
-function epsToList(store, tracks) {
-  return (tracks || []).map(function (t) {
-    var k = String(t.trackId || t.index || '');
-    var hit = store && store[k];
-    return {
-      trackId: String(t.trackId || ''),
-      index: Number(t.index) || 0,
-      title: String(t.title || ''),
-      blurb: hit ? hit.s : ''
-    };
-  });
-}
-
-// 精彩片段推荐：让 AI 从分集里挑几集「最值得先听」的
-async function aiHighlights(detail, tracks) {
-  var aid = String((detail && detail.albumId) || '');
-  if (!aid) throw new Error('缺少专辑 ID');
-  if (!aiCache[aid] || typeof aiCache[aid] !== 'object') aiCache[aid] = {};
-  if (aiCache[aid].hl && Array.isArray(aiCache[aid].hl.items)) return aiCache[aid].hl;
-
-  var list = (tracks || []).slice(0, 120);
-  if (!list.length) throw new Error('没有分集数据');
-  var sys = '你是中文有声书编辑。从分集列表里挑出最值得先听的 3-5 集（新听众入口 / 最有干货 / 最出圈），' +
-    '只输出 JSON：{"items":[{"i":集号,"why":"为什么值得听，20字内"}],"tip":"给新听众的一句话建议，30字内"}，不要解释。';
-  var user = JSON.stringify({
-    album: (detail && detail.name) || '',
-    episodes: list.map(function (t) { return { i: Number(t.index) || 0, t: String(t.title || '').slice(0, 56) }; })
-  });
-  var obj = aiParseJson(await aiChat(sys, user, 50));
-  if (!obj || !Array.isArray(obj.items)) throw new Error('AI 返回格式不对，请再试一次');
-
-  var items = [];
-  obj.items.slice(0, 6).forEach(function (x) {
-    var idx = Number(x && x.i);
-    for (var i = 0; i < list.length; i++) {
-      if (Number(list[i].index) === idx) {
-        items.push({
-          index: idx,
-          trackId: String(list[i].trackId || ''),
-          title: String(list[i].title || ''),
-          why: String((x && x.why) || '').slice(0, 50)
-        });
-        return;
-      }
-    }
-  });
-  var out = { items: items, tip: String(obj.tip || '').slice(0, 60), at: Date.now() };
-  aiCache[aid].hl = out;
-  await persistAiCache();
-  return out;
-}
-
-// 收听周报：把最近 7 天的统计喂给 AI，让它写一段人话点评
-async function aiWeekly() {
-  var days = {}, total = 0;
-  var today = new Date();
-  for (var i = 0; i < 7; i++) {
-    var d = new Date(today.getTime() - i * 86400000);
-    var k = dayKeyOf(d.getTime());
-    var sec = Number(stats.days && stats.days[k]) || 0;
-    days[k] = sec;
-    total += sec;
-  }
-  if (total < 60) return { empty: true, total: total, note: '最近 7 天还没听够 1 分钟，多听两集再来看看。' };
-
-  var topAlbums = Object.keys(stats.albums || {}).map(function (id) {
-    var a = stats.albums[id] || {};
-    return { name: a.name || id, sec: Number(a.total) || 0 };
-  }).sort(function (x, y) { return y.sec - x.sec; }).slice(0, 5);
-
-  var weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-  var byDay = [];
-  for (var j = 6; j >= 0; j--) {
-    var dd = new Date(today.getTime() - j * 86400000);
-    byDay.push(weekday[dd.getDay()] + ' ' + Math.round((days[dayKeyOf(dd.getTime())] || 0) / 60) + ' 分钟');
-  }
-
-  var sys = '你是中文有声书 App 的编辑，给用户写一段本周收听小结。要求：口语、有温度、不超过 130 字、' +
-    '不要 Markdown、不要编造数据之外的内容。可以给一条具体建议（比如换时段、补某本书、控制时长）。';
-  var user = JSON.stringify({
-    本周各天: byDay,
-    本周总时长分钟: Math.round(total / 60),
-    常听的书: topAlbums,
-    连续天数: calcStreak().now
-  });
-  var text = await aiChat(sys, user, 45);
-  return {
-    empty: false,
-    total: total,
-    days: byDay,
-    albums: topAlbums,
-    text: String(text).replace(/\s+/g, ' ').trim().slice(0, 400),
-    at: Date.now()
-  };
 }
 
 // ---------- 章节书签 ----------
@@ -2873,7 +2522,7 @@ async function runDownload(playlistId, subDir, title) {
 
 // ---------- 专辑对比 ----------
 // 「这两本哪本更适合我」是选书时最真实的困惑。这里把两张专辑的关键指标摆在一起，
-// 再让 AI 用一句话说清差别（AI 没开就只给指标，不硬凑结论）。
+// 只给客观数字（集数/播放量/订阅数/付费/更新日期），不做主观判断。
 function cmpMetric(a, b) {
   // 返回两边谁更「多」，用于界面上高亮
   var na = Number(a) || 0, nb = Number(b) || 0;
@@ -2918,23 +2567,9 @@ async function compareAlbums(idA, idB) {
     rows: rows,
     sameAuthor: !!da.author && da.author === db.author,
     payDiff: (!!da.isPaid) !== (!!db.isPaid) ? (da.isPaid ? 'a' : 'b') : '',
-    dateA: da.updateDate || '', dateB: db.updateDate || '',
-    verdict: '', aiError: ''
+    dateA: da.updateDate || '', dateB: db.updateDate || ''
   };
 
-  if (aiReady()) {
-    try {
-      var sys = '你是中文有声书导购。比较两张专辑，用 80 字以内说清「什么情况下选 A、什么情况下选 B」，' +
-        '不要复述数字，不要 Markdown，不要编造资料外的信息。若两者其实差不多，就直接说差不多。';
-      var user = JSON.stringify({
-        A: { 标题: da.name, 主播: da.author, 集数: cntA, 付费: da.isPaid ? '是' : '否', 状态: da.finishedText, 更新: da.updateDate, 简介: String(da.intro || '').slice(0, 300) },
-        B: { 标题: db.name, 主播: db.author, 集数: cntB, 付费: db.isPaid ? '是' : '否', 状态: db.finishedText, 更新: db.updateDate, 简介: String(db.intro || '').slice(0, 300) }
-      });
-      cmp.verdict = String(await aiChat(sys, user, 40)).replace(/\s+/g, ' ').trim().slice(0, 240);
-    } catch (e) {
-      cmp.aiError = String(e && e.message || e);
-    }
-  }
   return cmp;
 }
 
@@ -3127,236 +2762,7 @@ async function bulkSubscribe(albumIds) {
   return { added: added, existed: existed, failed: failed };
 }
 
-// ---------- AI 推荐下一本 ----------
-// 素材：我听过的（progress）+ 订阅的（subs）+ 本地 AI 摘要里的标签。
-// 输出：三类建议 —— 接着听（同一本还没听完的邻域）、同口味、换口味。
-// 不直接推歌单，推的是「往哪个方向搜」，因为宿主没有可靠的跨源推荐接口。
-async function aiRecommend(force) {
-  var cacheKey = 'rec';
-  if (aiCache && aiCache['__' + cacheKey] && !force) {
-    var c0 = aiCache['__' + cacheKey];
-    if (Date.now() - (c0.at || 0) < 6 * 3600 * 1000) return c0;
-  }
-
-  // 1) 正在听 / 听过的
-  var heard = [];
-  var albs = (progress && progress.albums) || {};
-  Object.keys(albs).forEach(function (aid) {
-    var a = albs[aid] || {};
-    if (!a.trackId) return;
-    heard.push({
-      albumId: aid, name: a.albumName || a.name || aid,
-      index: Number(a.index) || 0, title: a.title || '',
-      at: Number(a.at) || 0
-    });
-  });
-  heard.sort(function (a, b) { return b.at - a.at; });
-  heard = heard.slice(0, 12);
-
-  // 2) 订阅但没开听的
-  var notStarted = subs.filter(function (s) { return !(Number(s.lastIndex) > 0); }).slice(0, 10)
-    .map(function (s) { return { albumId: s.albumId, name: s.name, author: s.author, total: Number(s.lastIndex) || 0 }; });
-
-  // 3) 已有 AI 摘要的标签池（只取本轮对话能用的）
-  var tagPool = [];
-  Object.keys(aiCache || {}).forEach(function (k) {
-    if (k.indexOf('__') === 0) return;
-    var v = aiCache[k];
-    if (v && v.tags && v.tags.length) {
-      tagPool.push({ name: v.name || k, tags: v.tags, summary: v.summary || '' });
-    }
-  });
-  tagPool = tagPool.slice(0, 20);
-
-  var sys = '你是中文有声书的选书顾问。根据用户最近的收听记录、订阅清单和内容标签，给出三条方向性的推荐。' +
-    '只输出 JSON：{"now":"眼下该优先听哪本、为什么，60字内","same":[{"kw":"搜索关键词","why":"为什么合口味，30字内"}],' +
-    '"new":[{"kw":"搜索关键词","why":"换口味的方向，30字内"}],"note":"一句话提醒，30字内"}。' +
-    'same 给 2-3 个关键词，new 给 2 个；关键词要是能在喜马拉雅搜到东西的具体词（作者名、书名、题材词），不要「好书」「热门」这类空话。' +
-    '不要编造你没把握存在的书名，宁可给题材词。';
-
-  var user = JSON.stringify({
-    最近在听: heard.map(function (h) { return h.name + (h.index ? '（听到第 ' + h.index + ' 集）' : ''); }),
-    订阅了但还没开听: notStarted.map(function (x) { return x.name + (x.author ? ' / ' + x.author : ''); }),
-    内容标签池: tagPool.map(function (x) { return x.name + '：' + x.tags.join('、'); }),
-    已导入专辑数: imported.length,
-    书签数: bookmarks.length
-  });
-
-  if (!heard.length && !subs.length && !imported.length) {
-    throw new Error('还没有收听或订阅记录，先听一会儿或导入几本书再来');
-  }
-
-  var text = await aiChat(sys, user, (config.ai && config.ai.timeout) || 50);
-  var obj = aiParseJson(text);
-  if (!obj) throw new Error('AI 返回格式不对，请再试一次');
-
-  function cleanKw(arr, n) {
-    return (Array.isArray(arr) ? arr : []).slice(0, n).map(function (x) {
-      return {
-        kw: String((x && x.kw) || '').slice(0, 20),
-        why: String((x && x.why) || '').slice(0, 60)
-      };
-    }).filter(function (x) { return x.kw; });
-  }
-
-  var out = {
-    now: cleanAiText(obj.now, 120),
-    same: cleanKw(obj.same, 3),
-    new: cleanKw(obj['new'], 2),
-    note: cleanAiText(obj.note, 60),
-    basedOn: { heard: heard.length, subs: subs.length, imported: imported.length, tags: tagPool.length },
-    at: Date.now(),
-    model: aiLastModel || (config.ai && config.ai.model) || ''
-  };
-  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
-  aiCache['__rec'] = out;
-  await persistAiCache();
-  return out;
-}
-
-// ---------- AI 按主题把长书切成几个歌单 ----------
-// 一本 300 集的书，一次听不完，也没法按主题跳。这里让 AI 看分集标题，
-// 把它切 2-5 段，每段给一个主题名，前端可以「只把这一段加进歌单」。
-async function aiThemeSplit(albumId, force) {
-  var aid = String(albumId || '');
-  if (!aid) throw new Error('缺少 albumId');
-  var ck = '__theme_' + aid;
-  if (aiCache && aiCache[ck] && !force) return aiCache[ck];
-
-  var detail = null;
-  try { detail = await fetchAlbumDetail(aid); } catch (e) { detail = { albumId: aid, name: '' }; }
-  var tracks = [];
-  // 只看前 120 集：足够看出结构，也不会把 prompt 撑爆
-  for (var pg = 1; pg <= 2 && tracks.length < 120; pg++) {
-    try {
-      var tp = await fetchAlbumTracks(aid, pg);
-      var list = (tp && tp.tracks) || [];
-      if (!list.length) break;
-      tracks = tracks.concat(list);
-    } catch (e) { break; }
-  }
-  if (!tracks.length) throw new Error('没有分集数据，无法按主题切分');
-
-  var total = Number((detail && detail.trackCount) || tracks.length) || tracks.length;
-  var lines = tracks.slice(0, 120).map(function (t, i) {
-    return (Number(t.index) || i + 1) + '. ' + String(t.title || '').slice(0, 40);
-  }).join('\n');
-
-  var sys = '你是中文有声书的编辑。根据分集标题，把这本书按内容主题切成 2-5 段，方便听众按兴趣跳着听。' +
-    '只输出 JSON：{"segments":[{"name":"主题名（8字内）","from":起始集数,"to":结束集数,"note":"这段讲什么，25字内","count":段内集数}]}。' +
-    '要求：区间必须首尾相接、覆盖全书、不重叠；from/to 用阿拉伯数字；如果内容看不出主题（比如纯音乐合集），就按集数均分并说明。';
-
-  var user = JSON.stringify({
-    name: (detail && detail.name) || '',
-    author: (detail && detail.author) || '',
-    totalEpisodes: total,
-    intro: String((detail && (detail.introFull || detail.intro)) || '').slice(0, 800),
-    titles: lines
-  });
-
-  var text = await aiChat(sys, user, (config.ai && config.ai.timeout) || 50);
-  var obj = aiParseJson(text);
-  if (!obj || !Array.isArray(obj.segments)) throw new Error('AI 返回格式不对，请再试一次');
-
-  var segs = obj.segments.slice(0, 6).map(function (x) {
-    var f = Math.max(1, Number(x && x.from) || 1);
-    var t2 = Math.min(total, Number(x && x.to) || total);
-    return {
-      name: String((x && x.name) || '').slice(0, 20),
-      from: f, to: Math.max(f, t2),
-      note: cleanAiText(x && x.note, 60),
-      count: Math.max(0, (Math.max(f, t2) - f + 1))
-    };
-  }).filter(function (x) { return x.name; });
-
-  var out = {
-    albumId: aid,
-    name: (detail && detail.name) || '',
-    total: total,
-    segments: segs,
-    at: Date.now(),
-    model: aiLastModel || (config.ai && config.ai.model) || ''
-  };
-  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
-  aiCache[ck] = out;
-  await persistAiCache();
-  return out;
-}
-
-// ---------- AI 跨专辑问答 ----------
-// 「我订阅的书里，有哪些适合开车听」「我听到的书里有没有讲明清的」
-// 把手上所有书的元信息（名字/主播/标签/摘要）喂进去，让它指出在哪几本里找。
-async function aiCrossAsk(question) {
-  var qs = String(question || '').trim();
-  if (!qs) throw new Error('问题不能为空');
-
-  var pool = [];
-  subs.forEach(function (s) {
-    pool.push({ kind: '订阅', albumId: String(s.albumId), name: s.name || '', author: s.author || '',
-      extra: (Number(s.newCount) ? '有新集' : ''), tags: [] });
-  });
-  imported.forEach(function (x) {
-    if (!pool.some(function (p) { return p.albumId === String(x.albumId); })) {
-      pool.push({ kind: '已导入', albumId: String(x.albumId), name: x.name || '', author: '', extra: x.count + '集', tags: [] });
-    }
-  });
-  // 补上 AI 摘要给的标签，这是判断题材的关键
-  Object.keys(aiCache || {}).forEach(function (k) {
-    if (k.indexOf('__') === 0) return;
-    var v = aiCache[k];
-    if (!v) return;
-    var hit = null;
-    for (var i = 0; i < pool.length; i++) if (pool[i].albumId === k) { hit = pool[i]; break; }
-    if (!hit) {
-      pool.push({ kind: '整理过', albumId: k, name: v.name || k, author: '', extra: '', tags: [] });
-      hit = pool[pool.length - 1];
-    }
-    hit.tags = v.tags || [];
-    hit.summary = v.summary || '';
-    hit.fit = v.fit || '';
-  });
-  pool = pool.slice(0, 80);
-  if (!pool.length) throw new Error('还没有任何订阅或导入记录，先去搜几本书');
-
-  var sys = '你是用户的私人听书助理。用户会问一个关于「我手上这些书」的问题，你要在给定清单里找答案。' +
-    '只输出 JSON：{"answer":"直接回答，100字内，口语化","picks":[{"albumId":"清单里的albumId","name":"书名","why":"为什么相关，20字内"}],"none":false}。' +
-    '规则：只能从清单里挑，不许编造清单里没有的书或 ID；如果清单里确实没有相关的，none 设为 true 并把 answer 写清楚「你手上的书里没有这类」并建议一句搜索词。';
-
-  var user = JSON.stringify({
-    问题: qs,
-    我的书: pool.map(function (p) {
-      return { albumId: p.albumId, name: p.name, author: p.author, 来源: p.kind,
-        tags: p.tags, summary: p.summary || '', fit: p.fit || '', 备注: p.extra };
-    })
-  });
-
-  var text = await aiChat(sys, user, (config.ai && config.ai.timeout) || 50);
-  var obj = aiParseJson(text);
-  if (!obj || !obj.answer) throw new Error('AI 返回格式不对，请再试一次');
-
-  var valid = {};
-  pool.forEach(function (p) { valid[p.albumId] = p; });
-  var picks = (Array.isArray(obj.picks) ? obj.picks : []).slice(0, 5).map(function (x) {
-    var id = String((x && x.albumId) || '');
-    if (!valid[id]) return null;
-    return {
-      albumId: id,
-      name: valid[id].name || String((x && x.name) || ''),
-      why: String((x && x.why) || '').slice(0, 50),
-      kind: valid[id].kind
-    };
-  }).filter(Boolean);
-
-  return {
-    question: qs,
-    answer: cleanAiText(obj.answer, 400),
-    picks: picks,
-    none: !!obj.none || !picks.length,
-    poolSize: pool.length,
-    at: Date.now()
-  };
-}
-
+// ---------- 追更日历：这些书大概什么时候更新 ----------
 // 手上只有「最近一次更新日期」，所以只能做两件事：
 //   1) 按周几归档，看出哪几天你最忙（更新扎堆）；
 //   2) 按「距今多少天」分档，把久没更新的挑出来（可能完结了、可能该取关了）。
@@ -3443,7 +2849,6 @@ function updateCalendar() {
   };
 }
 
-// ---------- 订阅分组：分类 / 状态 / 主播 ----------
 // 分组不落盘——它是视图，不是数据。每次按当前 subs 现算，避免和真实数据不一致。
 function subsGroups(by) {
   by = by || 'cat';
@@ -3572,21 +2977,7 @@ async function runSelfCheck(deep) {
     }
   }
 
-  // 6 AI（未启用算正常，只是没开）
-  if (!config.ai || !config.ai.enabled) add('ai', 'AI 智能整理', 'ok', '未启用（不影响其他功能）');
-  else if (!config.ai.key) add('ai', 'AI 智能整理', 'warn', '已启用但没填 key，功能会自动隐藏');
-  else {
-    try {
-      var t1 = Date.now();
-      await aiChat('只回复 OK', 'ping', 30);
-      add('ai', 'AI 智能整理', 'ok', '连通（' + (Date.now() - t1) + 'ms，模型 ' + config.ai.model + (aiLastModel && aiLastModel !== config.ai.model ? '，实际用 ' + aiLastModel : '') + '）');
-    } catch (e) {
-      var em = String(e && e.message || e);
-      add('ai', 'AI 智能整理', 'bad', em + (/HTTP 401|HTTP 403/.test(em) ? '　检查密钥是否有效' : '　检查地址是否填了宿主 IP（插件在容器内，127.0.0.1 指向容器自己）'));
-    }
-  }
-
-  // 7 音箱
+  // 6 音箱
   var dev = config.device || {};
   if (!dev.account_id || !dev.device_id) add('miot', '小爱音箱', 'warn', '未绑定设备，语音播报与语音控制不可用');
   else {
@@ -3598,7 +2989,7 @@ async function runSelfCheck(deep) {
     }
   }
 
-  // 8 定时任务状态
+  // 7 定时任务状态
   var autoOk = !config.auto.enabled || (config.auto.time && /^\d{1,2}:\d{2}$/.test(config.auto.time));
   add('auto', '定时同步', config.auto.enabled ? (autoOk ? 'ok' : 'warn') : 'ok',
     config.auto.enabled ? '每天 ' + config.auto.time + '，上次 ' + (config.auto.lastRunDate || '未执行')
@@ -3606,12 +2997,12 @@ async function runSelfCheck(deep) {
   add('tts', '定时播报', config.tts && config.tts.enabled ? (dev.account_id ? 'ok' : 'warn') : 'ok',
     config.tts && config.tts.enabled ? ('每天 ' + config.tts.time + '，上次 ' + (config.tts.lastRunDate || '未执行')) : '未启用');
 
-  // 9 数据量
+  // 8 数据量
   add('data', '本地数据', 'ok',
     '订阅 ' + subs.length + ' · 已导入 ' + imported.length + ' · 进度 ' + Object.keys(progress.tracks).length +
-    ' 集 · 书签 ' + bookmarks.length + ' · AI 缓存 ' + Object.keys(aiCache).length);
+    ' 集 · 书签 ' + bookmarks.length);
 
-  // 10 近期错误
+  // 9 近期错误
   var errs = logBuf.filter(function (e) { return e.lv === 'error'; }).length;
   var warns = logBuf.filter(function (e) { return e.lv === 'warn'; }).length;
   add('logs', '近期异常', errs ? 'warn' : 'ok', errs || warns ? ('错误 ' + errs + ' 条 · 警告 ' + warns + ' 条（最近 ' + LOG_MAX + ' 条内）') : '无异常记录');
@@ -3675,12 +3066,7 @@ async function handleHTTPRequest(req) {
       if (body.dl.format === 'mp3' || body.dl.format === '') config.dl.format = body.dl.format;
     }
     if (body.ai) {
-      var ai = body.ai;
-      if (typeof ai.enabled === 'boolean') config.ai.enabled = ai.enabled;
-      if (typeof ai.url === 'string' && ai.url.trim()) config.ai.url = ai.url.trim().replace(/\/+$/, '');
-      if (typeof ai.key === 'string') config.ai.key = ai.key.trim();
-      if (typeof ai.model === 'string' && ai.model.trim()) config.ai.model = ai.model.trim();
-      if (ai.timeout !== undefined) config.ai.timeout = Math.max(5, Math.min(120, Number(ai.timeout) || 45));
+      // 旧版前端可能还会传 ai 段，直接忽略，不再写进配置
     }
     await persist();
     return jsonResp({ success: true, data: config });
@@ -3751,175 +3137,6 @@ async function handleHTTPRequest(req) {
     return jsonResp({ success: true, data: { message: '统计数据已清空' } });
   }
 
-  // ---------- AI 智能整理 ----------
-  if (path === '/ai/status' && method === 'GET') {
-    if (!aiCache || typeof aiCache !== 'object') aiCache = {};
-    return jsonResp({
-      success: true,
-      data: {
-        ready: aiReady(),
-        enabled: !!(config.ai && config.ai.enabled),
-        hasKey: !!(config.ai && config.ai.key),
-        url: (config.ai && config.ai.url) || '',
-        model: (config.ai && config.ai.model) || '',
-        cached: Object.keys(aiCache).length
-      }
-    });
-  }
-
-  if (path === '/ai/test' && method === 'POST') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 或没填密钥' }, 400);
-    var t0 = Date.now();
-    try {
-      var hi = await aiChat('你是测试助手，只回答一个词。', '请只回复两个字：正常', 20);
-      return jsonResp({ success: true, data: { reply: String(hi).slice(0, 40), ms: Date.now() - t0, model: (config.ai && config.ai.model) || '' } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
-    }
-  }
-
-  // 生成/读取一本书的摘要、标签、主题分组（有缓存直接返回）
-  if (path === '/ai/summary' && method === 'GET') {
-    if (!aiCache || typeof aiCache !== 'object') aiCache = {};
-    var said = String(q.albumId || '');
-    if (!said) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
-    var cached = aiCache[said];
-    if (cached && !q.refresh) return jsonResp({ success: true, data: { cached: true, item: cached } });
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理，请到设置页填写网关地址与密钥' }, 400);
-    try {
-      var dt = cached && cached._detail ? cached._detail : null;
-      var detail = null, tracks = [];
-      // 详情与分集从喜马拉雅现取，保证内容与当前一致
-      try { detail = await fetchAlbumDetail(said); } catch (e) { detail = null; }
-      try {
-        var tp = await fetchAlbumTracks(said, 1);
-        tracks = (tp && tp.tracks) || [];
-      } catch (e) { tracks = []; }
-      if (!detail && !tracks.length) return jsonResp({ success: false, error: '取不到专辑信息' }, 502);
-      var res = await aiSummarize(detail || { albumId: said, name: '' }, tracks, !!q.refresh);
-      return jsonResp({ success: true, data: { cached: false, item: res } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // 对着一本书提问
-  if (path === '/ai/ask' && method === 'POST') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    var ab = readBodyJson(req);
-    if (!ab.albumId) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
-    try {
-      var d2 = await fetchAlbumDetail(String(ab.albumId));
-      var t2 = [];
-      try { var tp2 = await fetchAlbumTracks(String(ab.albumId), 1); t2 = (tp2 && tp2.tracks) || []; } catch (e) { t2 = []; }
-      var ans = await aiAsk(d2, t2, ab.q || ab.question || '');
-      return jsonResp({ success: true, data: { answer: ans, albumId: String(ab.albumId) } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  if (path === '/ai/clear' && method === 'POST') {
-    aiCache = {};
-    await persistAiCache();
-    return jsonResp({ success: true, data: { message: 'AI 缓存已清空', cached: 0 } });
-  }
-
-  // 书签 AI 归类
-  if (path === '/ai/classify' && method === 'POST') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    try {
-      var map = await aiClassifyBookmarks(bmList(''));
-      return jsonResp({ success: true, data: { map: map, count: Object.keys(map).length } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // ---------- AI 深度功能 ----------
-  // 分集一句话简介（分批补，可强制重来）
-  if (path === '/ai/episodes' && method === 'GET') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    var eaid = String(q.albumId || '');
-    if (!eaid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
-    try {
-      var ed = null;
-      try { ed = await fetchAlbumDetail(eaid); } catch (e) { ed = { albumId: eaid, name: '' }; }
-      var et = [], ep = Number(q.page) || 1;
-      try { var etp = await fetchAlbumTracks(eaid, ep); et = (etp && etp.tracks) || []; } catch (e) { et = []; }
-      if (!et.length) return jsonResp({ success: false, error: '没有分集数据' }, 502);
-      var er = await aiEpisodeBlurbs(ed, et, q.refresh === '1');
-      return jsonResp({ success: true, data: { albumId: eaid, page: ep, items: er.items, cached: !!er.cached, added: er.added || 0 } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // 精彩片段推荐
-  if (path === '/ai/highlights' && method === 'GET') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    var haid = String(q.albumId || '');
-    if (!haid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
-    try {
-      var hd = null;
-      try { hd = await fetchAlbumDetail(haid); } catch (e) { hd = { albumId: haid, name: '' }; }
-      var ht = [];
-      try { var htp = await fetchAlbumTracks(haid, 1); ht = (htp && htp.tracks) || []; } catch (e) { ht = []; }
-      var hr = await aiHighlights(hd, ht);
-      return jsonResp({ success: true, data: hr });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // 收听周报（AI 点评）
-  if (path === '/ai/weekly' && method === 'GET') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    try {
-      var wr2 = await aiWeekly();
-      return jsonResp({ success: true, data: wr2 });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // AI 推荐下一本
-  if (path === '/ai/recommend' && method === 'GET') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    try {
-      var rc = await aiRecommend(q.refresh === '1');
-      return jsonResp({ success: true, data: rc });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // AI 按主题切分段
-  if (path === '/ai/themes' && method === 'GET') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    var taid = String(q.albumId || '');
-    if (!taid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
-    try {
-      var ts = await aiThemeSplit(taid, q.refresh === '1');
-      return jsonResp({ success: true, data: ts });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // AI 跨专辑问答
-  if (path === '/ai/cross' && method === 'POST') {
-    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
-    try {
-      var xs = readBodyJson(req);
-      var xr = await aiCrossAsk(xs.q || xs.question || '');
-      return jsonResp({ success: true, data: xr });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
-    }
-  }
-
-  // ---------- 章节书签 ----------
   if (path === '/bookmarks' && method === 'GET') {
     return jsonResp({ success: true, data: { items: bmList(q.albumId || ''), total: bookmarks.length } });
   }
@@ -4030,7 +3247,6 @@ async function handleHTTPRequest(req) {
       songsFileUrl: typeof (songloft.songs && songloft.songs.fileUrl),
       storage: typeof songloft.storage.get,
       version: VERSION,
-      aiReady: aiReady(),
       libCached: libMap ? Object.keys(libMap).length : 0
     };
     return jsonResp({ success: true, data: caps });
@@ -4464,7 +3680,7 @@ async function handleHTTPRequest(req) {
   }
 
   // ---------- 内容整理 ----------
-  // 两张专辑对比（可带 AI 一句话结论）
+  // 两张专辑对比
   if (path === '/compare' && method === 'GET') {
     var ca = extractAlbumId(q.a || '');
     var cb = extractAlbumId(q.b || '');
@@ -4993,7 +4209,7 @@ async function handleHTTPRequest(req) {
     }
   }
 
-  // 文字 / 语音指令 → 在音箱上播（确定性解析，不依赖外部 AI）
+  // 文字 / 语音指令 → 在音箱上播（确定性解析）
   if (path === '/voice' && method === 'POST') {
     try {
       var vb = readBodyJson(req);
