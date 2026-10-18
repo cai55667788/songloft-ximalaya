@@ -671,6 +671,8 @@
       pendingSeek = getPos(t.trackId);
       a.play().catch(function () { /* 浏览器要求先有用户交互 */ });
       if (queue.length > 1) $('pProg').textContent = '第 ' + (idx + 1) + ' / ' + queue.length + ' 集';
+      if ($('pQueue')) $('pQueue').textContent = '☰ ' + (idx + 1) + '/' + queue.length;
+      if (typeof renderQueue === 'function' && qPanelOpen()) renderQueue();
     } catch (e) { $('pTitle').textContent = '试听失败: ' + e.message; }
   }
 
@@ -710,6 +712,10 @@
   $('audio').addEventListener('pause', function () {
     if (qi >= 0) savePos(queue[qi].trackId, this.currentTime, this.duration);
     flushProg();
+    if (qPanelOpen()) renderQueue();
+  });
+  $('audio').addEventListener('play', function () {
+    if (qPanelOpen()) renderQueue();
   });
 
   // 播到队列末尾时，先把当前页后面的集补齐，再翻下一页，长书可以一直听下去
@@ -789,6 +795,7 @@
       $('pSleep').value = '0';
       $('pSleepTip').textContent = '已按「本集播完」停止';
       a.pause();
+      renderQueue();
       return;
     }
     if (qi >= 0 && qi + 1 < queue.length) { playAt(qi + 1); return; }
@@ -796,6 +803,130 @@
     msg('已播完' + (queue[qi] && queue[qi].albumName ? '《' + queue[qi].albumName + '》' : '本页') + '共 ' + queue.length + ' 集' +
       (playOrder === 'desc' ? '（倒序已到头，可切回正序）' : ''));
   });
+
+  // ---------- 播放队列面板 ----------
+  function qPanelOpen() { return $('qPanel').classList.contains('show'); }
+
+  function openQueue() {
+    renderQueue();
+    $('qPanel').classList.add('show');
+  }
+
+  function closeQueue() { $('qPanel').classList.remove('show'); }
+
+  function renderQueue() {
+    var el = $('qList');
+    if (!el) return;
+    var qs = $('qOrder');
+    if (qs) qs.textContent = playOrder === 'desc' ? '↓ 倒序' : '↑ 正序';
+    $('qStat').textContent = queue.length
+      ? '共 ' + queue.length + ' 集 · 当前第 ' + (qi >= 0 ? qi + 1 : 0) + ' 集'
+      : '';
+    el.innerHTML = '';
+    if (!queue.length) {
+      el.innerHTML = '<div class="qempty">队列是空的，去详情页点某一集开始听</div>';
+      return;
+    }
+    queue.forEach(function (t, i) {
+      var row = document.createElement('div');
+      row.className = 'qrow' + (i === qi ? ' on' : '');
+
+      var no = document.createElement('span');
+      no.className = 'qno';
+      no.textContent = i === qi ? '▶' : (t.index ? t.index : (i + 1));
+
+      var tt = document.createElement('span');
+      tt.className = 'qtt';
+      tt.textContent = t.title;
+
+      var mk = document.createElement('span');
+      mk.className = 'qmk';
+      var st = trackStat(t.trackId);
+      if (i === qi && !$('audio').paused) mk.textContent = '播放中';
+      else if (st === 'done') mk.textContent = '✓ 已听完';
+      else if (st === 'part') mk.textContent = '⏱ ' + fmtTime((getPos(t.trackId) || {}).t || 0);
+
+      var del = document.createElement('span');
+      del.className = 'qdel';
+      del.textContent = '×';
+      del.title = '从队列移除';
+      del.addEventListener('click', function (e) {
+        if (e && e.stopPropagation) e.stopPropagation();
+        removeFromQueue(i);
+      });
+
+      row.appendChild(no); row.appendChild(tt); row.appendChild(mk); row.appendChild(del);
+      row.addEventListener('click', function () {
+        if (i === qi) { closeQueue(); return; }
+        playAt(i);
+        renderQueue();
+      });
+      el.appendChild(row);
+    });
+    // 高亮行滚到可视区
+    var on = el.querySelector ? el.querySelector('.qrow.on') : null;
+    if (on && on.scrollIntoView) { try { on.scrollIntoView({ block: 'center' }); } catch (e2) {} }
+  }
+
+  function removeFromQueue(i) {
+    if (i < 0 || i >= queue.length) return;
+    var wasCur = i === qi;
+    queue.splice(i, 1);
+    if (!queue.length) {
+      qi = -1;
+      $('audio').pause();
+      renderQueue();
+      msg('队列已空');
+      return;
+    }
+    if (i < qi) qi -= 1;
+    else if (wasCur) {
+      // 删掉正在播的那集：直接播下一个位置（同号，或退到末尾）
+      var nxt = Math.min(qi, queue.length - 1);
+      qi = nxt;
+      playAt(nxt);
+    }
+    renderQueue();
+  }
+
+  $('pQueue').addEventListener('click', function () {
+    if (qPanelOpen()) closeQueue(); else openQueue();
+  });
+  $('qClose').addEventListener('click', closeQueue);  $('qOrder').addEventListener('click', function () {
+    setOrder(playOrder === 'desc' ? 'asc' : 'desc');
+    renderQueue();
+  });
+  $('qClear').addEventListener('click', function () {
+    if (!queue.length) return;
+    if (!confirm('清空播放队列？（不影响收听进度，详情页可以重新开播）')) return;
+    queue = [];
+    qi = -1;
+    $('audio').pause();
+    renderQueue();
+    msg('已清空队列');
+  });
+  $('qDropDone').addEventListener('click', function () {
+    if (queue.length < 2) { msg('队列太短，不用清理', 'err'); return; }
+    var keep = [];
+    var newQi = -1;
+    var curId = qi >= 0 ? String(queue[qi].trackId) : '';
+    queue.forEach(function (t) {
+      var done = trackStat(t.trackId) === 'done' && String(t.trackId) !== curId;
+      if (done) return;
+      keep.push(t);
+    });
+    var removed = queue.length - keep.length;
+    if (!removed) { msg('队列里没有已听完的集'); return; }
+    queue = keep;
+    qi = curId ? indexOfTrack(queue, curId) : -1;
+    renderQueue();
+    msg('已移除 ' + removed + ' 集已听完的');
+  });
+  if ($('qPanel')) {
+    $('qPanel').addEventListener('click', function (e) {
+      if (e && e.target === this) closeQueue();
+    });
+  }
 
   $('pPrev').addEventListener('click', function () {
     if (qi > 0) playAt(qi - 1);
