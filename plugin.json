@@ -1,6 +1,6 @@
 {
   "name": "喜马拉雅",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "喜马拉雅有声书/评书导入 songloft：扫码登录读取「我订阅的专辑」、关键词搜专辑或搜单集、专辑详情试听；听书播放器支持断点续播、跨页连播、倍速、睡眠定时、已听标记、只看未听、最近收听聚合；订阅后只增量拉新集，可每天定时同步并推送到小爱音箱；v0.9.0 新增：跨设备收听进度（存 NAS）、每天定时用音箱语音播报新集、单集搜索与收藏、整本下载到本地音乐目录",
   "author": "cai55667788",
   "homepage": "https://github.com/cai55667788/songloft-ximalaya",
@@ -18,8 +18,8 @@
     "inter-plugin"
   ],
   "icon": "static/icon.svg",
-  "entryHash": "56bba0b68203c73f56d431c13f1ad7fdad09e49ee4695695b8a7682c42098471",
-  "zipHash": "ffcfa2609f977766738c3d9b80f10966f7256643c52be8290a99adf630783a8f",
+  "entryHash": "f8f140381052fc30614ccbb19bdbf00cefd47234f153b726e3cf5a86703a3933",
+  "zipHash": "4ee1a5cfb9e2f055f2bf1927f0fb927fca996f7c28e7ac2a5cef7b19cbf60d69",
   "updateUrl": "https://raw.githubusercontent.com/cai55667788/songloft-ximalaya/main/plugin.json",
-  "download_url": "https://github.com/cai55667788/songloft-ximalaya/releases/download/v0.11.0/ximalaya.jsplugin.zip"
+  "download_url": "https://github.com/cai55667788/songloft-ximalaya/releases/download/v0.12.0/ximalaya.jsplugin.zip"
 }
