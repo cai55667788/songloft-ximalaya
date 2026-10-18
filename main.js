@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.13.0';
+var VERSION = '0.14.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -48,10 +48,18 @@ var config = {
   auto: { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' },
   tts: {
     enabled: false, time: '07:30', account_id: '', device_id: '', device_name: '',
-    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, lastRunDate: ''
+    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, playAfter: false, lastRunDate: ''
   },
   sync: { progress: true },
-  dl: { targetDir: '喜马拉雅', format: 'mp3' }
+  dl: { targetDir: '喜马拉雅', format: 'mp3' },
+  // AI 智能整理：走本机 Agent2API 网关（OpenAI 兼容），不填 key 时功能自动隐藏
+  ai: {
+    enabled: false,
+    url: 'http://127.0.0.1:3065/v1',
+    key: '',
+    model: 'deepseek-v4.1-flash-0930',
+    timeout: 45
+  }
 };
 var imported = [];   // [{albumId, name, playlistId, count, importedAt}]
 var subs = [];       // [{albumId, name, playlistId, lastIndex, songCount, cover, author, updateDate, lastCheckAt, newCount, newTitles, autoSync}]
@@ -887,15 +895,17 @@ async function loadAll() {
   try { var w = await songloft.storage.get(WATCH_KEY); if (w) watch = typeof w === 'string' ? JSON.parse(w) : w; } catch (e) { /* */ }
   try { var bmk = await songloft.storage.get(BM_KEY); if (bmk) bookmarks = typeof bmk === 'string' ? JSON.parse(bmk) : bmk; } catch (e) { /* */ }
   try { var hst = await songloft.storage.get(HIST_KEY); if (hst) history = typeof hst === 'string' ? JSON.parse(hst) : hst; } catch (e) { /* */ }
+  try { var aic = await songloft.storage.get(AI_KEY); if (aic) aiCache = typeof aic === 'string' ? JSON.parse(aic) : aic; } catch (e) { /* */ }
   if (!Array.isArray(bookmarks)) bookmarks = [];
   if (!Array.isArray(history)) history = [];
+  if (!aiCache || typeof aiCache !== 'object' || Array.isArray(aiCache)) aiCache = {};
 
   if (!config || typeof config !== 'object') config = {};
   if (!config.device) config.device = { account_id: '', device_id: '', device_name: '' };
   if (!config.auto) config.auto = { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' };
   var dftTts = {
     enabled: false, time: '07:30', account_id: '', device_id: '', device_name: '',
-    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, lastRunDate: ''
+    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, playAfter: false, lastRunDate: ''
   };
   if (!config.tts) config.tts = dftTts;
   for (var tk in dftTts) {
@@ -906,6 +916,13 @@ async function loadAll() {
   if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
   if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '';
   if (config.dl.format !== '' && config.dl.format !== 'mp3') config.dl.format = 'mp3';
+
+  var dftAi = { enabled: false, url: 'http://127.0.0.1:3065/v1', key: '', model: 'deepseek-v4.1-flash-0930', timeout: 45 };
+  if (!config.ai || typeof config.ai !== 'object') config.ai = dftAi;
+  for (var ak in dftAi) {
+    if (Object.prototype.hasOwnProperty.call(dftAi, ak) && config.ai[ak] === undefined) config.ai[ak] = dftAi[ak];
+  }
+  if (typeof config.ai.timeout !== 'number' || config.ai.timeout < 5) config.ai.timeout = 45;
 
   if (!login || typeof login.cookie !== 'string') login = { cookie: '', savedAt: '' };
   if (!Array.isArray(subs)) subs = [];
@@ -921,6 +938,7 @@ async function loadAll() {
   if (config.watch.maxAlbums === undefined) config.watch.maxAlbums = 3;
 
   if (!stats || typeof stats !== 'object') stats = { days: {}, albums: {}, at: '' };
+  if (!stats.hours || typeof stats.hours !== 'object') stats.hours = {};
   if (!stats.days || typeof stats.days !== 'object') stats.days = {};
   if (!stats.albums || typeof stats.albums !== 'object') stats.albums = {};
 
@@ -1027,7 +1045,7 @@ async function miotPost(path, payload) {
 var PROG_MAX_TRACKS = 4000;   // 最多记 4000 集单集进度
 // 收听统计：按天累计秒数 + 每张专辑的秒数，只保留最近 STAT_DAYS 天
 var STAT_DAYS = 400;
-var stats = { days: {}, albums: {}, at: '' };
+var stats = { days: {}, albums: {}, hours: {}, at: '' };
 var PROG_MAX_ALBUMS = 800;
 
 function progNum(x) { var n = Number(x); return isFinite(n) && n > 0 ? Math.round(n) : 0; }
@@ -1085,6 +1103,10 @@ function statAdd(seconds, albumId, albumName, ts) {
   if (sec <= 0 || sec > 3600 * 6) return false;   // 单次超过 6 小时视为异常
   var dk = dayKeyOf(ts);
   stats.days[dk] = (Number(stats.days[dk]) || 0) + sec;
+  // 时段分布（0-23 点），用来画「什么时候听得最多」的热力图
+  if (!stats.hours || typeof stats.hours !== 'object') stats.hours = {};
+  var hh = new Date(Number(ts) || Date.now()).getHours();
+  stats.hours[hh] = (Number(stats.hours[hh]) || 0) + sec;
   if (albumId) {
     var k = String(albumId);
     var a = stats.albums[k] || { name: albumName || ('专辑' + k), sec: 0, lastAt: 0 };
@@ -1108,6 +1130,14 @@ function secToHM(sec) {
   if (h > 0) return h + ' 小时' + (m ? ' ' + m + ' 分' : '');
   if (m > 0) return m + ' 分钟';
   return s2 + ' 秒';
+}
+
+// 秒 → 3:20 / 1:05:33，给语音播报用（比「200 秒」自然）
+function fmtClock(sec) {
+  var n = Math.max(0, Math.round(Number(sec) || 0));
+  var h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), s = n % 60;
+  var mm = (h && m < 10 ? '0' : '') + m;
+  return (h ? h + ' 小时 ' : '') + mm + ' 分' + (s ? ' ' + s + ' 秒' : '');
 }
 
 function statRange(fromTs, toTs) {
@@ -1176,6 +1206,269 @@ function buildReport(period) {
     finished: finishedN, top: albums, daily: r.list, text: text,
     albumCount: Object.keys(stats.albums).length
   };
+}
+
+// ---------- 听书习惯仪表盘 ----------
+// 连续收听天数：从今天（或昨天）往前数，连续有收听记录的天数
+function calcStreak() {
+  var keys = Object.keys(stats.days || {});
+  if (!keys.length) return { now: 0, best: 0, lastDay: '' };
+  var set = {};
+  keys.forEach(function (k) { if (Number(stats.days[k]) > 0) set[k] = 1; });
+  var today = new Date();
+  function dayAgo(n) {
+    return dayKeyOf(new Date(today.getFullYear(), today.getMonth(), today.getDate() - n).getTime());
+  }
+  // 今天没听但昨天听了，连续天数仍算（还没到晚上）
+  var start = set[dayAgo(0)] ? 0 : (set[dayAgo(1)] ? 1 : -1);
+  var now = 0;
+  if (start >= 0) {
+    for (var i = start; i < 400; i++) {
+      if (!set[dayAgo(i)]) break;
+      now += 1;
+    }
+  }
+  // 历史最长连续
+  var sorted = Object.keys(set).sort();
+  var best = 0, run = 0, prev = '';
+  sorted.forEach(function (k) {
+    if (!prev) { run = 1; }
+    else {
+      var p = new Date(prev + 'T12:00:00').getTime();
+      var c = new Date(k + 'T12:00:00').getTime();
+      run = (c - p <= 86400000 * 1.5) ? run + 1 : 1;
+    }
+    if (run > best) best = run;
+    prev = k;
+  });
+  var lastDay = sorted.length ? sorted[sorted.length - 1] : '';
+  return { now: now, best: best, lastDay: lastDay };
+}
+
+// 时段热力：返回 24 个小时的秒数 + 峰值时段
+function calcHourHeat() {
+  var out = [];
+  var peak = -1, peakSec = 0;
+  for (var h = 0; h < 24; h++) {
+    var s = Number((stats.hours || {})[h]) || 0;
+    out.push(s);
+    if (s > peakSec) { peakSec = s; peak = h; }
+  }
+  return { hours: out, peakHour: peak, peakSec: peakSec };
+}
+
+// 每张专辑的听完率：已听集数 / 总集数（总集数取订阅或进度里已知的最大集号）
+function calcFinishRates(limit) {
+  var perAlbum = {};
+  Object.keys(progress.tracks || {}).forEach(function (k) {
+    var p = progress.tracks[k];
+    if (!p.albumId) return;
+    var a = perAlbum[p.albumId] || { heard: 0, finished: 0, maxIndex: 0, name: p.albumName || '' };
+    if (p.finished) a.finished += 1;
+    if (Number(p.t) > 3) a.heard += 1;
+    if (Number(p.index) > a.maxIndex) a.maxIndex = Number(p.index);
+    if (!a.name && p.albumName) a.name = p.albumName;
+    perAlbum[p.albumId] = a;
+  });
+  var subsById = {};
+  (subs || []).forEach(function (s) { subsById[String(s.albumId)] = s; });
+  var out = [];
+  Object.keys(perAlbum).forEach(function (aid) {
+    var a = perAlbum[aid];
+    var sub = subsById[aid];
+    var total = sub ? (Number(sub.lastIndex) || a.maxIndex) : a.maxIndex;
+    if (!total) return;
+    out.push({
+      albumId: aid,
+      name: a.name || (sub && sub.name) || ('专辑' + aid),
+      finished: a.finished, heard: a.heard, total: total,
+      rate: Math.min(100, Math.round(a.finished / total * 100))
+    });
+  });
+  out.sort(function (x, y) { return y.rate - x.rate || y.finished - x.finished; });
+  return limit ? out.slice(0, limit) : out;
+}
+
+// 剩余时长预估：把「在听但没听完」的书按已听平均集长推算还要多久
+function calcRemain() {
+  var perAlbum = {};
+  Object.keys(progress.tracks || {}).forEach(function (k) {
+    var p = progress.tracks[k];
+    if (!p.albumId) return;
+    var a = perAlbum[p.albumId] || { name: p.albumName || '', heard: 0, finished: 0, sec: 0, maxIndex: 0, avgDur: 0, dSum: 0, dCnt: 0 };
+    if (p.finished) a.finished += 1;
+    if (Number(p.t) > 3) a.heard += 1;
+    a.sec += Number(p.t) || 0;
+    a.dSum += Number(p.d) || 0;
+    if (Number(p.d) > 0) a.dCnt += 1;
+    if (Number(p.index) > a.maxIndex) a.maxIndex = Number(p.index);
+    if (p.albumName) a.name = p.albumName;
+    perAlbum[p.albumId] = a;
+  });
+  var subsById = {};
+  (subs || []).forEach(function (s) { subsById[String(s.albumId)] = s; });
+  var items = [], totalRemain = 0;
+  Object.keys(perAlbum).forEach(function (aid) {
+    var a = perAlbum[aid];
+    var sub = subsById[aid];
+    var total = sub ? (Number(sub.lastIndex) || a.maxIndex) : a.maxIndex;
+    if (!total) return;
+    var avgDur = a.dCnt ? Math.round(a.dSum / a.dCnt) : 0;
+    if (!avgDur) avgDur = 1500;   // 默认按 25 分钟一集估
+    var left = Math.max(0, total - a.finished);
+    if (!left) return;
+    var remainSec = left * avgDur;
+    totalRemain += remainSec;
+    items.push({
+      albumId: aid, name: a.name || (sub && sub.name) || ('专辑' + aid),
+      left: left, total: total, avgDur: avgDur, remainSec: remainSec,
+      remainText: secToHM(remainSec)
+    });
+  });
+  items.sort(function (x, y) { return y.remainSec - x.remainSec; });
+  return { totalSec: totalRemain, totalText: secToHM(totalRemain), items: items.slice(0, 10) };
+}
+
+// ---------- AI 智能整理（可选能力：配置了网关才启用） ----------
+var AI_KEY = 'ai_cache:v1';
+var AI_MAX = 120;
+var aiCache = {};   // {albumId: {summary, tags, themes, at, model}}
+
+function aiReady() {
+  return !!(config.ai && config.ai.enabled && config.ai.key && config.ai.url);
+}
+
+async function persistAiCache() {
+  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
+  var ids = Object.keys(aiCache);
+  if (ids.length > AI_MAX) {
+    ids.sort(function (a, b) { return (aiCache[b].at || 0) - (aiCache[a].at || 0); });
+    var keep = {};
+    ids.slice(0, AI_MAX).forEach(function (k) { keep[k] = aiCache[k]; });
+    aiCache = keep;
+  }
+  try { await songloft.storage.set(AI_KEY, JSON.stringify(aiCache)); }
+  catch (e) { songloft.log.warn('[喜马拉雅] AI 缓存落盘失败: ' + String(e)); }
+}
+
+// 单次对话调用，返回纯文本；出错抛异常
+async function aiChat(sys, user, timeoutSec) {
+  var cfg = config.ai || {};
+  if (!cfg.key) throw new Error('未配置 AI 密钥');
+  var body = {
+    model: cfg.model || 'deepseek-v4.1-flash-0930',
+    stream: false,
+    temperature: 0.3,
+    messages: [
+      { role: 'system', content: sys },
+      { role: 'user', content: user }
+    ]
+  };
+  var resp = await fetchT(cfg.url.replace(/\/+$/, '') + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
+    body: JSON.stringify(body)
+  }, timeoutSec || cfg.timeout || 45);
+  if (!resp.ok) throw new Error('AI HTTP ' + resp.status);
+  var data = await resp.json();
+  var text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (!text) throw new Error('AI 返回为空');
+  return String(text).trim();
+}
+
+// 从 AI 回复里抠 JSON（模型常会包 ```json 或加解释）
+function aiParseJson(text) {
+  var s = String(text || '');
+  var fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(s);
+  if (fenced) s = fenced[1];
+  var a = s.indexOf('{'), b = s.lastIndexOf('}');
+  if (a >= 0 && b > a) s = s.slice(a, b + 1);
+  try { return JSON.parse(s); } catch (e) { return null; }
+}
+
+// 给一本书生成「摘要 + 标签 + 主题分组」，结果按专辑缓存，换设备可复用
+async function aiSummarize(detail, tracks, force) {
+  if (!aiCache || typeof aiCache !== 'object') aiCache = {};
+  var aid = String((detail && (detail.albumId || detail.id)) || '');
+  if (!aid) throw new Error('缺少专辑 ID');
+  if (!force && aiCache[aid] && aiCache[aid].summary) return aiCache[aid];
+
+  var titles = (tracks || []).slice(0, 60).map(function (t, i) {
+    return (Number(t.index) || i + 1) + '. ' + String(t.title || '').slice(0, 60);
+  }).join('\n');
+
+  var intro = String((detail && (detail.introFull || detail.intro)) || '').slice(0, 1200);
+  var sys = '你是中文有声书编辑。根据用户给的专辑资料，输出严格的 JSON（不要 Markdown 代码块、不要任何解释），结构：' +
+    '{"summary":"一句话简介，40字内","tags":["标签1","标签2","标签3"],"fit":"适合什么人听，25字内","themes":[{"name":"主题名","range":"第1-20集","note":"这部分讲什么，20字内"}]}。' +
+    '要求：tags 给 3-5 个，须是内容领域词（如 历史/悬疑/职场/儿童/相声/财经），不要「精彩」「推荐」这类空话；themes 给 2-5 组，按集数把整本书切块概括；资料不足时基于标题合理推断，不要编造具体事实。';
+
+  var user = JSON.stringify({
+    name: (detail && detail.name) || '',
+    author: (detail && detail.author) || '',
+    category: (detail && detail.category) || '',
+    episodeCount: (detail && detail.trackCount) || (tracks || []).length,
+    finished: Number(detail && detail.isFinished) ? '已完结' : '连载中',
+    intro: intro,
+    firstTitles: titles
+  });
+
+  var text = await aiChat(sys, user);
+  var obj = aiParseJson(text);
+  if (!obj || !obj.summary) throw new Error('AI 返回格式不对，请再试一次');
+
+  var out = {
+    albumId: aid,
+    name: (detail && detail.name) || '',
+    summary: String(obj.summary || '').slice(0, 120),
+    tags: (Array.isArray(obj.tags) ? obj.tags : []).slice(0, 6).map(function (t) { return String(t).slice(0, 12); }),
+    fit: String(obj.fit || '').slice(0, 60),
+    themes: (Array.isArray(obj.themes) ? obj.themes : []).slice(0, 6).map(function (x) {
+      return {
+        name: String((x && x.name) || '').slice(0, 20),
+        range: String((x && x.range) || '').slice(0, 24),
+        note: String((x && x.note) || '').slice(0, 60)
+      };
+    }),
+    at: Date.now(),
+    model: (config.ai && config.ai.model) || ''
+  };
+  aiCache[aid] = out;
+  await persistAiCache();
+  return out;
+}
+
+// 对着一本书提问：基于简介与分集标题回答，答案里标注不确定
+async function aiAsk(detail, tracks, question) {
+  var qs = String(question || '').trim();
+  if (!qs) throw new Error('问题不能为空');
+  var titles = (tracks || []).slice(0, 80).map(function (t, i) {
+    return (Number(t.index) || i + 1) + '. ' + String(t.title || '').slice(0, 50);
+  }).join('\n');
+  var sys = '你是中文有声书的导听助手。只根据用户给的专辑简介和分集标题回答，不要编造剧情细节；' +
+    '如果资料里看不出来，就直说「从简介和标题看不太出来」，并给出你推测的方向。回答口语化、150字以内、不要 Markdown。';
+  var user = '专辑：' + ((detail && detail.name) || '') + '\n作者/主播：' + ((detail && detail.author) || '') +
+    '\n简介：' + String((detail && (detail.introFull || detail.intro)) || '（无）').slice(0, 1500) +
+    '\n分集标题：\n' + titles + '\n\n我的问题：' + qs;
+  return String(await aiChat(sys, user, (config.ai && config.ai.timeout) || 45)).replace(/\s+/g, ' ').trim().slice(0, 600);
+}
+
+// 把一批书签按「类别」归类，返回 {id: 类别}
+async function aiClassifyBookmarks(list) {
+  var arr = (list || []).slice(0, 60);
+  if (!arr.length) return {};
+  var sys = '你是笔记整理助手。给每个书签判断类别，只能从这几个里选：干货、情节、笑点、疑问、待复查。' +
+    '只输出 JSON：{"items":[{"id":"书签id","cat":"类别"}]}，不要解释。';
+  var user = JSON.stringify(arr.map(function (b) {
+    return { id: b.id, title: String(b.title || '').slice(0, 40), note: String(b.note || '').slice(0, 40), t: b.t };
+  }));
+  var text = await aiChat(sys, user, 40);
+  var obj = aiParseJson(text);
+  if (!obj || !Array.isArray(obj.items)) throw new Error('AI 返回格式不对');
+  var out = {};
+  obj.items.forEach(function (x) {
+    if (x && x.id) out[String(x.id)] = String(x.cat || '').slice(0, 8);
+  });
+  return out;
 }
 
 // ---------- 章节书签 ----------
@@ -1920,11 +2213,119 @@ async function runTtsReport(opts) {
   }
   lastTts = { at: nowStr(), text: text, result: out.spoken ? ('已播报到 ' + (out.device || '音箱')) : (out.error || '未播报') };
   if (config.tts) { config.tts.lastRunDate = todayStr(); await persist(); }
-  songloft.log.info('[喜马拉雅] 语音播报：' + lastTts.result);
+
+  // 播完自动接着放「最近在听的那本书」，通勤/睡前不用再摸手机
+  if (out.spoken && config.tts && config.tts.playAfter) {
+    try {
+      var cont = await continueListeningOnDevice(dev);
+      if (cont && cont.ok) out.resumed = cont.text;
+    } catch (e2) { out.resumed = ''; }
+  }
+  songloft.log.info('[喜马拉雅] 语音播报：' + lastTts.result + (out.resumed ? '；续播：' + out.resumed : ''));
   return out;
 }
 
+// 找「最近在听、还没听完」的那本书，在音箱上接着放
+async function continueListeningOnDevice(dev) {
+  var best = null;
+  Object.keys(progress.albums || {}).forEach(function (aid) {
+    var a = progress.albums[aid];
+    if (!a || !a.trackId) return;
+    if (!(Number(a.t) > 20)) return;              // 太靠前说明刚点开
+    if (a.finished) return;
+    var at = Number(a.at) || 0;
+    if (!best || at > best.at) {
+      best = {
+        albumId: aid, trackId: a.trackId, index: a.index, title: a.title,
+        t: a.t, d: a.d, at: at, albumName: a.albumName, cover: a.cover
+      };
+    }
+  });
+  if (!best) return { ok: false, text: '' };
+  // 这本书必须已经导入成歌单，否则音箱放不了
+  var pl = null;
+  for (var i = 0; i < imported.length; i++) if (String(imported[i].albumId) === String(best.albumId)) { pl = imported[i]; break; }
+  if (!pl) return { ok: false, text: '' };
+  var r = await miotPost('/mina/play', {
+    account_id: dev.account_id, device_id: dev.device_id,
+    playlist_id: pl.playlistId, mode: 'order'
+  });
+  if (!r.ok) return { ok: false, text: '' };
+  return { ok: true, text: '《' + (pl.name || best.albumName || '') + '》' };
+}
+
 // ---------- 整本下载到本地音乐目录 ----------
+
+// ---------- 本机音乐库联通：认出哪些集已经下载到本地 ----------
+// 思路：本插件导入的歌曲 sourceData 里带 xm trackId，下载后歌曲类型变 local 且多出 filePath。
+// 扫一遍所有歌单即可得到「已下载的 trackId → 本地文件路径」映射，用来做标记与离线播放。
+
+var libMap = null;      // {trackId: {path, songId, playlistId, size, title}}
+var libAt = 0;
+var libScanning = false;
+var LIB_TTL = 5 * 60 * 1000;
+
+function songFilePath(s) {
+  if (!s) return '';
+  return String(s.filePath || s.file_path || s.path || '') || '';
+}
+
+function songIsLocal(s) {
+  if (!s) return false;
+  if (s.type === 'local') return true;
+  var p = songFilePath(s);
+  return !!p && !/^https?:/i.test(p);
+}
+
+async function scanLocalLibrary(force) {
+  if (libScanning) return libMap || {};
+  if (!force && libMap && Date.now() - libAt < LIB_TTL) return libMap;
+  if (!songloft.playlists || typeof songloft.playlists.list !== 'function') return libMap || {};
+  libScanning = true;
+  var map = {};
+  try {
+    var pls = await songloft.playlists.list() || [];
+    for (var i = 0; i < pls.length; i++) {
+      var p = pls[i];
+      var songs = [];
+      try { songs = await collectPlaylistSongs(p.id); } catch (e) { songs = []; }
+      for (var j = 0; j < songs.length; j++) {
+        var s = songs[j];
+        if (!songIsLocal(s)) continue;
+        var tid = songTrackId(s);
+        if (!tid) continue;
+        // 同一集可能在多个歌单里，优先保留有文件路径的
+        var prev = map[tid];
+        var fp = songFilePath(s);
+        if (!prev || (!prev.path && fp)) {
+          map[tid] = {
+            trackId: tid, path: fp, songId: s.id, playlistId: p.id,
+            title: s.title || '', size: Number(s.fileSize || s.file_size || 0) || 0
+          };
+        }
+      }
+    }
+    libMap = map;
+    libAt = Date.now();
+  } catch (e) {
+    songloft.log.warn('[喜马拉雅] 扫描本地音乐库失败: ' + String(e));
+    if (!libMap) libMap = {};
+  } finally {
+    libScanning = false;
+  }
+  return libMap || {};
+}
+
+// 某张专辑已下载/未下载的集数统计 + 未下载的 trackId 列表
+function libStatFor(albumTracks, map) {
+  var got = [], missing = [];
+  (albumTracks || []).forEach(function (t) {
+    var tid = String(t.trackId || '');
+    if (!tid) return;
+    if (map && map[tid]) got.push(tid); else missing.push(tid);
+  });
+  return { downloaded: got.length, missing: missing.length, missingIds: missing, downloadedIds: got };
+}
 
 async function collectPlaylistSongs(playlistId) {
   var out = [], offset = 0, pageSize = 200;
@@ -2074,6 +2475,7 @@ async function handleHTTPRequest(req) {
       if (typeof t.prefix === 'string') config.tts.prefix = t.prefix.slice(0, 40);
       if (t.maxItems !== undefined) config.tts.maxItems = Math.max(1, Math.min(8, Number(t.maxItems) || 3));
       if (typeof t.speakEmpty === 'boolean') config.tts.speakEmpty = t.speakEmpty;
+      if (typeof t.playAfter === 'boolean') config.tts.playAfter = t.playAfter;
       if (t.lastRunDate === '') config.tts.lastRunDate = '';
     }
     if (body.sync) {
@@ -2082,6 +2484,14 @@ async function handleHTTPRequest(req) {
     if (body.dl) {
       if (typeof body.dl.targetDir === 'string') config.dl.targetDir = body.dl.targetDir.trim();
       if (body.dl.format === 'mp3' || body.dl.format === '') config.dl.format = body.dl.format;
+    }
+    if (body.ai) {
+      var ai = body.ai;
+      if (typeof ai.enabled === 'boolean') config.ai.enabled = ai.enabled;
+      if (typeof ai.url === 'string' && ai.url.trim()) config.ai.url = ai.url.trim().replace(/\/+$/, '');
+      if (typeof ai.key === 'string') config.ai.key = ai.key.trim();
+      if (typeof ai.model === 'string' && ai.model.trim()) config.ai.model = ai.model.trim();
+      if (ai.timeout !== undefined) config.ai.timeout = Math.max(5, Math.min(120, Number(ai.timeout) || 45));
     }
     await persist();
     return jsonResp({ success: true, data: config });
@@ -2110,6 +2520,32 @@ async function handleHTTPRequest(req) {
     return jsonResp({ success: true, data: buildReport(period) });
   }
 
+  if (path === '/dashboard' && method === 'GET') {
+    var streak = calcStreak();
+    var heat = calcHourHeat();
+    var rates = calcFinishRates(8);
+    var remain = calcRemain();
+    var totalSec = 0, dayN = 0;
+    Object.keys(stats.days || {}).forEach(function (k) {
+      var s = Number(stats.days[k]) || 0;
+      if (s > 0) { totalSec += s; dayN += 1; }
+    });
+    return jsonResp({
+      success: true,
+      data: {
+        streak: streak,
+        heat: heat,
+        rates: rates,
+        remain: remain,
+        totalSec: totalSec,
+        totalText: secToHM(totalSec),
+        activeDays: dayN,
+        avgPerDay: dayN ? Math.round(totalSec / dayN) : 0,
+        avgText: secToHM(dayN ? totalSec / dayN : 0)
+      }
+    });
+  }
+
   if (path === '/report/speak' && method === 'POST') {
     var rb = readBodyJson(req) || {};
     var rp2 = buildReport(String(rb.period || 'week'));
@@ -2124,6 +2560,91 @@ async function handleHTTPRequest(req) {
     stats = { days: {}, albums: {}, at: nowStr() };
     await persistStat();
     return jsonResp({ success: true, data: { message: '统计数据已清空' } });
+  }
+
+  // ---------- AI 智能整理 ----------
+  if (path === '/ai/status' && method === 'GET') {
+    if (!aiCache || typeof aiCache !== 'object') aiCache = {};
+    return jsonResp({
+      success: true,
+      data: {
+        ready: aiReady(),
+        enabled: !!(config.ai && config.ai.enabled),
+        hasKey: !!(config.ai && config.ai.key),
+        url: (config.ai && config.ai.url) || '',
+        model: (config.ai && config.ai.model) || '',
+        cached: Object.keys(aiCache).length
+      }
+    });
+  }
+
+  if (path === '/ai/test' && method === 'POST') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 或没填密钥' }, 400);
+    var t0 = Date.now();
+    try {
+      var hi = await aiChat('你是测试助手，只回答一个词。', '请只回复两个字：正常', 20);
+      return jsonResp({ success: true, data: { reply: String(hi).slice(0, 40), ms: Date.now() - t0, model: (config.ai && config.ai.model) || '' } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
+    }
+  }
+
+  // 生成/读取一本书的摘要、标签、主题分组（有缓存直接返回）
+  if (path === '/ai/summary' && method === 'GET') {
+    if (!aiCache || typeof aiCache !== 'object') aiCache = {};
+    var said = String(q.albumId || '');
+    if (!said) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    var cached = aiCache[said];
+    if (cached && !q.refresh) return jsonResp({ success: true, data: { cached: true, item: cached } });
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理，请到设置页填写网关地址与密钥' }, 400);
+    try {
+      var dt = cached && cached._detail ? cached._detail : null;
+      var detail = null, tracks = [];
+      // 详情与分集从喜马拉雅现取，保证内容与当前一致
+      try { detail = await fetchAlbumDetail(said); } catch (e) { detail = null; }
+      try {
+        var tp = await fetchAlbumTracks(said, 1);
+        tracks = (tp && tp.tracks) || [];
+      } catch (e) { tracks = []; }
+      if (!detail && !tracks.length) return jsonResp({ success: false, error: '取不到专辑信息' }, 502);
+      var res = await aiSummarize(detail || { albumId: said, name: '' }, tracks, !!q.refresh);
+      return jsonResp({ success: true, data: { cached: false, item: res } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  // 对着一本书提问
+  if (path === '/ai/ask' && method === 'POST') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    var ab = readBodyJson(req);
+    if (!ab.albumId) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    try {
+      var d2 = await fetchAlbumDetail(String(ab.albumId));
+      var t2 = [];
+      try { var tp2 = await fetchAlbumTracks(String(ab.albumId), 1); t2 = (tp2 && tp2.tracks) || []; } catch (e) { t2 = []; }
+      var ans = await aiAsk(d2, t2, ab.q || ab.question || '');
+      return jsonResp({ success: true, data: { answer: ans, albumId: String(ab.albumId) } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
+  }
+
+  if (path === '/ai/clear' && method === 'POST') {
+    aiCache = {};
+    await persistAiCache();
+    return jsonResp({ success: true, data: { message: 'AI 缓存已清空', cached: 0 } });
+  }
+
+  // 书签 AI 归类
+  if (path === '/ai/classify' && method === 'POST') {
+    if (!aiReady()) return jsonResp({ success: false, error: '还没启用 AI 整理' }, 400);
+    try {
+      var map = await aiClassifyBookmarks(bmList(''));
+      return jsonResp({ success: true, data: { map: map, count: Object.keys(map).length } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e && e.message || e) }, 502);
+    }
   }
 
   // ---------- 章节书签 ----------
@@ -2233,8 +2754,12 @@ async function handleHTTPRequest(req) {
       songsCreate: typeof songloft.songs.create,
       playlistsGetSongs: typeof songloft.playlists.getSongs,
       fs: typeof (songloft.fs && songloft.fs.writeFile),
+      fsFileUrl: typeof (songloft.fs && songloft.fs.fileUrl),
+      songsFileUrl: typeof (songloft.songs && songloft.songs.fileUrl),
       storage: typeof songloft.storage.get,
-      version: VERSION
+      version: VERSION,
+      aiReady: aiReady(),
+      libCached: libMap ? Object.keys(libMap).length : 0
     };
     return jsonResp({ success: true, data: caps });
   }
@@ -2564,6 +3089,70 @@ async function handleHTTPRequest(req) {
     }
   }
 
+  // ---------- 本机音乐库 ----------
+  if (path === '/lib/status' && method === 'GET') {
+    var lm = await scanLocalLibrary(!!q.refresh);
+    var keys = Object.keys(lm || {});
+    var bytes = 0;
+    keys.forEach(function (k) { bytes += Number(lm[k].size) || 0; });
+    return jsonResp({
+      success: true,
+      data: {
+        count: keys.length,
+        bytes: bytes,
+        scannedAt: libAt,
+        playlists: typeof songloft.playlists.list === 'function'
+      }
+    });
+  }
+
+  // 某张专辑：哪些集已下载、缺哪些
+  if (path === '/lib/album' && method === 'GET') {
+    var laid = String(q.albumId || '');
+    if (!laid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    var lmap = await scanLocalLibrary(false);
+    var lt = [];
+    try {
+      // 翻页把所有集拉齐（最多 20 页，足够大多数书）
+      for (var lp = 1; lp <= 20; lp++) {
+        var lr = await fetchAlbumTracks(laid, lp);
+        var llist = (lr && lr.tracks) || [];
+        lt = lt.concat(llist);
+        if (!lr || !lr.hasMore || !llist.length) break;
+      }
+    } catch (e) { /* 取不到就只报已知的 */ }
+    var st = libStatFor(lt, lmap);
+    var items = {};
+    (lt || []).forEach(function (t) {
+      var info = lmap[String(t.trackId)];
+      if (info) items[String(t.trackId)] = { path: info.path, size: info.size };
+    });
+    return jsonResp({
+      success: true,
+      data: {
+        albumId: laid, total: (lt || []).length,
+        downloaded: st.downloaded, missing: st.missing,
+        missingIds: st.missingIds.slice(0, 500),
+        items: items,
+        scannedAt: libAt
+      }
+    });
+  }
+
+  // 一键补下缺失的集：复用整本下载，但只挑没下过的
+  if (path === '/lib/fill' && method === 'POST') {
+    var fb = readBodyJson(req);
+    var faid = String(fb.albumId || '');
+    if (!faid) return jsonResp({ success: false, error: '缺少 albumId' }, 400);
+    if (downloading) return jsonResp({ success: false, error: '已有下载任务在跑，等它结束' }, 409);
+    var entry = null;
+    for (var fi = 0; fi < imported.length; fi++) if (String(imported[fi].albumId) === faid) { entry = imported[fi]; break; }
+    if (!entry || !entry.playlistId) return jsonResp({ success: false, error: '这张专辑还没导入成歌单，请先「导入全部」' }, 400);
+    // 异步跑，避免宿主 60 秒超时
+    runDownload(entry.playlistId, entry.name || faid, entry.name || '').catch(function () {});
+    return jsonResp({ success: true, data: { message: '补下任务已启动（已下载过的会自动跳过）', playlistId: entry.playlistId } });
+  }
+
   if (path === '/api/music/url' && method === 'POST') {
     try {
       var b = readBodyJson(req);
@@ -2621,12 +3210,23 @@ async function handleHTTPRequest(req) {
     }
   }
 
-  // 单集直链（前端试听）
+  // 单集直链（前端试听）：如果这集已经下载到本地，优先给本地文件地址（宿主支持时）
   var mTrack = path.match(/^\/track\/(\d+)\/url$/);
   if (mTrack && method === 'GET') {
     try {
+      var lm2 = libMap || {};
+      var localInfo = lm2[mTrack[1]];
+      if (localInfo && localInfo.path && !q.remote) {
+        var localUrl = '';
+        try {
+          if (songloft.fs && typeof songloft.fs.fileUrl === 'function') localUrl = await songloft.fs.fileUrl(localInfo.path);
+          else if (songloft.songs && typeof songloft.songs.fileUrl === 'function') localUrl = await songloft.songs.fileUrl(localInfo.songId);
+        } catch (e2) { localUrl = ''; }
+        if (localUrl) return jsonResp({ success: true, data: { url: localUrl, local: true, path: localInfo.path } });
+        // 宿主没有 fileUrl 能力：只能拿到路径，前端仍走网络地址，但会提示「已有本地副本」
+      }
       var u = await fetchTrackUrl(mTrack[1]);
-      return jsonResp({ success: true, data: { url: u } });
+      return jsonResp({ success: true, data: { url: u, local: !!(localInfo && localInfo.path), localPath: (localInfo && localInfo.path) || '' } });
     } catch (e) {
       return jsonResp({ success: false, error: String(e) }, 404);
     }
@@ -3005,6 +3605,11 @@ function parseVoiceIntent(text) {
   if (/(声音|音量).*(大|响)/.test(t)) { intent.action = 'volume_up'; return intent; }
   if (/(声音|音量).*(小|轻)/.test(t)) { intent.action = 'volume_down'; return intent; }
   if (/有什么(更新|新)/.test(t) || /^(更新|新集)/.test(t)) { intent.action = 'updates'; return intent; }
+  // 「我听到哪了 / 上次听到哪 / 现在在听什么」——查最近收听位置
+  if (/(听到|播到|讲到|念到)哪/.test(t) || /(在听|听到).*(什么|哪本)/.test(t) || /^上次听/.test(t) || /^(我)?(听|看)到哪了?$/.test(t)) {
+    intent.action = 'where';
+    return intent;
+  }
 
   if (/^来点|随便放|随机播/.test(t)) { intent.action = 'play_random'; t = t.replace(/^(来点|随便放|随机播)/, ''); }
   else {
@@ -3105,6 +3710,40 @@ async function runVoiceCommand(text, opts) {
     out.text = '音量调到 ' + nv;
     out.played = !!(rv.ok && (!rv.data || rv.data.success !== false));
     if (!out.played) out.error = '调节音量失败';
+    return out;
+  }
+
+  if (it.action === 'where') {
+    var best2 = null;
+    Object.keys(progress.albums || {}).forEach(function (aid) {
+      var a = progress.albums[aid];
+      if (!a || !a.trackId) return;
+      var at = Number(a.at) || 0;
+      if (!best2 || at > best2.at) {
+        best2 = { albumId: aid, trackId: a.trackId, index: a.index, title: a.title, t: a.t, d: a.d, at: at, albumName: a.albumName };
+      }
+    });
+    if (!best2) {
+      out.text = '还没有收听记录，先听一本试试';
+      return out;
+    }
+    var ago = Math.round((Date.now() - best2.at) / 60000);
+    var agoTxt = ago < 60 ? (ago <= 1 ? '刚刚' : ago + ' 分钟前') : (ago < 1440 ? Math.round(ago / 60) + ' 小时前' : Math.round(ago / 1440) + ' 天前');
+    var txt = '上次听《' + String(best2.albumName || '').replace(/[《》]/g, '') + '》';
+    if (best2.index) txt += '第 ' + best2.index + ' 集';
+    txt += '，听到 ' + fmtClock(best2.t || 0);
+    if (best2.d) txt += '，这一集一共 ' + fmtClock(best2.d);
+    txt += '，' + agoTxt + '听的。';
+    out.text = txt;
+    if (opts.speak) {
+      var dv = ttsDevice();
+      if (dv.account_id && dv.device_id) {
+        try {
+          var tr = await miotPost('/mina/tts', { account_id: dv.account_id, device_id: dv.device_id, text: txt });
+          out.played = !!(tr.ok && !(tr.data && tr.data.success === false));
+        } catch (e3) { out.error = '念出来失败: ' + String(e3); }
+      }
+    }
     return out;
   }
 
