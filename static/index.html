@@ -149,6 +149,72 @@
     #qPanel .qrow .qdel:hover { color: var(--err); }
     #qPanel .qfoot { display: flex; gap: 8px; padding: 8px 14px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
     #qPanel .qempty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
+    /* A-B 复读提示 */
+    .pabtip { font-size: 11px; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .pabtip:empty { display: none; }
+    /* 书签面板：复用 #qPanel 的 sheet 结构 */
+    #bmPanel { position: fixed; left: 0; right: 0; bottom: 0; top: 0; background: rgba(0,0,0,.32); z-index: 62; display: none; }
+    #bmPanel.show { display: block; }
+    #bmPanel .sheet {
+      position: absolute; left: 0; right: 0; bottom: 0; max-height: 76vh; background: var(--card);
+      border-radius: 16px 16px 0 0; border-top: 1px solid var(--border); display: flex; flex-direction: column;
+      max-width: 720px; margin: 0 auto;
+    }
+    #bmPanel .qhead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; border-bottom: 1px solid var(--border); }
+    #bmPanel .qhead .qt { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; }
+    #bmPanel .qhead .qs { font-size: 11px; color: var(--muted); font-weight: 400; }
+    #bmPanel .bmadd { padding: 10px 14px 4px; }
+    #bmPanel .bmadd input { font-size: 13px; padding: 6px 10px; }
+    #bmPanel .qlist { overflow-y: auto; padding: 6px 0; }
+    #bmPanel .qfoot { display: flex; gap: 8px; padding: 8px 14px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+    #bmPanel .qfoot .active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    .bmrow { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+    .bmrow:last-child { border-bottom: none; }
+    .bmrow .bmt { flex: none; width: 52px; color: var(--accent); font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; font-weight: 600; }
+    .bmrow .bmt:hover { text-decoration: underline; }
+    .bmrow .bmm { flex: 1; min-width: 0; cursor: pointer; }
+    .bmrow .bmtitle { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bmrow .bmnote { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bmrow .bmsub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bmrow .bmdel { flex: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; }
+    .bmrow .bmdel:hover { color: var(--err); }
+    .bmday { padding: 10px 14px 4px; font-size: 11px; color: var(--muted); background: var(--bg); position: sticky; top: 0; }
+    .bmempty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
+
+    /* 全屏播放页 */
+    #fullPlayer { position: fixed; inset: 0; z-index: 70; background: var(--bg); display: none; overflow-y: auto; }
+    #fullPlayer.show { display: block; }
+    #fullPlayer .fpwrap {
+      max-width: 480px; margin: 0 auto; min-height: 100%; padding: 12px 18px 26px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    #fullPlayer .fphead { display: flex; align-items: center; gap: 10px; }
+    #fullPlayer .fphead .fptitle { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #fullPlayer .fpcover { display: flex; align-items: center; justify-content: center; padding: 6px 0 2px; }
+    #fullPlayer .fpcover img {
+      width: 74%; max-width: 300px; aspect-ratio: 1 / 1; border-radius: 18px; object-fit: cover;
+      background: var(--accent-soft); box-shadow: 0 10px 32px rgba(0,0,0,.16);
+    }
+    #fullPlayer .fpname { font-size: 17px; font-weight: 600; line-height: 1.4; text-align: center; }
+    #fullPlayer .fpmeta { font-size: 12px; color: var(--muted); text-align: center; margin-top: -6px; }
+    #fullPlayer .fpprog { margin-top: 2px; }
+    #fullPlayer .fpprog input[type=range] { width: 100%; accent-color: var(--accent); }
+    #fullPlayer .fptime { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: -2px; }
+    #fullPlayer .fpctrl { display: flex; align-items: center; justify-content: center; gap: 22px; margin-top: 2px; }
+    #fullPlayer .fpctrl .fpbig {
+      width: 66px; height: 66px; border-radius: 50%; font-size: 26px; line-height: 1; padding: 0;
+      display: flex; align-items: center; justify-content: center; box-shadow: 0 6px 18px rgba(164,19,60,.3);
+    }
+    #fullPlayer .fpbar { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    #fullPlayer .fpbar select { width: auto; min-width: 78px; padding: 4px 6px; font-size: 12px; }
+    #fullPlayer .fpbar button { padding: 4px 10px; font-size: 12px; }
+    /* 时间线 */
+    .tlitem { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; border-bottom: 1px solid var(--border); }
+    .tlitem:last-child { border-bottom: none; }
+    .tlitem .tlt { flex: none; width: 44px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .tlitem .tlb { flex: 1; min-width: 0; cursor: pointer; }
+    .tlitem .tln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tlitem .tls { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     /* 收听报告 */
     .stat { flex: 1; min-width: 96px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
     .stat .sv { font-size: 16px; font-weight: 700; color: var(--accent); line-height: 1.3; }
@@ -170,7 +236,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.12.1</span>
+    <span class="ver" id="ver">v0.13.0</span>
   </div>
 
   <div class="tabs">
@@ -273,6 +339,19 @@
         <button class="small ghost" id="btnRecentClear">清空记录</button>
       </div>
       <div id="recentList" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>🕒 播放历史时间线</h2>
+      <div class="btns">
+        <button class="small plain tlBtn active" data-days="1">今天</button>
+        <button class="small plain tlBtn" data-days="7">近 7 天</button>
+        <button class="small plain tlBtn" data-days="30">近 30 天</button>
+        <button class="small plain" id="btnTlRefresh">刷新</button>
+      </div>
+      <div class="muted small-txt" id="tlStat" style="margin-top:8px;">—</div>
+      <div id="tlBody" style="margin-top:6px;"></div>
+      <div class="muted small-txt" style="margin-top:6px;">按「听了哪一集、听到哪儿、什么时候」逐条记录，跨设备合并，最多保留 2000 条。</div>
     </div>
 
     <div class="card">
@@ -514,6 +593,10 @@
     <button class="small plain" id="pNext" title="下一集">⏭</button>
     <button class="small plain" id="pOrder" title="切换正序 / 倒序">↑ 正序</button>
     <button class="small plain" id="pQueue" title="查看播放队列">☰ 队列</button>
+    <button class="small plain" id="pBm" title="给当前时间点打个书签（快捷键 B）">🔖 书签</button>
+    <button class="small plain" id="pAb" title="A-B 复读：点一下设起点，再点一下设终点">🔁 复读</button>
+    <button class="small plain" id="pFull" title="全屏播放页">⛶ 全屏</button>
+    <span class="pabtip" id="pAbTip"></span>
     <span class="muted" id="pProg">—</span>
     <span class="psep"></span>
     <span class="muted">倍速</span>
@@ -556,6 +639,62 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.12.1"></script>
+<!-- 书签面板 -->
+<div id="bmPanel">
+  <div class="sheet">
+    <div class="qhead">
+      <div class="qt">🔖 书签 <span class="qs" id="bmStat"></span></div>
+      <span class="x" id="bmClose" style="cursor:pointer;color:var(--muted);font-size:18px;line-height:1;">×</span>
+    </div>
+    <div class="bmadd">
+      <input type="text" id="bmNote" placeholder="给这个时间点写个备注（可不填）" />
+    </div>
+    <div class="qlist" id="bmList"></div>
+    <div class="qfoot">
+      <button class="small plain" id="bmAddNow" title="在当前播放位置新建书签">＋ 在当前位置打书签</button>
+      <button class="small plain" id="bmOnlyAlbum" title="只看当前专辑的书签">仅当前专辑</button>
+    </div>
+  </div>
+</div>
+
+<!-- 全屏播放页 -->
+<div id="fullPlayer">
+  <div class="fpwrap">
+    <div class="fphead">
+      <button class="small plain" id="fpClose" title="退出全屏（Esc）">⌄ 收起</button>
+      <span class="fptitle" id="fpAlbum">—</span>
+      <button class="small plain" id="fpQueue" title="播放队列">☰</button>
+    </div>
+    <div class="fpcover"><img id="fpCover" alt="" /></div>
+    <div class="fpname" id="fpTitle">—</div>
+    <div class="fpmeta" id="fpMeta"></div>
+    <div class="fpprog">
+      <input type="range" id="fpSeek" min="0" max="1000" value="0" step="1" />
+      <div class="fptime"><span id="fpCur">0:00</span><span id="fpDur">0:00</span></div>
+    </div>
+    <div class="fpctrl">
+      <button class="small plain" id="fpPrev" title="上一集">⏮</button>
+      <button class="fpbig" id="fpPlay" title="播放 / 暂停（空格）">▶</button>
+      <button class="small plain" id="fpNext" title="下一集">⏭</button>
+    </div>
+    <div class="fpbar">
+      <select id="fpRate">
+        <option value="0.75">0.75x</option>
+        <option value="1">1.0x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2.0x</option>
+      </select>
+      <button class="small plain" id="fpBack15" title="后退 15 秒">↺15</button>
+      <button class="small plain" id="fpFwd30" title="前进 30 秒">30↻</button>
+      <button class="small plain" id="fpBm" title="打书签">🔖</button>
+      <button class="small plain" id="fpAb" title="A-B 复读">🔁</button>
+      <span class="pabtip" id="fpAbTip"></span>
+    </div>
+  </div>
+</div>
+
+<script src="static/app.js?v=0.13.0"></script>
 </body>
 </html>
