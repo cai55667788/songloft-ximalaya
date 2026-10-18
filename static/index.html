@@ -306,13 +306,147 @@
     .rank .rbar span { display: block; height: 100%; background: var(--accent); }
     .rpBtn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
     .hide { display: none !important; }
-  </style>
+
+    /* ---------- 移动端：单手可操作 + 安全区 ---------- */
+    /* 底部播放条要避开 iPhone 的 Home 指示条 */
+    body { padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px)); }
+    body.has-player { padding-bottom: calc(130px + env(safe-area-inset-bottom, 0px)); }
+    #player { padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+
+    @media (max-width: 560px) {
+      body { padding: 10px 10px calc(96px + env(safe-area-inset-bottom, 0px)); font-size: 15px; }
+      body.has-player { padding-bottom: calc(150px + env(safe-area-inset-bottom, 0px)); }
+      .card { padding: 13px; border-radius: 12px; margin-bottom: 11px; }
+      /* 标签栏横向滑动，滚动条隐藏 */
+      .tabs { gap: 5px; padding-bottom: 2px; scrollbar-width: none; }
+      .tabs::-webkit-scrollbar { display: none; }
+      .tab { padding: 8px 13px; font-size: 14px; }
+      /* 所有按钮加大触摸区，最小 40px 高 */
+      button { padding: 10px 15px; font-size: 15px; min-height: 40px; }
+      button.small { padding: 7px 12px; font-size: 13px; min-height: 34px; }
+      input[type=text], input[type=number], input[type=time], textarea, select { padding: 10px 11px; font-size: 16px; }
+      /* 16px 以上字号能避免 iOS 聚焦时自动放大页面 */
+      #kw { font-size: 16px; }
+      .res-item { padding: 12px 0; gap: 11px; }
+      .res-item img { width: 56px; height: 56px; }
+      .res-item .t { font-size: 15px; }
+      .res-item .acts { gap: 7px; }
+      /* 订阅行换成两段式：信息占满一行，操作按钮在下一行右对齐 */
+      .line { flex-wrap: wrap; padding: 12px 0; }
+      .line .body { flex: 1 1 calc(100% - 68px); }
+      .line .ops { flex: 1 1 100%; justify-content: flex-start; margin-top: 8px; }
+      .line .ops button { flex: 1; min-width: 62px; }
+      /* 播放条：信息与进度分两行，控件一行排开 */
+      #player .inner { flex-wrap: wrap; gap: 7px; }
+      #player .ptinfo { flex: 1 1 calc(100% - 34px); order: 1; }
+      #player .x { order: 2; }
+      #player audio { flex: 1 1 100%; order: 3; max-width: none; height: 38px; }
+      #player .ptitle { font-size: 14px; }
+      #player .palbum { font-size: 12px; }
+      /* 分集列表：标题占满，时长与按钮靠右 */
+      .trk { padding: 11px 0; }
+      .trk .tt { font-size: 15px; }
+      /* 设置页表单整体竖排 */
+      .row > div { min-width: 100%; }
+      .row.noflex { flex-direction: column; align-items: stretch; }
+      .row.noflex > div { flex: 1; }
+      /* 对比表格：手机上改成一列一项，标签在中间 */
+      .cmpgrid { grid-template-columns: 1fr; gap: 2px; }
+      .cmpgrid .lb { text-align: left; font-size: 11px; opacity: .75; }
+      .cmpgrid .cell { padding: 3px 0; }
+      /* 全屏播放页控件放大，方便盲按 */
+      #fullPlayer .fpbtns button { min-height: 46px; font-size: 15px; }
+    }
+
+    /* ---------- 车载 / 开车时用：大按钮、超高对比、去掉一切干扰 ---------- */
+    body.drive-mode .wrap { max-width: 560px; }
+    body.drive-mode #player,
+    body.drive-mode .tabs,
+    body.drive-mode #jobBar { display: none !important; }
+    body.drive-mode { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); background: #0b0b0d; color: #f2f2f4; }
+    body.drive-mode .card { background: #17181c; border-color: #2a2c33; }
+    body.drive-mode .muted { color: #a0a6b2; }
+    #drive {
+      position: fixed; inset: 0; z-index: 95; background: #0b0b0d; color: #f2f2f4;
+      display: none; flex-direction: column; align-items: center; justify-content: center;
+      padding: 18px calc(18px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(18px + env(safe-area-inset-left, 0px));
+      gap: 14px; text-align: center;
+    }
+    #drive.show { display: flex; }
+    #driveCover { width: min(42vw, 180px); height: min(42vw, 180px); border-radius: 18px; object-fit: cover; background: #23252b; }
+    #driveTitle { font-size: clamp(18px, 5.6vw, 26px); font-weight: 700; line-height: 1.35; max-width: 92vw; }
+    #driveMeta { font-size: clamp(13px, 3.6vw, 16px); color: #a0a6b2; }
+    #driveBar { width: 92%; height: 8px; background: #23252b; border-radius: 4px; overflow: hidden; }
+    #driveBar span { display: block; height: 100%; width: 0; background: #ff6b88; transition: width .3s linear; }
+    #driveTime { font-size: 13px; color: #a0a6b2; font-variant-numeric: tabular-nums; }
+    #driveBtns { display: flex; align-items: center; justify-content: center; gap: clamp(10px, 4vw, 22px); width: 100%; margin-top: 4px; }
+    #driveBtns button {
+      border: none; border-radius: 50%; background: #23252b; color: #f2f2f4;
+      width: clamp(60px, 17vw, 82px); height: clamp(60px, 17vw, 82px);
+      font-size: clamp(22px, 6vw, 30px); line-height: 1; display: flex; align-items: center; justify-content: center;
+      padding: 0; cursor: pointer;
+    }
+    #driveBtns button.big { width: clamp(84px, 23vw, 112px); height: clamp(84px, 23vw, 112px); background: #ff6b88; color: #17181c; font-size: clamp(30px, 8vw, 40px); }
+    #driveBtns button:active { filter: brightness(1.25); }
+    #driveExit { position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); right: 14px; background: transparent; border: 1px solid #3a3d45; color: #a0a6b2; border-radius: 999px; padding: 7px 14px; font-size: 13px; min-height: 0; }
+    #driveHint { font-size: 12px; color: #6f7684; margin-top: 2px; }
+
+    /* 触屏设备：悬停高亮没有意义，改成按下反馈 */
+    @media (hover: none) {
+      .chip:hover { color: var(--muted); border-color: var(--border); }
+      .chip:active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+      .res-item:active { background: var(--bg); }
+      .trk:active { background: var(--bg); }
+      button:active { filter: brightness(.92); }
+    }
+    /* ---------- 追更日历 ---------- */
+  .calrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12px; }
+  .calname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .calbar { display: inline-block; width: 46%; max-width: 220px; height: 6px; border-radius: 3px;
+            background: rgba(128,128,128,.18); overflow: hidden; flex: none; }
+  .calbar i { display: block; height: 100%; border-radius: 3px; }
+  .calnum { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .calnum.stale { color: #ef4444; }
+  .dowgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+  .dowcell { text-align: center; padding: 6px 2px; border-radius: 8px;
+             background: rgba(128,128,128,.10); font-size: 11px; line-height: 1.25; }
+  .dowcell b { display: block; font-size: 14px; }
+  .dowcell span { color: var(--muted); }
+  .dowcell.hot { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+  /* ---------- 订阅分组 ---------- */
+  .grphead { display: flex; align-items: center; gap: 7px; margin: 10px 0 4px; font-weight: 600; font-size: 12.5px; }
+  .grpitem { display: flex; align-items: center; gap: 7px; padding: 3px 0 3px 16px; font-size: 12px; }
+  .grpname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .grpname:hover { color: var(--accent); }
+  .grpdate { flex: none; font-variant-numeric: tabular-nums; }
+
+  /* ---------- AI 推荐 / 跨专辑问答 / 主题分段 ---------- */
+  .recnow { font-size: 13px; line-height: 1.55; padding: 9px 11px; border-radius: 9px;
+            background: color-mix(in srgb, var(--accent) 14%, transparent);
+            border-left: 3px solid var(--accent); }
+  .recrow { display: flex; flex-wrap: wrap; gap: 7px; }
+  .reckw { display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+           text-align: left; padding: 7px 11px !important; line-height: 1.35; }
+  .reckw b { font-size: 12.5px; }
+  .reckw span { font-size: 10.5px; color: var(--muted); font-weight: 400; }
+
+  .crossans { font-size: 13px; line-height: 1.6; padding: 9px 11px; border-radius: 9px;
+              background: rgba(128,128,128,.09); white-space: pre-wrap; word-break: break-word; }
+
+  .themrow { padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.14); }
+  .themrow:last-child { border-bottom: none; }
+  .thhead { display: flex; align-items: center; gap: 8px; }
+  .thname { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+</style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.15.0</span>
+    <span class="ver" id="ver">v0.16.0</span>
   </div>
 
   <div class="tabs">
@@ -405,6 +539,15 @@
         </div>
         <div id="hlBody"></div>
       </div>
+      <!-- AI 按主题切段（长书才有意义） -->
+      <div class="aicard hide" id="aiThemeCard">
+        <div class="aihead">
+          <span class="aititle">🧩 按主题分段</span>
+          <span class="muted small-txt" id="themeMeta"></span>
+          <button class="small plain" id="btnThemeGen">切分</button>
+        </div>
+        <div id="themeBody"></div>
+      </div>
 
       <div class="btns" id="dResumeBar" style="display:none;">
         <button class="small" id="btnResume">▶ 继续听</button>
@@ -445,6 +588,32 @@
 
   <!-- ===== 收听（最近收听 / 继续听） ===== -->
   <section id="tab-recent" class="hide">
+    <div class="card">
+      <h2>🧭 下一本听什么</h2>
+      <div class="muted small-txt" id="recStat">让 AI 看一眼你在听什么、订阅了什么，给三个方向。</div>
+      <div class="btns">
+        <button class="small plain" id="btnRecLoad">给我推荐</button>
+        <button class="small plain" id="btnRecRefresh">重新算</button>
+      </div>
+      <div id="recBody" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>💬 问我手上的书</h2>
+      <div class="muted small-txt">「哪些适合开车听」「有没有讲明清的」「哪本还没听完」，在订阅和导入的书里找答案。</div>
+      <div class="row" style="margin-top:8px;">
+        <div><input type="text" id="crossQ" placeholder="比如：我手上有没有适合睡前听的？" /></div>
+        <div style="flex:none"><button class="small" id="btnCrossAsk" style="padding:9px 16px">问</button></div>
+      </div>
+      <div class="chips" id="crossChips">
+        <span class="chip" data-q="我手上有没有适合开车听的？">适合开车听</span>
+        <span class="chip" data-q="哪本书我还没听完？">还没听完的</span>
+        <span class="chip" data-q="我这些书里有讲历史的吗？">有讲历史的吗</span>
+        <span class="chip" data-q="推荐一本短的、能几天听完的">来本短的</span>
+      </div>
+      <div id="crossBody" style="margin-top:8px;"></div>
+    </div>
+
     <div class="card">
       <h2>🎧 最近收听</h2>
       <div class="muted small-txt" id="recentStat">还没有收听记录。搜一张专辑点开，随便听一集就会出现在这里。</div>
@@ -519,6 +688,46 @@
         <button class="small" id="btnMeImport">导入所选</button>
         <button class="small ghost" id="btnMeSub">只订阅不导入</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>📅 追更日历</h2>
+      <div class="muted small-txt" id="calStat">看看这些书大概什么时候更、哪些已经很久没动了。</div>
+      <div class="btns">
+        <button class="small plain" id="btnCalLoad">算一下</button>
+      </div>
+      <div id="calBody" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>🗂 订阅分组</h2>
+      <div class="muted small-txt">同一批订阅，换个角度看：按更新快慢、按有没有新集、按主播。</div>
+      <div class="tabs" style="margin-top:8px;">
+        <span class="chip on" id="grpByCat">按更新</span>
+        <span class="chip" id="grpByStatus">按状态</span>
+        <span class="chip" id="grpByAnchor">按主播</span>
+      </div>
+      <div class="btns" style="margin-top:6px;">
+        <button class="small plain" id="btnGrpLoad">刷新</button>
+        <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
+      </div>
+      <div id="grpBody" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <h2>📋 待听清单 <span id="todoBadge" class="muted small-txt"></span></h2>
+      <div class="muted small-txt" id="todoStat">清单是空的。搜到想听又不想马上导入的，点「＋待听」丢进来。</div>
+      <div class="row" style="margin-top:8px;">
+        <div><label>导入时的书单名（可空，默认按日期）</label><input type="text" id="todoPlName" placeholder="如：通勤路上听" /></div>
+      </div>
+      <div class="btns">
+        <label class="muted small-txt" style="margin:0;display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="btnTodoAll" style="accent-color:var(--accent)" /> 全选
+        </label>
+        <button class="small" id="btnTodoImport">勾选的合成一个书单</button>
+        <button class="small plain" id="btnTodoClear">清空</button>
+      </div>
+      <div id="todoBody" style="margin-top:8px;"></div>
     </div>
 
     <div class="card">
@@ -650,12 +859,20 @@
       <div class="btns" style="margin-top:8px;">
         <button class="small plain vchip" data-cmd="播郭德纲第 5 集">播郭德纲第 5 集</button>
         <button class="small plain vchip" data-cmd="最新一集">最新一集</button>
-        <button class="small plain vchip" data-cmd="暂停">暂停</button>
-        <button class="small plain vchip" data-cmd="下一集">下一集</button>
-        <button class="small plain vchip" data-cmd="声音大一点">声音大一点</button>
+        <button class="small plain vchip" data-cmd="快进两分钟">快进两分钟</button>
+        <button class="small plain vchip" data-cmd="倒退三十秒">倒退三十秒</button>
+        <button class="small plain vchip" data-cmd="跳到第 20 集">跳到第 20 集</button>
+        <button class="small plain vchip" data-cmd="收藏这一段">收藏这一段</button>
+        <button class="small plain vchip" data-cmd="音量调到 30">音量调到 30</button>
+        <button class="small plain vchip" data-cmd="30分钟后停止">30 分钟后停止</button>
         <button class="small plain vchip" data-cmd="有什么更新">有什么更新</button>
       </div>
-      <div class="muted small-txt" id="vInfo" style="margin-top:8px;">支持：播《专辑名》第N集 / 最新一集 / 继续听专辑 / 暂停 / 继续 / 停止 / 下一集 / 上一集 / 声音大（小）一点 / 有什么更新。<br />播放类指令要求该专辑已导入成歌单。</div>
+      <div class="muted small-txt" id="vInfo" style="margin-top:8px;">
+        <b>播放</b>：播《专辑名》第N集 / 最新一集 / 继续听专辑 / 暂停 / 继续 / 停止 / 下一集 / 上一集 / 随便放点<br />
+        <b>跳转</b>：快进两分钟 / 倒退三十秒 / 跳到第 20 集<br />
+        <b>音量</b>：声音大（小）一点 / 音量调到 30<br />
+        <b>其他</b>：收藏这一段 / 把三体加入待听 / 30 分钟后停止 / 有什么更新<br />
+        播放类指令要求该专辑已导入成歌单。</div>
     </div>
   </section>
 
@@ -824,7 +1041,24 @@
       <option value="90">90 分钟</option>
     </select>
     <span class="muted" id="pSleepTip"></span>
+    <button class="small plain" id="pDrive" title="车载模式：大按钮，开车时不开屏幕也能操作">🚗 车载</button>
   </div>
+</div>
+
+<!-- 车载模式：大按钮 + 高对比，几乎不用看屏幕 -->
+<div id="drive">
+  <button id="driveExit">退出</button>
+  <img id="driveCover" alt="" />
+  <div id="driveTitle">—</div>
+  <div id="driveMeta"></div>
+  <div id="driveBar"><span id="driveFill"></span></div>
+  <div id="driveTime">0:00 / 0:00</div>
+  <div id="driveBtns">
+    <button id="drivePrev" title="上一集">⏮</button>
+    <button id="drivePlay" class="big" title="播放 / 暂停">▶</button>
+    <button id="driveNext" title="下一集">⏭</button>
+  </div>
+  <div id="driveHint">左右滑屏幕也能切集 · 双击中间暂停</div>
 </div>
 
 <!-- 播放队列 -->
@@ -900,6 +1134,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.15.0"></script>
+<script src="static/app.js?v=0.16.0"></script>
 </body>
 </html>
