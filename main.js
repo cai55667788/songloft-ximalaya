@@ -1,5 +1,5 @@
 'use strict';
-// 喜马拉雅插件 for Songloft v0.6.0
+// 喜马拉雅插件 for Songloft v0.8.0
 // 能力：
 //   ① 关键词搜索专辑（多源：完整搜索 → 登录态移动搜索 → 联想词扩展聚合）
 //   ② 专辑详情页（封面/作者/简介/分集列表）+ 单集在线试听
@@ -9,6 +9,7 @@
 //   ⑥ 登录后可读取「我订阅的专辑」并一键导入/订阅（v0.5.0）
 //   ⑦ 扫码登录：手机喜马拉雅 APP 扫一扫直接登录，无需手动复制 Cookie（v0.6.0）
 //   ⑧ 听书播放器：断点续播、整页连播、倍速、睡眠定时、已听标记（v0.7.0）
+//   ⑨ 最近收听聚合、跨页自动连播、导入时写入主播名（v0.8.0）
 // 数据源（公开接口，免登录）：
 //   专辑详情: GET https://www.ximalaya.com/revision/album/v1/simple?albumId={id}
 //   专辑曲目: GET https://www.ximalaya.com/revision/play/v1/show?id={id}&num={page}&size=30&ptype=0
@@ -17,7 +18,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.7.0';
+var VERSION = '0.8.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -877,13 +878,24 @@ async function fetchNewTracks(albumId, afterIndex) {
 function toSongInput(t) {
   return {
     title: t.index + '. ' + t.title,
-    artist: '喜马拉雅',
+    artist: t.author || '喜马拉雅',
     album: t.album || t.title,
     coverUrl: t.cover || '',
     duration: t.duration || 0,
     sourceData: JSON.stringify({ trackId: t.trackId, title: t.title, album: t.album, cover: t.cover, duration: t.duration }),
     dedupKey: 'xm:' + t.trackId
   };
+}
+
+// 把主播名/专辑名带到每一集上：导入后歌曲库的「艺术家」是主播，专辑名也不会是「专辑111」
+function stampAuthor(tracks, author, albumName) {
+  if (!tracks) return tracks;
+  for (var i = 0; i < tracks.length; i++) {
+    var t = tracks[i];
+    if (author && !t.author) t.author = author;
+    if (albumName && (!t.album || /^专辑\d+$/.test(t.album))) t.album = albumName;
+  }
+  return tracks;
 }
 
 async function addTracksToPlaylist(playlistId, tracks, onProgress) {
@@ -916,6 +928,7 @@ async function runImport(albumId, name, start, end) {
     try { detail = await fetchAlbumDetail(albumId); } catch (e) { detail = null; }
 
     var fetched = await fetchAlbumTracks(albumId, start, end);
+    stampAuthor(fetched.tracks, detail && detail.author, detail && detail.name);
     var title = name || (detail && detail.name) || fetched.albumName;
     job.title = title;
     job.current = title;
@@ -1002,6 +1015,7 @@ async function runImportMulti(items, mode, mergedName) {
         var detail = null;
         try { detail = await fetchAlbumDetail(it.id); } catch (e) { detail = null; }
         var fetched = await fetchAlbumTracks(it.id, 0, 0);
+        stampAuthor(fetched.tracks, detail && detail.author, detail && detail.name);
         part.count = fetched.tracks.length;
         job.total += fetched.tracks.length;
         await persist();
@@ -1083,6 +1097,7 @@ async function syncOne(sub, opts) {
     sub.lastCheckAt = nowStr();
 
     if (r.tracks.length && opts.import && sub.playlistId) {
+      stampAuthor(r.tracks, sub.author, sub.name);
       var res = await addTracksToPlaylist(sub.playlistId, r.tracks);
       out.added = res.added;
       sub.lastIndex = r.lastIndex;
