@@ -38,6 +38,18 @@
     return p.replace(/^\/api\/v1\/jsplugin\/ximalaya/, '');
   }
 
+  // 把前端发生的错误也交给后端统一记日志，排查时一处就能看全
+  var uiErrAt = 0;
+  function reportUiError(text) {
+    try {
+      if (!text) return;
+      if (Date.now() - uiErrAt < 3000) return;   // 同一波错误只记一条
+      uiErrAt = Date.now();
+      var pr = api('POST', '/logs', { action: 'mark', level: 'error', msg: String(text).slice(0, 240) });
+      if (pr && typeof pr.catch === 'function') pr.catch(function () { /* */ });
+    } catch (e) { /* */ }
+  }
+
   function headers() {
     var h = { 'Content-Type': 'application/json' };
     if (token) h['Authorization'] = 'Bearer ' + token;
@@ -101,10 +113,12 @@
         loadSubs();
         if (!meLoaded) loadMySubs(false);
         loadWatch();
+        loadAnchors();
       }
       if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); renderTimeline(); loadDashboard(); }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
+      if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); }
     });
   });
 
@@ -742,7 +756,7 @@
     renderResume();
   }
 
-  async function playAt(idx) {
+  async function playAt(idx, retry) {
     if (idx < 0 || idx >= queue.length) return;
     qi = idx;
     curPlayingId = '';
@@ -760,17 +774,32 @@
     $('pTitle').textContent = '载入中… ' + label;
     try {
       var r = await api('GET', '/track/' + t.trackId + '/url');
-      if (!r || r.success === false) { $('pTitle').textContent = '❌ ' + ((r && r.error) || '取不到播放地址'); return; }
+      if (!r || r.success === false) {
+        // 拿不到地址：自动再试一次（接口抖动很常见），还不行才报错
+        if (!retry) {
+          $('pTitle').textContent = '重试中… ' + label;
+          await new Promise(function (res) { setTimeout(res, 800); });
+          return playAt(idx, true);
+        }
+        $('pTitle').textContent = '❌ ' + ((r && r.error) || '取不到播放地址');
+        reportUiError('播放地址获取失败 ' + t.trackId + '：' + ((r && r.error) || ''));
+        return;
+      }
       var a = $('audio');
+      skipDone = {};
       a.src = r.data.url;
-      $('pTitle').textContent = label;
+      $('pTitle').textContent = label + (r.data.local ? ' · 📁 本地' : '');
       a.playbackRate = Number(sGet(RATE_KEY) || 1) || 1;
       pendingSeek = getPos(t.trackId);
       a.play().catch(function () { /* 浏览器要求先有用户交互 */ });
       if (queue.length > 1) $('pProg').textContent = '第 ' + (idx + 1) + ' / ' + queue.length + ' 集';
       if ($('pQueue')) $('pQueue').textContent = '☰ ' + (idx + 1) + '/' + queue.length;
       if (typeof renderQueue === 'function' && qPanelOpen()) renderQueue();
-    } catch (e) { $('pTitle').textContent = '试听失败: ' + e.message; }
+    } catch (e) {
+      if (!retry) { return playAt(idx, true); }
+      $('pTitle').textContent = '试听失败: ' + e.message;
+      reportUiError('播放失败 ' + t.trackId + '：' + e.message);
+    }
   }
 
   function playQueue(list, idx, album) {
@@ -790,6 +819,9 @@
     if (pendingSeek && pendingSeek.t > 10 && pendingSeek.t < (a.duration || 1e9) - 15) {
       a.currentTime = pendingSeek.t;
       msg('⏱ 从 ' + fmtTime(pendingSeek.t) + ' 续播');
+    } else {
+      // 没有可续播的进度才跳片头（续播时位置由用户上次决定）
+      applySkip(queue[qi] && queue[qi].trackId);
     }
     pendingSeek = null;
     if (qi >= 0 && queue[qi]) curPlayingId = queue[qi].trackId;
@@ -803,6 +835,15 @@
     updateProg();
     abCheck();
     if (fpOpen) syncFull(false);
+    // 跳过片尾：剩不到 N 秒就当作播完，直接走 ended 的逻辑
+    var a = this;
+    if (skipCfg.tail > 0 && a.duration && !a.paused) {
+      var tid = (qi >= 0 && queue[qi]) ? String(queue[qi].trackId) : '';
+      if (tid && a.duration - a.currentTime <= skipCfg.tail && a.duration - a.currentTime > 0.4 && !skipDone['t' + tid]) {
+        skipDone['t' + tid] = 1;
+        a.currentTime = Math.max(0, a.duration - 0.2);
+      }
+    }
     var now = Date.now();
     if (now - lastSaveAt < 5000 || qi < 0) return;
     lastSaveAt = now;
@@ -819,6 +860,24 @@
   });  $('audio').addEventListener('play', function () {
     if (qPanelOpen()) renderQueue();
     if (fpOpen) syncFull(true);
+    // 起播淡入：仅页面里第一次播放时淡入，同一队列内切集直接用记忆音量（否则每集开头都轻声）
+    var a = this;
+    if (fadeInDone) {
+      try { a.volume = Math.max(0, Math.min(1, Number(sGet(VOL_KEY) === null ? 100 : Number(sGet(VOL_KEY))) / 100)); } catch (e) { /* */ }
+      return;
+    }
+    fadeInDone = true;
+    var target = Math.max(0, Math.min(1, Number(sGet(VOL_KEY) === null ? 100 : Number(sGet(VOL_KEY))) / 100));
+    if (!isFinite(target)) target = 1;
+    try {
+      a.volume = 0;
+      var t0 = Date.now();
+      var tm = setInterval(function () {
+        var k = Math.min(1, (Date.now() - t0) / 500);
+        try { a.volume = target * k; } catch (e) { /* */ }
+        if (k >= 1) clearInterval(tm);
+      }, 50);
+    } catch (e) { try { a.volume = target; } catch (e2) { /* */ } }
   });
 
   // 播到队列末尾时，先把当前页后面的集补齐，再翻下一页，长书可以一直听下去
@@ -893,6 +952,13 @@
   $('audio').addEventListener('ended', async function () {
     var a = this;
     if (qi >= 0) savePos(queue[qi].trackId, a.duration, a.duration);
+    // 单集循环优先：直接从头再放这一集
+    if (loopOne && qi >= 0) {
+      try { a.currentTime = 0; a.play(); } catch (e) { /* */ }
+      skipDone = {};
+      renderQueue();
+      return;
+    }
     if (sleepMode === 'end') {
       sleepMode = 'off';
       $('pSleep').value = '0';
@@ -1055,14 +1121,17 @@
   });
 
   // 睡眠定时
+  // 记忆上次选择：多数人固定「本集播完」或「30 分钟」，每次重开都要重选很烦
+  var SLEEP_KEY = 'xm_sleep';
   var sleepTimer = null, sleepAt = 0, sleepMode = 'off';
-  $('pSleep').addEventListener('change', function () {
-    var v = this.value;
+
+  function applySleep(v, silent) {
     if (sleepTimer) { clearInterval(sleepTimer); sleepTimer = null; }
     if (v === 'end') {
       sleepMode = 'end';
       sleepAt = 0;
       $('pSleepTip').textContent = '本集播完停止';
+      if (!silent) sSet(SLEEP_KEY, 'end');   // 这个档位最常用，必须记住
       return;
     }
     sleepMode = 'off';
@@ -1074,16 +1143,151 @@
       var left = sleepAt - Date.now();
       if (left <= 0) {
         clearInterval(sleepTimer); sleepTimer = null;
-        $('audio').pause();
+        fadeOutAndPause();
         $('pSleep').value = '0';
         $('pSleepTip').textContent = '已定时停止';
         sleepAt = 0;
+        // 定时停下后不记忆，下次打开默认不再定时（避免「怎么一开就停」）
+        sSet(SLEEP_KEY, '0');
         return;
       }
       var m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
       $('pSleepTip').textContent = '剩 ' + m + ':' + (s < 10 ? '0' : '') + s;
     }, 1000);
+    if (!silent) sSet(SLEEP_KEY, String(v));
+  }
+
+  $('pSleep').addEventListener('change', function () { applySleep(this.value, false); });
+
+  // ---------- 音量：记忆 + 播放时淡入 ----------
+  var VOL_KEY = 'xm_vol';
+  var fadeInDone = false;
+  function applyVol(v, silent) {
+    var a = $('audio');
+    var n = Math.max(0, Math.min(100, Number(v)));
+    if (!isFinite(n)) n = 100;
+    a.volume = n / 100;
+    if ($('pVol')) $('pVol').value = String(n);
+    if (!silent) sSet(VOL_KEY, String(n));
+  }
+  // 定时/关闭时淡出，避免突然静音炸耳朵
+  function fadeOutAndPause() {
+    var a = $('audio');
+    var start = a.volume, t0 = Date.now();
+    var timer = setInterval(function () {
+      var k = Math.min(1, (Date.now() - t0) / 800);
+      try { a.volume = Math.max(0, start * (1 - k)); } catch (e) { /* */ }
+      if (k >= 1) {
+        clearInterval(timer);
+        a.pause();
+        try { a.volume = start; } catch (e) { /* */ }
+      }
+    }, 60);
+  }
+  if ($('pVol')) {
+    $('pVol').addEventListener('input', function () { applyVol(this.value, false); });
+  }
+
+  // ---------- 单集循环 ----------
+  var LOOP_KEY = 'xm_loopone';
+  var loopOne = sGet(LOOP_KEY) === '1';
+  function syncLoopBtn() {
+    var b = $('pLoopOne');
+    if (!b) return;
+    b.textContent = loopOne ? '🔂 单集中' : '🔂 单集';
+    b.style.color = loopOne ? 'var(--accent, #3b82f6)' : '';
+  }
+  if ($('pLoopOne')) {
+    $('pLoopOne').addEventListener('click', function () {
+      loopOne = !loopOne;
+      sSet(LOOP_KEY, loopOne ? '1' : '0');
+      syncLoopBtn();
+      msg(loopOne ? '🔂 单集循环已开（这集播完从头再来）' : '单集循环已关');
+    });
+  }
+
+  // ---------- 跳过片头片尾 ----------
+  // 很多书每集开头有 20~40 秒台标、结尾有 30 秒预告，天天听很折磨。
+  // 秒数存在设置里；按集只跳一次（同一集不重复跳，避免用户手动拖回去又被拽走）。
+  var SKIP_KEY = 'xm_skip';   // {head: 秒, tail: 秒}
+  var skipCfg = { head: 0, tail: 0 };
+  try { var sk0 = JSON.parse(sGet(SKIP_KEY) || 'null'); if (sk0) skipCfg = { head: Number(sk0.head) || 0, tail: Number(sk0.tail) || 0 }; } catch (e) { /* */ }
+  var skipDone = {};   // trackId -> true
+
+  function syncSkipBtn() {
+    var b = $('pSkip');
+    if (!b) return;
+    var on = skipCfg.head > 0 || skipCfg.tail > 0;
+    b.textContent = on ? ('⏩ 跳过 ' + skipCfg.head + '/' + skipCfg.tail + 's') : '⏩ 跳片头';
+    b.style.color = on ? 'var(--accent, #3b82f6)' : '';
+    b.title = on
+      ? ('每集开头跳 ' + skipCfg.head + ' 秒、结尾提前 ' + skipCfg.tail + ' 秒结束（点一下可改）')
+      : '跳过片头片尾（点一下设置秒数）';
+  }
+
+  function applySkip(tag) {
+    var a = $('audio');
+    if (!skipCfg.head && !skipCfg.tail) return false;
+    var tid = tag || (qi >= 0 && queue[qi] ? queue[qi].trackId : '');
+    if (!tid) return false;
+    var dur = Number(a.duration) || 0;
+    if (!dur) return false;
+    if (skipCfg.head > 0 && a.currentTime < skipCfg.head && !skipDone[tid]) {
+      if (pendingSeek && pendingSeek.t > skipCfg.head) { skipDone[tid] = 1; return false; }  // 续播点在后头，别往回拽
+      a.currentTime = skipCfg.head;
+      skipDone[tid] = 1;
+      msg('⏩ 跳过片头 ' + skipCfg.head + ' 秒');
+      return true;
+    }
+    return false;
+  }
+
+  if ($('pSkip')) {
+    $('pSkip').addEventListener('click', function () {
+      var cur = (skipCfg.head || 0) + '/' + (skipCfg.tail || 0);
+      var v = window.prompt('跳过片头/片尾秒数，用斜杠分隔（例如 30/20，填 0/0 关闭）：', cur);
+      if (v === null) return;
+      var m2 = String(v).split(/[\/,，\s]+/);
+      var head = Math.max(0, Math.min(600, Number(m2[0]) || 0));
+      var tail = Math.max(0, Math.min(600, Number(m2[1]) || 0));
+      skipCfg = { head: head, tail: tail };
+      sSet(SKIP_KEY, JSON.stringify(skipCfg));
+      skipDone = {};
+      syncSkipBtn();
+      msg(head || tail ? ('已设置：每集跳过片头 ' + head + ' 秒、片尾 ' + tail + ' 秒') : '已关闭跳过片头片尾');
+    });
+  }
+  syncSkipBtn();
+  syncLoopBtn();
+  applyVol(sGet(VOL_KEY) === null ? 100 : Number(sGet(VOL_KEY)) || 0, true);
+
+  // 拖动进度条时显示预览时间（原生控件不显示，用户难定位）
+  var seekViewEl = null;
+  function seekViewShow(x, y, text) {
+    if (!seekViewEl) seekViewEl = $('seekView');
+    if (!seekViewEl) return;
+    seekViewEl.textContent = text;
+    seekViewEl.style.left = x + 'px';
+    seekViewEl.style.top = y + 'px';
+    seekViewEl.classList.remove('hide');
+  }
+  function seekViewHide() {
+    if (!seekViewEl) seekViewEl = $('seekView');
+    if (seekViewEl) seekViewEl.classList.add('hide');
+  }
+  var lastSeekT = 0;
+  $('audio').addEventListener('seeking', function () {
+    var a = this;
+    var dur = Number(a.duration) || 0;
+    if (!dur) return;
+    var r = a.getBoundingClientRect();
+    // 原生控件没有拖拽事件，这里按进度粗算气泡位置，够用
+    var ratio = Math.max(0, Math.min(1, (Number(a.currentTime) || 0) / dur));
+    lastSeekT = Number(a.currentTime) || 0;
+    seekViewShow(r.left + Math.max(60, Math.min(r.width - 60, 40 + ratio * (r.width - 80))), r.top - 6,
+      fmtTime(a.currentTime) + ' / ' + fmtTime(dur));
   });
+  $('audio').addEventListener('seeked', function () { setTimeout(seekViewHide, 400); });
 
   // 点播放条上的专辑名，跳回该专辑详情页
   $('pAlbum').addEventListener('click', function () {
@@ -1575,6 +1779,140 @@
     var h = loadHistory().filter(function (x) { return x !== kw; });
     h.unshift(kw);
     sSet('xm_kw_hist', JSON.stringify(h.slice(0, 6)));
+    loadSearchHistory();
+  }
+
+  // 搜索历史：单独一行「最近搜过」，随搜随更新，可单条删、可清空
+  var HS_KEY = 'xm_kw_recent';
+  function loadRecentKw() {
+    try {
+      var a = JSON.parse(sGet(HS_KEY) || '[]');
+      return Array.isArray(a) ? a : [];
+    } catch (e) { return []; }
+  }
+  function pushRecentKw(kw) {
+    kw = String(kw || '').trim();
+    if (!kw) return;
+    var a = loadRecentKw().filter(function (x) { return x && x.k !== kw; });
+    a.unshift({ k: kw, at: Date.now() });
+    sSet(HS_KEY, JSON.stringify(a.slice(0, 12)));
+    loadSearchHistory();
+  }
+  function loadSearchHistory() {
+    var row = $('hsRow'), box = $('hsChips');
+    if (!row || !box) return;
+    var a = loadRecentKw();
+    box.innerHTML = '';
+    if (!a.length) { row.classList.add('hide'); return; }
+    row.classList.remove('hide');
+    a.forEach(function (x) {
+      var c = document.createElement('span');
+      c.className = 'hschip';
+      c.textContent = x.k;
+      c.title = '再次搜索（右键删除）';
+      c.addEventListener('click', function () { doSearch(x.k); });
+      c.addEventListener('contextmenu', function (ev) {
+        ev.preventDefault();
+        sSet(HS_KEY, JSON.stringify(loadRecentKw().filter(function (y) { return y.k !== x.k; })));
+        loadSearchHistory();
+        msg('已从最近搜索里移除「' + x.k + '」');
+      });
+      box.appendChild(c);
+    });
+  }
+  if ($('btnHsClear')) {
+    $('btnHsClear').addEventListener('click', function () {
+      sSet(HS_KEY, '[]');
+      sSet('xm_kw_hist', '[]');
+      loadSearchHistory();
+      renderIdleChips();
+      msg('已清空搜索历史');
+    });
+  }
+
+  // ---------- 专辑对比 ----------
+  if ($('btnCompare')) {
+    $('btnCompare').addEventListener('click', async function () {
+      var box = $('cmpBox');
+      if (!box.classList.contains('hide')) { box.classList.add('hide'); box.innerHTML = ''; return; }
+      var a = window.prompt('第一张专辑（ID 或链接）：', '');
+      if (!a) return;
+      var b = window.prompt('第二张专辑（ID 或链接）：', '');
+      if (!b) return;
+      box.classList.remove('hide');
+      box.innerHTML = '<div class="muted small-txt" style="margin-top:10px;">对比中…（开了 AI 会多一句结论，可能要几秒）</div>';
+      try {
+        var r = await api('GET', '/compare?a=' + encodeURIComponent(a.trim()) + '&b=' + encodeURIComponent(b.trim()));
+        if (!r || r.success === false) { box.innerHTML = '<div class="err" style="margin-top:10px;">' + esc((r && r.error) || '对比失败') + '</div>'; return; }
+        renderCompare(r.data, box);
+      } catch (e) {
+        box.innerHTML = '<div class="err" style="margin-top:10px;">对比失败: ' + esc(e.message) + '</div>';
+      }
+    });
+  }
+
+  function renderCompare(d, box) {
+    var A = d.albums[0], B = d.albums[1];
+    box.innerHTML = '';
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.style.marginTop = '10px';
+
+    var head = document.createElement('div');
+    head.className = 'cmpgrid';
+    head.innerHTML =
+      '<div class="cell"><b>' + escHtml(A.name) + '</b><div class="muted" style="font-size:11px;">' + escHtml(A.author || '') +
+      (A.isPaid ? ' · <span style="color:#dc2626;">🔒 ' + escHtml(A.payLabel || '付费') + '</span>' : '') + '</div></div>' +
+      '<div class="lb">对比</div>' +
+      '<div class="cell"><b>' + escHtml(B.name) + '</b><div class="muted" style="font-size:11px;">' + escHtml(B.author || '') +
+      (B.isPaid ? ' · <span style="color:#dc2626;">🔒 ' + escHtml(B.payLabel || '付费') + '</span>' : '') + '</div></div>';
+    card.appendChild(head);
+
+    (d.rows || []).forEach(function (row) {
+      var r = document.createElement('div');
+      r.className = 'cmpgrid';
+      var av = row.label === '播放量' ? fmtPlay(row.a) : String(row.a || 0);
+      var bv = row.label === '播放量' ? fmtPlay(row.b) : String(row.b || 0);
+      r.innerHTML =
+        '<div class="cell' + (row.better === 'a' ? ' win' : '') + '">' + escHtml(av) + (row.hint ? ' ' + row.hint : '') + '</div>' +
+        '<div class="lb">' + escHtml(row.label) + '</div>' +
+        '<div class="cell' + (row.better === 'b' ? ' win' : '') + '">' + escHtml(bv) + (row.hint ? ' ' + row.hint : '') + '</div>';
+      card.appendChild(r);
+    });
+
+    var r2 = document.createElement('div');
+    r2.className = 'cmpgrid';
+    r2.innerHTML =
+      '<div class="cell">' + escHtml(A.finishedText || '') + ' · 更新 ' + escHtml(A.updateDate || '-') + '</div>' +
+      '<div class="lb">状态</div>' +
+      '<div class="cell">' + escHtml(B.finishedText || '') + ' · 更新 ' + escHtml(B.updateDate || '-') + '</div>';
+    card.appendChild(r2);
+
+    if (d.verdict) {
+      var v = document.createElement('div');
+      v.className = 'cmpverdict';
+      v.textContent = '🤖 ' + d.verdict;
+      card.appendChild(v);
+    } else if (d.aiError) {
+      var ve = document.createElement('div');
+      ve.className = 'muted small-txt';
+      ve.style.marginTop = '8px';
+      ve.textContent = 'AI 结论没生成（' + d.aiError + '），指标仍然可参考。';
+      card.appendChild(ve);
+    }
+
+    var foot = document.createElement('div');
+    foot.className = 'btns';
+    foot.style.marginTop = '10px';
+    ['看 A 详情', '看 B 详情'].forEach(function (lb2, i) {
+      var b2 = document.createElement('button');
+      b2.className = 'small plain';
+      b2.textContent = lb2;
+      b2.addEventListener('click', function () { openDetail(i === 0 ? A.albumId : B.albumId); });
+      foot.appendChild(b2);
+    });
+    card.appendChild(foot);
+    box.appendChild(card);
   }
   function renderChips(kws, onPick) {
     var box = $('kwChips');
@@ -1675,6 +2013,7 @@
       var r = await api('POST', '/search', { kw: kw });
       if (r.success === false) { $('searchMeta').innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
       pushHistory(kw);
+      pushRecentKw(kw);
       renderChips(r.keywords, doSearch);
       $('searchMeta').textContent = '共 ' + (r.count || 0) + ' 个结果' + (r.source ? ' · 来源：' + r.source : '');
       renderResults(r.data || []);
@@ -1733,6 +2072,7 @@
       if (r.success === false) { $('searchMeta').innerHTML = '<span class="err">' + escHtml(r.error) + '</span>'; return; }
       if (r.risk) { $('searchMeta').innerHTML = '<span class="err">单集搜索被风控暂时限制了，换个词或过一会儿再试</span>'; return; }
       pushHistory(trackKw);
+      pushRecentKw(trackKw);
       trackPage = Number(r.page) || page || 1;
       trackHasMore = !!r.hasMore;
       var list = r.data || [];
@@ -1911,6 +2251,7 @@
       renderTracks(d.tracks || []);
       renderResume();
       loadAiCard(cur.id);
+      loadHlCard(cur.id);
       loadLibMarks(cur.id);
       $('dPage').textContent = '第 1 页';
       $('dPrev').disabled = true;
@@ -1970,13 +2311,40 @@
     if (it.themes && it.themes.length) {
       html += '<div class="ai-themes">';
       it.themes.forEach(function (t) {
-        html += '<div class="ai-theme"><span class="aitn">' + escHtml(t.name) + '</span>' +
+        html += '<div class="ai-theme" data-rg="' + escHtml(t.range || '') + '" style="cursor:pointer;" title="点一下跳到这一段">' +
+          '<span class="aitn">' + escHtml(t.name) + '</span>' +
           '<span class="airg">' + escHtml(t.range) + '</span>' +
           '<span class="ainote">' + escHtml(t.note) + '</span></div>';
       });
       html += '</div>';
     }
     $('aiBody').innerHTML = html;
+    // 主题分段可点击：直接跳到这一段的起始页
+    $('aiBody').querySelectorAll('.ai-theme').forEach(function (el) {
+      el.addEventListener('click', function () { jumpToRange(el.getAttribute('data-rg')); });
+    });
+  }
+
+  // 从「第 12-20 集」这类文字里解析起始集，算出页码并翻过去
+  async function jumpToRange(range) {
+    var m = String(range || '').match(/(\d+)/);
+    if (!m) { msg('这一段没有给出集数范围', 'err'); return; }
+    var from = Number(m[1]) || 1;
+    var page = Math.max(1, Math.floor((from - 1) / 30) + 1);
+    msg('跳到第 ' + page + ' 页（第 ' + from + ' 集起）');
+    if (page !== cur.page) await gotoPage(page);
+    // 高亮对应那一集
+    setTimeout(function () {
+      var rows = document.querySelectorAll('#dTracks .trk');
+      for (var i = 0; i < rows.length; i++) {
+        var n = Number(rows[i].getAttribute('data-idx') || 0);
+        if (n === from) {
+          rows[i].style.outline = '2px solid var(--accent, #3b82f6)';
+          rows[i].scrollIntoView({ block: 'center', behavior: 'smooth' });
+          break;
+        }
+      }
+    }, 500);
   }
 
   async function aiGenerate(force) {
@@ -2019,6 +2387,9 @@
   if ($('btnAiGen')) $('btnAiGen').addEventListener('click', function () { aiGenerate(false); });
   if ($('btnAiRe')) $('btnAiRe').addEventListener('click', function () { aiGenerate(true); });
   if ($('btnAiAsk')) $('btnAiAsk').addEventListener('click', aiAskBook);
+  if ($('btnHlGen')) $('btnHlGen').addEventListener('click', genHl);
+  if ($('btnBlurbs')) $('btnBlurbs').addEventListener('click', function () { loadBlurbs(false); });
+  if ($('btnSplit')) $('btnSplit').addEventListener('click', splitHeard);
   if ($('aiQ')) $('aiQ').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); aiAskBook(); } });
 
   // ---------- 本机音乐库标记 ----------
@@ -2070,6 +2441,111 @@
       msg(r.success ? ('⬇ ' + ((r.data && r.data.message) || '已启动')) : ('❌ ' + (r.error || '失败')), r.success ? 'ok' : 'err');
       poll();
     } catch (e) { msg('启动失败: ' + e.message, 'err'); }
+  }
+
+  // ---------- AI 精彩片段 ----------
+  var hlCache = {};   // albumId -> {items, tip}
+
+  async function loadHlCard(albumId) {
+    var card = $('aiHlCard');
+    if (!card) return;
+    var st = await loadAiStatus(false);
+    if (!st.ready) { card.classList.add('hide'); return; }
+    card.classList.remove('hide');
+    $('hlBody').innerHTML = '';
+    $('hlMeta').textContent = '';
+    $('btnHlGen').classList.remove('hide');
+    var c = hlCache[String(albumId)];
+    if (c) { renderHl(c); return; }
+    $('hlMeta').textContent = '点「推荐」让 AI 挑几集最值得先听的';
+  }
+
+  function renderHl(d) {
+    $('btnHlGen').classList.add('hide');
+    $('hlMeta').textContent = (d.items || []).length ? ('AI 挑了 ' + d.items.length + ' 集') : '';
+    var box = $('hlBody');
+    box.innerHTML = '';
+    if (d.tip) {
+      var tp = document.createElement('div');
+      tp.className = 'aitip';
+      tp.textContent = '💡 ' + d.tip;
+      box.appendChild(tp);
+    }
+    (d.items || []).forEach(function (it) {
+      var row = document.createElement('div');
+      row.className = 'hlitem';
+      row.innerHTML = '<div class="ix">' + escHtml(String(it.index)) + '</div>' +
+        '<div class="tt2">' + escHtml(it.title) + '<div class="why">' + escHtml(it.why || '') + '</div></div>' +
+        '<div style="flex:none;"><button class="small">▶</button></div>';
+      row.addEventListener('click', function () {
+        pendingSeek = null;
+        playQueue([{ trackId: it.trackId, index: it.index, title: it.title, albumId: cur.id,
+          albumName: (cur.detail && cur.detail.name) || '', cover: (cur.detail && cur.detail.cover) || '' }], 0,
+          { id: cur.id, name: (cur.detail && cur.detail.name) || '', cover: (cur.detail && cur.detail.cover) || '' });
+      });
+      box.appendChild(row);
+    });
+  }
+
+  async function genHl() {
+    if (!cur.id) return;
+    $('btnHlGen').disabled = true;
+    $('hlMeta').textContent = 'AI 正在翻分集列表…';
+    try {
+      var r = await api('GET', '/ai/highlights?albumId=' + encodeURIComponent(cur.id));
+      if (!r || r.success === false) { $('hlMeta').textContent = '❌ ' + ((r && r.error) || '生成失败'); return; }
+      hlCache[String(cur.id)] = r.data;
+      renderHl(r.data);
+    } catch (e) {
+      $('hlMeta').textContent = '❌ ' + e.message;
+    } finally { $('btnHlGen').disabled = false; }
+  }
+
+  // ---------- AI 分集简介 ----------
+  var blurbMap = {};   // trackId 或 index -> 一句话
+  function blurbOf(key) { return blurbMap[String(key)] || ''; }
+
+  async function loadBlurbs(force) {
+    if (!cur.id) return;
+    var st = await loadAiStatus(false);
+    if (!st.ready) { msg('AI 还没启用，去设置页填网关和密钥', 'err'); return; }
+    var btn = $('btnBlurbs');
+    if (btn) { btn.disabled = true; btn.textContent = '✨ 生成中…'; }
+    try {
+      var r = await api('GET', '/ai/episodes?albumId=' + encodeURIComponent(cur.id) + '&page=' + (cur.page || 1) + (force ? '&refresh=1' : ''));
+      if (!r || r.success === false) { msg('❌ ' + ((r && r.error) || '生成失败'), 'err'); return; }
+      var items = (r.data && r.data.items) || [];
+      var got = 0;
+      items.forEach(function (x) {
+        if (!x.blurb) return;
+        got += 1;
+        if (x.trackId) blurbMap[String(x.trackId)] = x.blurb;
+        if (x.index) blurbMap[String(x.index)] = x.blurb;
+      });
+      renderTracks(sortByOrder(curTracks));
+      msg(got ? ('✨ 已给 ' + got + ' 集补上一句话简介') : '这一页已经都有了', got ? 'ok' : '');
+    } catch (e) {
+      msg('❌ ' + e.message, 'err');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '✨ 分集简介'; }
+    }
+  }
+
+  // ---------- 拆成「已听 / 未听」两个歌单 ----------
+  async function splitHeard() {
+    if (!cur.id) return;
+    if (!confirm('把这本书按收听进度拆成「已听」和「未听」两个歌单？\n已听 = 进度到结尾前 20 秒内的。原有歌单不动。')) return;
+    if ($('btnSplit')) $('btnSplit').disabled = true;
+    try {
+      var r = await api('POST', '/split-heard', { albumId: cur.id });
+      if (!r || r.success === false) { msg('❌ ' + ((r && r.error) || '拆分失败'), 'err'); return; }
+      var d = r.data || {};
+      if (d.skipped) { msg('不用拆：' + (d.reason || ''), 'err'); return; }
+      msg('✂ 已生成「' + (d.heard && d.heard.name) + '」' + (d.heard && d.heard.added) + ' 集 / 「' +
+        (d.unheard && d.unheard.name) + '」' + (d.unheard && d.unheard.added) + ' 集', 'ok');
+    } catch (e) {
+      msg('❌ ' + e.message, 'err');
+    } finally { if ($('btnSplit')) $('btnSplit').disabled = false; }
   }
 
   // ---------- 听书习惯仪表盘 ----------
@@ -2184,12 +2660,21 @@
       var d = document.createElement('div');
       d.className = 'trk';
       d.setAttribute('data-tid', String(t.trackId || ''));
+      d.setAttribute('data-idx', String(t.index || ''));
       var no = document.createElement('span');
       no.className = 'no';
       no.textContent = t.index;
       var tt = document.createElement('span');
       tt.className = 'tt';
       tt.textContent = t.title;
+      // AI 分集简介：有就挂一行小字（缓存里取，不会额外请求）
+      var bl = blurbOf(t.trackId) || blurbOf(t.index);
+      if (bl) {
+        var bd = document.createElement('div');
+        bd.className = 'blurb';
+        bd.textContent = bl;
+        tt.appendChild(bd);
+      }
       var du = document.createElement('span');
       du.className = 'du';
       du.textContent = fmtDur(t.duration);
@@ -3220,7 +3705,7 @@
       if ($('aiEnabled')) $('aiEnabled').value = a.enabled ? '1' : '0';
       if ($('aiUrl')) $('aiUrl').value = a.url || 'http://127.0.0.1:3065/v1';
       if ($('aiKey')) $('aiKey').value = a.key || '';
-      if ($('aiModel')) $('aiModel').value = a.model || 'deepseek-v4.1-flash-0930';
+      if ($('aiModel')) $('aiModel').value = a.model || 'deepseek-v4.1-flash';
       var st = await loadAiStatus(true);
       renderAiStat(st);
     } catch (e) { /* */ }
@@ -3241,7 +3726,7 @@
       enabled: $('aiEnabled').value === '1',
       url: ($('aiUrl').value || '').trim() || 'http://127.0.0.1:3065/v1',
       key: ($('aiKey').value || '').trim(),
-      model: ($('aiModel').value || '').trim() || 'deepseek-v4.1-flash-0930'
+      model: ($('aiModel').value || '').trim() || 'deepseek-v4.1-flash'
     };
     if (body.enabled && !body.key) { msg('开启前请先填 API 密钥', 'err'); return; }
     try {
@@ -3301,6 +3786,219 @@
     if (t) { token = t.replace(/^Bearer /, ''); sSet('xm_token', token); }
   }
 
+  // ---------- 按主播追更 ----------
+  var anchorData = null;
+
+  async function loadAnchors() {
+    var box = $('anchorBody');
+    if (!box) return;
+    box.innerHTML = '<div class="muted small-txt">读取中…</div>';
+    try {
+      var r = await api('GET', '/anchors');
+      if (!r || r.success === false) { box.innerHTML = '<div class="err">' + esc((r && r.error) || '读取失败') + '</div>'; return; }
+      anchorData = r.data || { items: [] };
+      renderAnchors();
+    } catch (e) { box.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
+  }
+
+  function renderAnchors() {
+    var box = $('anchorBody');
+    var items = (anchorData && anchorData.items) || [];
+    box.innerHTML = '';
+    if ($('anchorStat')) {
+      $('anchorStat').textContent = items.length
+        ? ('共 ' + items.length + ' 位主播' + (anchorData.from === 'sub' ? '（来自账号订阅）' : '（来自本地订阅与导入记录）'))
+        : '还没有数据：先订阅或导入几张专辑';
+    }
+    if (!items.length) return;
+    items.forEach(function (a) {
+      var card = document.createElement('div');
+      card.style.cssText = 'border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:8px;';
+      var hd = document.createElement('div');
+      hd.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+      hd.innerHTML = '<b>' + escHtml(a.name) + '</b><span class="muted small-txt">' + a.count + ' 张</span>';
+      var btn = document.createElement('button');
+      btn.className = 'small plain';
+      btn.textContent = '展开';
+      hd.appendChild(btn);
+      card.appendChild(hd);
+
+      var body = document.createElement('div');
+      body.className = 'hide';
+      body.style.marginTop = '8px';
+      var picked = {};
+      a.albums.forEach(function (x) {
+        var row = document.createElement('label');
+        row.style.cssText = 'display:flex;align-items:flex-start;gap:7px;margin:0 0 6px;font-size:12px;cursor:pointer;';
+        var ck = document.createElement('input');
+        ck.type = 'checkbox';
+        ck.style.marginTop = '2px';
+        ck.checked = (x.from === 'imp');
+        ck.disabled = (x.from === 'imp');
+        if (x.from === 'imp') picked[x.albumId] = 0;
+        ck.addEventListener('change', function () { picked[x.albumId] = ck.checked ? 1 : 0; });
+        var lab = document.createElement('span');
+        lab.innerHTML = escHtml(x.name) + (x.total ? ' <span class="muted">· ' + x.total + ' 集</span>' : '') +
+          (x.from === 'imp' ? ' <span class="muted">· 已导入</span>' : '') +
+          (x.updateDate ? ' <span class="muted">· ' + escHtml(x.updateDate) + '</span>' : '');
+        lab.addEventListener('click', function (ev) { ev.preventDefault(); openDetail(x.albumId); });
+        row.appendChild(ck); row.appendChild(lab);
+        body.appendChild(row);
+      });
+      var ops = document.createElement('div');
+      ops.className = 'btns';
+      ops.style.marginTop = '6px';
+      var sub = document.createElement('button');
+      sub.className = 'small';
+      sub.textContent = '订阅勾选的';
+      sub.addEventListener('click', async function () {
+        var ids = Object.keys(picked).filter(function (k) { return picked[k]; });
+        if (!ids.length) { msg('先勾选要订阅的专辑', 'err'); return; }
+        sub.disabled = true;
+        try {
+          var r2 = await api('POST', '/anchors/subscribe', { albumIds: ids });
+          if (!r2 || r2.success === false) { msg('❌ ' + ((r2 && r2.error) || '失败'), 'err'); return; }
+          var d2 = r2.data || {};
+          msg('已订阅 ' + (d2.added || 0) + ' 张' + (d2.existed ? '，' + d2.existed + ' 张本来就有' : '') +
+            (d2.failed && d2.failed.length ? '，' + d2.failed.length + ' 张失败' : ''), 'ok');
+          loadSubs();
+        } finally { sub.disabled = false; }
+      });
+      ops.appendChild(sub);
+      body.appendChild(ops);
+      card.appendChild(body);
+      btn.addEventListener('click', function () {
+        var hid = body.classList.toggle('hide');
+        btn.textContent = hid ? '展开' : '收起';
+      });
+      box.appendChild(card);
+    });
+  }
+
+  if ($('btnAnchorRefresh')) $('btnAnchorRefresh').addEventListener('click', loadAnchors);
+
+  // ---------- 导出订阅清单 ----------
+  function downloadText(filename, mime, content) {
+    try {
+      var blob = new Blob([content], { type: mime || 'text/plain;charset=utf-8' });
+      var u = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = u;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { a.remove(); URL.revokeObjectURL(u); }, 1000);
+      msg('⬇ 已开始下载 ' + filename, 'ok');
+    } catch (e) { msg('下载失败: ' + e.message, 'err'); }
+  }
+
+  async function exportSubs(fmt) {
+    try {
+      var r = await api('GET', '/subs/export?format=' + fmt);
+      if (!r || r.success === false) { msg('❌ ' + ((r && r.error) || '导出失败'), 'err'); return; }
+      var d = r.data || {};
+      if (!d.count) { msg('还没有订阅，导出来是空表', 'err'); }
+      downloadText(d.filename || ('ximalaya-subs.' + fmt), d.mime, d.content || '');
+      if ($('expStat')) $('expStat').textContent = '上次导出：' + (d.count || 0) + ' 张 · ' + (d.filename || '');
+    } catch (e) { msg('导出失败: ' + e.message, 'err'); }
+  }
+  if ($('btnExpJson')) $('btnExpJson').addEventListener('click', function () { exportSubs('json'); });
+  if ($('btnExpCsv')) $('btnExpCsv').addEventListener('click', function () { exportSubs('csv'); });
+  if ($('btnExpMd')) $('btnExpMd').addEventListener('click', function () { exportSubs('md'); });
+
+  // ---------- 自检 ----------
+  async function runSelfCheck(deep) {
+    var sum = $('scSummary'), body = $('scBody');
+    if (!body) return;
+    if (sum) sum.textContent = deep ? '深度检查中（会真的取一次播放地址）…' : '检查中…';
+    body.innerHTML = '';
+    try {
+      var r = await api('GET', '/selfcheck' + (deep ? '?deep=1' : ''));
+      if (!r || r.success === false) { if (sum) sum.textContent = '❌ ' + ((r && r.error) || '检查失败'); return; }
+      var d = r.data || {};
+      if (sum) {
+        sum.innerHTML = (d.ok ? '✅ ' : '⚠️ ') + escHtml(d.summary || '') +
+          ' <span class="muted">· v' + escHtml(d.version || '') + ' · ' + escHtml(d.atText || '') + '</span>';
+      }
+      (d.items || []).forEach(function (it) {
+        var row = document.createElement('div');
+        row.className = 'schk';
+        row.innerHTML = '<span class="dot ' + escHtml(it.level) + '"></span>' +
+          '<span class="nm">' + escHtml(it.name) + '</span>' +
+          '<span class="dt">' + escHtml(it.detail) + '</span>';
+        body.appendChild(row);
+      });
+    } catch (e) { if (sum) sum.textContent = '❌ ' + e.message; }
+  }
+  if ($('btnScRun')) $('btnScRun').addEventListener('click', function () { runSelfCheck(false); });
+  if ($('btnScDeep')) $('btnScDeep').addEventListener('click', function () { runSelfCheck(true); });
+
+  // ---------- 运行日志 ----------
+  function fmtLogTime(ts) {
+    var d = new Date(Number(ts) || Date.now());
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  async function loadLogs() {
+    var box = $('logBody');
+    if (!box) return;
+    try {
+      var lv = ($('logLevel') && $('logLevel').value) || 'all';
+      var r = await api('GET', '/logs?limit=100&level=' + lv);
+      if (!r || r.success === false) { box.innerHTML = '<div class="err">读取失败</div>'; return; }
+      var d = r.data || {};
+      if ($('logStat')) {
+        $('logStat').textContent = '共 ' + (d.total || 0) + ' 条（最多保留 ' + (d.max || 100) + '）' +
+          ' · 警告 ' + (d.warn || 0) + ' · 错误 ' + (d.error || 0);
+      }
+      box.innerHTML = '';
+      var items = d.items || [];
+      if (!items.length) { box.innerHTML = '<div class="muted small-txt">还没有记录。一切正常时这里是空的。</div>'; return; }
+      items.forEach(function (e) {
+        var row = document.createElement('div');
+        row.className = 'logrow';
+        row.innerHTML = '<span class="loglv ' + escHtml(e.lv) + '">' +
+          (e.lv === 'error' ? '错误' : e.lv === 'warn' ? '警告' : '记录') + '</span>' +
+          '<span class="logtime">' + fmtLogTime(e.t) + '</span>' +
+          '<span class="logtag">' + escHtml(e.tag || '') + '</span>' +
+          '<span class="logmsg">' + escHtml(e.msg || '') + '</span>';
+        box.appendChild(row);
+      });
+    } catch (e) { box.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
+  }
+  if ($('btnLogRefresh')) $('btnLogRefresh').addEventListener('click', loadLogs);
+  if ($('logLevel')) $('logLevel').addEventListener('change', loadLogs);
+  if ($('btnLogClear')) {
+    $('btnLogClear').addEventListener('click', async function () {
+      if (!confirm('清空运行日志？')) return;
+      try { await api('POST', '/logs', { action: 'clear' }); loadLogs(); msg('日志已清空'); }
+      catch (e) { msg('清空失败: ' + e.message, 'err'); }
+    });
+  }
+
+  // ---------- 登录态健康（Cookie 是否过期） ----------
+  async function loadCookieHealth() {
+    var el = $('loginStatus');
+    if (!el) return;
+    try {
+      var r = await api('GET', '/cookie/health');
+      if (!r || r.success === false) return;
+      var d = r.data || {};
+      if (!d.loggedIn) return;
+      if (d.valid) {
+        el.innerHTML = '✅ 已登录' + (d.nickname ? '（' + escHtml(d.nickname) + '）' : '') +
+          ' <span class="muted small-txt">· ' + escHtml(d.checkedAgo) + '验证过</span>';
+      } else {
+        el.innerHTML = '⚠️ <b style="color:#dc2626;">登录态已失效</b> <span class="muted small-txt">' +
+          escHtml(d.error || '') + '　上次正常：' + escHtml(d.lastOkAgo) + '</span>' +
+          ' <span class="link" id="btnReLogin">重新扫码</span>';
+        var b = $('btnReLogin');
+        if (b) b.addEventListener('click', function () { qrStart(); });
+      }
+    } catch (e) { /* 静默 */ }
+  }
+
   function boot() {
     loadLogin();
     loadDevices();
@@ -3316,6 +4014,16 @@
     renderTimeline();
     loadDashboard();
     abTip();
+    // 恢复上次的睡眠定时档位（「本集播完」这类常用档不用每次重选）
+    var slv = sGet(SLEEP_KEY);
+    if (slv && slv !== '0') {
+      var opt = $('pSleep').querySelector('option[value="' + slv + '"]');
+      if (opt) { $('pSleep').value = slv; applySleep(slv, true); }
+    }
+    loadSearchHistory();
+    loadLogs();
+    runSelfCheck(false);
+    loadCookieHealth();
     document.querySelectorAll('.tlBtn').forEach(function (b) {
       b.classList.toggle('active', Number(b.getAttribute('data-days')) === tlDays);
     });
