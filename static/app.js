@@ -101,8 +101,9 @@
         loadSubs();
         if (!meLoaded) loadMySubs(false);
       }
-      if (btn.dataset.tab === 'recent') renderRecent();
-      if (btn.dataset.tab === 'lib') loadImported();
+      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); }
+      if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
+      if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
     });
   });
 
@@ -274,16 +275,21 @@
 
   // ---------- 设备 ----------
   var deviceSaved = '';
+  var ttsDeviceSaved = '';
   async function loadDevices() {
     try {
       var c = await api('GET', '/config');
       var dv = (c && c.data && c.data.device) || {};
       deviceSaved = dv.account_id && dv.device_id ? (dv.account_id + '|' + dv.device_id + '|' + (dv.device_name || '')) : '';
+      var tc = (c && c.data && c.data.tts) || {};
+      ttsDeviceSaved = tc.account_id && tc.device_id ? (tc.account_id + '|' + tc.device_id + '|' + (tc.device_name || '')) : '';
     } catch (e) { /* */ }
     try {
       var d = await api('GET', '/devices');
       var sel = $('device');
+      var tsel = $('ttsDevice');
       sel.innerHTML = '<option value="">（请选择音箱）</option>';
+      if (tsel) tsel.innerHTML = '<option value="">跟随设置里的设备</option>';
       var accounts = (d && d.data && d.data.data) || (d && d.data) || [];
       if (Array.isArray(accounts)) {
         accounts.forEach(function (acc) {
@@ -295,6 +301,11 @@
             opt.textContent = name + '（' + (acc.account_name || acc.account_id) + '）';
             if (opt.value === deviceSaved) opt.selected = true;
             sel.appendChild(opt);
+            if (tsel) {
+              var o2 = opt.cloneNode(true);
+              if (o2.value === ttsDeviceSaved) o2.selected = true;
+              tsel.appendChild(o2);
+            }
           });
         });
       }
@@ -364,7 +375,84 @@
         t: o.t, d: o.d, at: o.at,
         finished: !!(o.t >= o.d - 15)
       });
+      // 跨设备：攒一条待上传的进度，8 秒合并上报一次
+      queueProg({
+        trackId: trackId, albumId: c.albumId, albumName: c.albumName || '',
+        title: c.title, index: c.index, cover: c.cover || '',
+        t: o.t, d: o.d, at: o.at, finished: !!(o.t >= o.d - 15)
+      });
     }
+  }
+
+  // ---------- 跨设备进度（存 NAS 端） ----------
+  var progSyncEnabled = sGet('xm_prog_sync') !== '0';
+  var progQueue = [], progTimer = null;
+
+  function queueProg(item) {
+    if (!progSyncEnabled || !item || !item.trackId) return;
+    progQueue = progQueue.filter(function (x) { return String(x.trackId) !== String(item.trackId); });
+    progQueue.push(item);
+    if (progQueue.length > 40) progQueue = progQueue.slice(-40);
+    if (progTimer) return;
+    progTimer = setTimeout(function () { flushProg(); }, 8000);
+  }
+
+  async function flushProg() {
+    if (progTimer) { clearTimeout(progTimer); progTimer = null; }
+    if (!progQueue.length) return;
+    var items = progQueue.slice(0, 50);
+    progQueue = [];
+    try { await api('POST', '/progress', { items: items }); } catch (e) { /* 离线时忽略，下次再传 */ }
+  }
+
+  // 打开专辑时把服务端进度合并进本机（服务端更新则覆盖本机）
+  async function pullAlbumProgress(albumId) {
+    if (!progSyncEnabled || !albumId) return;
+    try {
+      var r = await api('GET', '/progress?albumId=' + encodeURIComponent(albumId));
+      var d = (r && r.data) || {};
+      var list = d.tracks || [];
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i];
+        var loc = getPos(p.trackId);
+        if (!loc || (Number(p.at) || 0) > (Number(loc.at) || 0)) {
+          sSet(posKey(p.trackId), JSON.stringify({ t: p.t, d: p.d, at: p.at }));
+        }
+      }
+      if (d.album && d.album.trackId) {
+        var ll = null;
+        try { ll = JSON.parse(sGet(lastKey(albumId)) || 'null'); } catch (e) { ll = null; }
+        if (!ll || (Number(d.album.at) || 0) > (Number(ll.at) || 0)) {
+          sSet(lastKey(albumId), JSON.stringify({
+            trackId: d.album.trackId, index: d.album.index, title: d.album.title,
+            t: d.album.t, d: d.album.d, at: d.album.at
+          }));
+        }
+      }
+    } catch (e) { /* */ }
+  }
+
+  // 把服务端「最近收听」合并进本机列表
+  async function pullRecent() {
+    if (!progSyncEnabled) return;
+    try {
+      var r = await api('GET', '/progress/recent?limit=40');
+      var list = (r && r.data) || [];
+      if (!list.length) return;
+      var local = readRecent();
+      var map = {};
+      local.forEach(function (x) { map[String(x.albumId)] = x; });
+      list.forEach(function (x) {
+        var k = String(x.albumId || '');
+        if (!k) return;
+        if (!map[k] || (Number(x.at) || 0) > (Number(map[k].at) || 0)) map[k] = x;
+      });
+      var out = Object.keys(map).map(function (k) { return map[k]; })
+        .sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); })
+        .slice(0, 40);
+      writeRecent(out);
+      renderRecent();
+    } catch (e) { /* */ }
   }
 
   // ---------- 最近收听（跨专辑聚合，存在本机） ----------
@@ -523,8 +611,7 @@
     playAt(idx);
   }
 
-  $('audio').addEventListener('loadedmetadata', function () {
-    var a = this;
+  $('audio').addEventListener('loadedmetadata', function () {    var a = this;
     if (pendingSeek && pendingSeek.t > 10 && pendingSeek.t < (a.duration || 1e9) - 15) {
       a.currentTime = pendingSeek.t;
       msg('⏱ 从 ' + fmtTime(pendingSeek.t) + ' 续播');
@@ -541,6 +628,12 @@
     if (now - lastSaveAt < 5000 || qi < 0) return;
     lastSaveAt = now;
     savePos(queue[qi].trackId, this.currentTime, this.duration);
+  });
+
+  // 暂停 / 播放器关闭时立刻把攒着的进度推给 NAS，不等防抖
+  $('audio').addEventListener('pause', function () {
+    if (qi >= 0) savePos(queue[qi].trackId, this.currentTime, this.duration);
+    flushProg();
   });
 
   // 播到队列末尾时，先把当前页后面的集补齐，再翻下一页，长书可以一直听下去
@@ -797,6 +890,8 @@
     $('kwChips').innerHTML = '';
     $('detailCard').classList.add('hide');
     $('searchCard').classList.remove('hide');
+    $('trackMore').classList.add('hide');
+    if (searchMode === 'track') { doSearchTracks(kw, 1, true); return; }
     try {
       var r = await api('POST', '/search', { kw: kw });
       if (r.success === false) { $('searchMeta').innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
@@ -818,6 +913,149 @@
     updateSelBar();
   });
   $('selMode').addEventListener('change', updateSelBar);
+
+  // ---------- 单集（声音）搜索 ----------
+  var searchMode = 'album';
+  var trackRows = [], trackKw = '', trackPage = 1, trackHasMore = false;
+
+  function todayStrCli() {
+    var d = new Date();
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+  }
+
+  function setSearchMode(m) {
+    searchMode = m === 'track' ? 'track' : 'album';
+    $('modeAlbum').classList.toggle('on', searchMode === 'album');
+    $('modeTrack').classList.toggle('on', searchMode === 'track');
+    $('kw').placeholder = searchMode === 'track'
+      ? '搜某一集，如：郭德纲 王二姐思夫'
+      : '关键词，如：股票、三国演义、郭德纲';
+    $('trackMore').classList.add('hide');
+    $('searchResults').innerHTML = '';
+    $('searchMeta').textContent = searchMode === 'track'
+      ? '按单集标题搜索，可以单独试听或收藏某一集'
+      : '';
+    $('detailCard').classList.add('hide');
+    $('searchCard').classList.remove('hide');
+    renderIdleChips();
+  }
+  $('modeAlbum').addEventListener('click', function () { setSearchMode('album'); });
+  $('modeTrack').addEventListener('click', function () { setSearchMode('track'); });
+
+  async function doSearchTracks(kw, page, reset) {
+    trackKw = kw || trackKw;
+    $('searchMeta').textContent = '搜索中…';
+    if (reset) { $('searchResults').innerHTML = ''; $('kwChips').innerHTML = ''; trackRows = []; }
+    $('detailCard').classList.add('hide');
+    $('searchCard').classList.remove('hide');
+    try {
+      var r = await api('POST', '/search/tracks', { kw: trackKw, page: page || 1, rows: 20 });
+      if (r.success === false) { $('searchMeta').innerHTML = '<span class="err">' + escHtml(r.error) + '</span>'; return; }
+      if (r.risk) { $('searchMeta').innerHTML = '<span class="err">单集搜索被风控暂时限制了，换个词或过一会儿再试</span>'; return; }
+      pushHistory(trackKw);
+      trackPage = Number(r.page) || page || 1;
+      trackHasMore = !!r.hasMore;
+      var list = r.data || [];
+      if (page > 1) {
+        var seen = {};
+        trackRows.forEach(function (x) { seen[String(x.trackId)] = 1; });
+        list = list.filter(function (t) { return !seen[String(t.trackId)]; });
+      }
+      trackRows = trackRows.concat(list);
+      renderTrackResults(list, page > 1);
+      $('searchMeta').textContent = '第 ' + trackPage + ' 页 · 共 ' + trackRows.length + ' 集' +
+        (r.total ? '（约 ' + r.total + ' 集匹配）' : '');
+      $('trackMore').classList.toggle('hide', !trackRows.length);
+      $('btnMoreTracks').disabled = !trackHasMore;
+      $('btnMoreTracks').textContent = trackHasMore ? '加载更多单集' : '没有更多了';
+    } catch (e) {
+      $('searchMeta').innerHTML = '<span class="err">搜索失败: ' + escHtml(e.message) + '</span>';
+    }
+  }
+
+  function playTrackRow(t) {
+    var album = { id: t.albumId || '', name: t.album || '', cover: t.cover || '' };
+    playQueue([{ trackId: t.trackId, index: 0, title: t.title }], 0, album);
+  }
+
+  function renderTrackResults(list, append) {
+    var el = $('searchResults');
+    if (!append) el.innerHTML = '';
+    if (!list.length && !append) {
+      el.innerHTML = '<div class="muted small-txt" style="padding:10px 0">没有找到相关单集，试试换关键词，或切回「搜专辑」。</div>';
+      return;
+    }
+    list.forEach(function (t) {
+      var item = document.createElement('div');
+      item.className = 'res-item';
+
+      var img = document.createElement('img');
+      img.src = t.cover || '';
+      img.alt = '';
+      img.onerror = function () { img.style.visibility = 'hidden'; };
+
+      var body = document.createElement('div');
+      body.className = 'body';
+      var tt = document.createElement('div');
+      tt.className = 't';
+      tt.textContent = t.title;
+      var m = document.createElement('div');
+      m.className = 'm';
+      var bits = [];
+      if (t.author) bits.push(t.author);
+      if (t.album) bits.push('《' + t.album + '》');
+      if (t.duration) bits.push(fmtDur(t.duration));
+      if (t.play) bits.push(fmtPlay(t.play) + '播放');
+      if (t.isPaid) bits.push('VIP');
+      m.textContent = bits.join(' · ');
+      body.appendChild(tt); body.appendChild(m);
+      body.addEventListener('click', function () { playTrackRow(t); });
+
+      var acts = document.createElement('div');
+      acts.className = 'acts';
+      var bPlay = document.createElement('button');
+      bPlay.className = 'small';
+      bPlay.textContent = '▶';
+      bPlay.addEventListener('click', function () { playTrackRow(t); });
+      var bAdd = document.createElement('button');
+      bAdd.className = 'small plain';
+      bAdd.textContent = '＋歌单';
+      bAdd.addEventListener('click', async function () {
+        bAdd.disabled = true;
+        try {
+          var r = await api('POST', '/import-tracks', { tracks: [t], name: '喜马拉雅单集 ' + todayStrCli() });
+          if (r.success === false) msg('❌ ' + r.error, 'err');
+          else { msg('✅ 已加进歌单《' + r.data.name + '》', 'ok'); loadImported(); }
+        } catch (e) { msg('加入失败: ' + e.message, 'err'); }
+        bAdd.disabled = false;
+      });
+      var bAlbum = document.createElement('button');
+      bAlbum.className = 'small plain';
+      bAlbum.textContent = '专辑';
+      bAlbum.disabled = !t.albumId;
+      bAlbum.addEventListener('click', function () { if (t.albumId) openDetail(t.albumId); });
+      acts.appendChild(bPlay); acts.appendChild(bAdd); acts.appendChild(bAlbum);
+
+      item.appendChild(img); item.appendChild(body); item.appendChild(acts);
+      el.appendChild(item);
+    });
+  }
+
+  $('btnMoreTracks').addEventListener('click', function () {
+    if (trackHasMore) doSearchTracks(trackKw, trackPage + 1, false);
+  });
+
+  $('btnImportAllTracks').addEventListener('click', async function () {
+    if (!trackRows.length) return;
+    if (trackRows.length > 50 && !confirm('将把这 ' + trackRows.length + ' 集加进一个新歌单，继续？')) return;
+    try {
+      var r = await api('POST', '/import-tracks', { tracks: trackRows, name: '喜马拉雅单集 ' + todayStrCli() });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('✅ 已把 ' + r.data.added + ' 集加进歌单《' + r.data.name + '》', 'ok');
+      loadImported();
+    } catch (e) { msg('加入失败: ' + e.message, 'err'); }
+  });
 
   $('btnImportSel').addEventListener('click', async function () {
     var albums = results.filter(function (a) { return selected[a.id]; });
@@ -881,6 +1119,7 @@
       $('dIntroToggle').textContent = '展开简介';
       $('dIntro').classList.remove('open');
       renderSubState(d.subscription, d.subscribed);
+      await pullAlbumProgress(cur.id);
       renderTracks(d.tracks || []);
       renderResume();
       $('dPage').textContent = '第 1 页';
@@ -1127,6 +1366,26 @@
     var sub = cur.detail && cur.detail.subscription;
     if (!sub || !sub.playlistId) { msg('该专辑还没有歌单，先导入吧', 'err'); return; }
     playPlaylist(sub.playlistId, cur.detail.name);
+  });
+
+  // 整本下载到本地音乐目录
+  function startDownload(payload, label) {
+    return api('POST', '/download', payload).then(function (r) {
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ 已开始下载' + (label ? '《' + label + '》' : '') + '，进度见「已导入」页', 'ok');
+      startPolling();
+    }).catch(function (e) { msg('下载启动失败: ' + e.message, 'err'); });
+  }
+
+  $('btnDownload').addEventListener('click', function () {
+    var d = cur.detail || {};
+    var sub = d.subscription;
+    if (!sub || !sub.playlistId) {
+      $('dDlTip').innerHTML = '<span class="err">还没有歌单，先点「导入全部」建歌单，再下载。</span>';
+      return;
+    }
+    if (!confirm('把《' + (d.name || cur.id) + '》整本下载到 Songloft 本地音乐目录？已下载过的集会跳过。')) return;
+    startDownload({ album_id: cur.id, playlist_id: sub.playlistId, name: d.name || '' }, d.name);
   });
 
   // ---------- 订阅 ----------
@@ -1492,6 +1751,14 @@
         bOpen.className = 'small plain';
         bOpen.textContent = '详情';
         bOpen.addEventListener('click', function () { openDetail(a.albumId); });
+        var bDl = document.createElement('button');
+        bDl.className = 'small plain';
+        bDl.textContent = '下载';
+        bDl.addEventListener('click', function () {
+          if (!a.playlistId) { msg('该记录没有歌单', 'err'); return; }
+          if (!confirm('把《' + a.name + '》整本下载到本地音乐目录？')) return;
+          startDownload({ playlist_id: a.playlistId, name: a.name }, a.name);
+        });
         var bDel = document.createElement('button');
         bDel.className = 'small plain';
         bDel.textContent = '删除';
@@ -1500,7 +1767,7 @@
           await api('POST', '/imported/delete', { playlist_id: a.playlistId });
           loadImported();
         });
-        ops.appendChild(bPlay); ops.appendChild(bOpen); ops.appendChild(bDel);
+        ops.appendChild(bPlay); ops.appendChild(bDl); ops.appendChild(bOpen); ops.appendChild(bDel);
         line.appendChild(body); line.appendChild(ops);
         el.appendChild(line);
       });
@@ -1547,16 +1814,175 @@
     return false;
   }
 
+  // ---------- 下载 / 播报 / 跨设备进度 渲染 ----------
+  function renderDl(j) {
+    var el = $('dlStat');
+    if (!el) return;
+    if (!j || (!j.running && !j.finishedAt)) {
+      el.className = 'muted small-txt';
+      el.textContent = '还没有下载任务。在专辑行点「下载」，就会把整本存到 Songloft 的音乐目录。';
+      return;
+    }
+    if (j.running) {
+      el.className = 'small-txt';
+      var pct = j.total ? Math.round(j.done * 100 / j.total) : 0;
+      el.innerHTML = '⏳ 正在下载《' + escHtml(j.title || '') + '》' + j.done + '/' + j.total +
+        '（' + pct + '%）· 成功 ' + j.ok + (j.fail ? ' · <span class="err">失败 ' + j.fail + '</span>' : '') +
+        (j.current ? '<br><span class="muted">当前：' + escHtml(j.current) + '</span>' : '');
+      return;
+    }
+    el.className = 'small-txt';
+    var okAll = j.total && j.ok >= j.total;
+    el.innerHTML = (okAll ? '<span class="ok">✅</span> ' : '<span class="err">⚠️</span> ') +
+      '《' + escHtml(j.title || '') + '》下载结束：成功 ' + j.ok + '/' + (j.total || 0) +
+      (j.fail ? '，失败 ' + j.fail : '') + (j.finishedAt ? '（' + escHtml(j.finishedAt) + '）' : '') +
+      (j.error ? '<br><span class="err">' + escHtml(j.error) + '</span>' : '') +
+      (j.lastPath ? '<br><span class="muted">示例路径：' + escHtml(j.lastPath) + '</span>' : '');
+  }
+
+  function renderProgStat(ps) {
+    var el = $('progStat');
+    if (!el || !ps) return;
+    el.textContent = 'NAS 上已存 ' + (ps.tracks || 0) + ' 集进度、' + (ps.albums || 0) + ' 张专辑的最后收听位置' +
+      (ps.at ? ' · 最后更新 ' + ps.at : '');
+  }
+
+  function renderTtsState(t) {
+    var el = $('ttsInfo');
+    if (!el || !t) return;
+    var c = t.cfg || {}, last = t.last || {}, dev = t.device || {};
+    var bits = [];
+    if (c.enabled) bits.push('已开启 · 每天 ' + (c.time || '07:30') + ' 播报');
+    else bits.push('未开启');
+    bits.push(dev.device_name ? ('音箱：' + dev.device_name) : '未选音箱（跟随设置）');
+    if (last.at) bits.push('上次：' + last.at + ' ' + (last.result || ''));
+    el.textContent = bits.join(' · ');
+  }
+
+  async function loadProgCfg() {
+    try {
+      var r = await api('GET', '/config');
+      var sy = (r.data && r.data.sync) || {};
+      progSyncEnabled = sy.progress !== false && sGet('xm_prog_sync') !== '0';
+      $('progSync').value = progSyncEnabled ? '1' : '0';
+      var dlc = (r.data && r.data.dl) || {};
+      $('dlDir').value = dlc.targetDir || '';
+      if ($('dlFormat')) $('dlFormat').value = dlc.format === '' ? '' : 'mp3';
+    } catch (e) { /* */ }
+  }
+
+  $('btnProgSave').addEventListener('click', async function () {
+    var on = $('progSync').value === '1';
+    try {
+      await api('POST', '/config', { sync: { progress: on } });
+      progSyncEnabled = on;
+      sSet('xm_prog_sync', on ? '1' : '0');
+      if (on) { await flushProg(); await pullRecent(); }
+      msg(on ? '✅ 已开启跨设备进度' : '已关闭跨设备进度（只存本机）', 'ok');
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  });
+
+  $('btnProgPull').addEventListener('click', async function () {
+    msg('⏳ 正在从 NAS 拉取进度…');
+    try {
+      await pullRecent();
+      var r = await api('GET', '/status');
+      renderProgStat(r.data && r.data.progressStat);
+      if (cur.id && !$('detailCard').classList.contains('hide')) {
+        await pullAlbumProgress(cur.id);
+        renderTracks(curTracks);
+        renderResume();
+      }
+      msg('✅ 已同步服务端进度', 'ok');
+    } catch (e) { msg('拉取失败: ' + e.message, 'err'); }
+  });
+
+  $('btnProgClear').addEventListener('click', async function () {
+    if (!confirm('清空 NAS 上保存的全部收听进度？（本机进度保留）')) return;
+    try {
+      await api('DELETE', '/progress?all=1');
+      msg('已清空 NAS 上的进度', 'ok');
+      var r = await api('GET', '/status');
+      renderProgStat(r.data && r.data.progressStat);
+    } catch (e) { msg('清空失败: ' + e.message, 'err'); }
+  });
+
+  $('btnDlSave').addEventListener('click', async function () {
+    try {
+      await api('POST', '/config', { dl: { targetDir: $('dlDir').value.trim(), format: $('dlFormat') ? $('dlFormat').value : 'mp3' } });
+      msg('✅ 下载目录已保存' + ($('dlDir').value.trim() ? '：' + $('dlDir').value.trim() : '（音乐库根目录）'), 'ok');
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  });
+
+  $('btnDlStop').addEventListener('click', async function () {
+    try {
+      var r = await api('POST', '/download/stop', {});
+      msg(r.success === false ? '❌ ' + r.error : (r.data.message || '已请求停止'), r.success === false ? 'err' : 'ok');
+    } catch (e) { msg('操作失败: ' + e.message, 'err'); }
+  });
+
+  async function loadTts() {
+    try {
+      var r = await api('GET', '/config');
+      var t = (r.data && r.data.tts) || {};
+      $('ttsTime').value = t.time || '07:30';
+      $('ttsEnabled').value = t.enabled ? '1' : '0';
+      $('ttsPrefix').value = t.prefix || '喜马拉雅更新提醒';
+    } catch (e) { /* */ }
+  }
+
+  $('btnTtsSave').addEventListener('click', async function () {
+    var v = $('ttsDevice').value;
+    var body = {
+      time: $('ttsTime').value || '07:30',
+      enabled: $('ttsEnabled').value === '1',
+      prefix: $('ttsPrefix').value.trim()
+    };
+    if (v) {
+      var p = v.split('|');
+      body.account_id = p[0]; body.device_id = p[1]; body.device_name = p[2];
+    } else {
+      // 选「跟随设置里的设备」：清空独立配置，运行时回落到 config.device
+      body.account_id = ''; body.device_id = ''; body.device_name = '';
+    }
+    try {
+      await api('POST', '/config', { tts: body });
+      msg('✅ 播报设置已保存', 'ok');
+      var st = await api('GET', '/status');
+      renderTtsState(st.data && st.data.tts);
+    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+  });
+
+  $('btnTtsPreview').addEventListener('click', async function () {
+    try {
+      var r = await api('GET', '/tts/preview');
+      var d = (r && r.data) || {};
+      $('ttsInfo').innerHTML = '<b>播报稿预览：</b><br>' + escHtml(d.text || '（空）') +
+        (d.hint ? '<br><span class="muted">' + escHtml(d.hint) + '</span>' : '');
+    } catch (e) { msg('预览失败: ' + e.message, 'err'); }
+  });
+
+  $('btnTtsPlay').addEventListener('click', async function () {
+    try {
+      var r = await api('POST', '/tts/run', {});
+      msg(r.success === false ? '❌ ' + r.error : '🗣️ ' + (r.data.message || '已开始播报'), r.success === false ? 'err' : 'ok');
+    } catch (e) { msg('播报失败: ' + e.message, 'err'); }
+  });
+
   async function poll() {
     try {
       var r = await api('GET', '/status');
       var d = r.data || {};
       var running = renderJob(d.job);
       if (Array.isArray(d.subs)) { subsCache = d.subs; updateSubBadge(); }
+      renderDl(d.dlJob);
+      renderProgStat(d.progressStat);
+      renderTtsState(d.tts);
       if (d.lastSync && d.lastSync.at) {
         $('lastSyncInfo').textContent = '最近同步：' + d.lastSync.at + '（' + d.lastSync.trigger + '）· ' + d.lastSync.result;
       }
-      if (!running && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      var dlBusy = d.dlJob && d.dlJob.running;
+      if (!running && !dlBusy && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     } catch (e) { /* 忽略 */ }
   }
 
@@ -1570,10 +1996,13 @@
     loadLogin();
     loadDevices();
     loadAuto();
+    loadProgCfg();
+    loadTts();
     loadSubs();
     loadImported();
     renderIdleChips();
     poll();
+    pullRecent();
   }
   // 任何初始化异常都不允许静默吞掉整个页面：把错误打到页面上
   try { boot(); } catch (e) {
