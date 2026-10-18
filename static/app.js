@@ -1294,7 +1294,22 @@
     if (!silent) sSet(SLEEP_KEY, String(v));
   }
 
-  $('pSleep').addEventListener('change', function () { applySleep(this.value, false); });
+  $('pSleep').addEventListener('change', function () {
+    // v0.18.0：自定义分钟档，睡前想睡 40 分钟这种不再迁就固定档位
+    if (this.value === 'custom') {
+      var inp = prompt('定时多少分钟后停止？（1-720）', '20');
+      if (inp === null) { this.value = '0'; applySleep('0', true); return; }
+      var min = Math.round(Number(inp));
+      if (!min || min < 1) { msg('定时已取消'); this.value = '0'; applySleep('0', true); return; }
+      min = Math.min(720, min);
+      var copt = this.querySelector('option[value="custom"]');
+      if (copt) copt.textContent = '自定义 ' + min + ' 分';
+      this.value = 'custom';
+      applySleep(String(min), false);
+      return;
+    }
+    applySleep(this.value, false);
+  });
 
   // ---------- 音量：记忆 + 播放时淡入 ----------
   var VOL_KEY = 'xm_vol';
@@ -1603,6 +1618,25 @@
   $('pBm').addEventListener('click', openBm);
   $('bmClose').addEventListener('click', closeBm);
   $('bmAddNow').addEventListener('click', addBmNow);
+  // v0.18.0：书签导出 CSV（导的是当前过滤视角下的 bmItems）
+  $('bmExport').addEventListener('click', function () {
+    if (!bmItems || !bmItems.length) { msg('还没有书签可导出', 'err'); return; }
+    var rows = [['时间', '集数', '集名', '专辑', '备注']];
+    bmItems.forEach(function (b) {
+      rows.push([
+        fmtTime(b.t || 0),
+        b.index || '',
+        String(b.title || '').replace(/"/g, '""'),
+        String(b.albumName || '').replace(/"/g, '""'),
+        String(b.note || '').replace(/"/g, '""')
+      ]);
+    });
+    var csv = '\ufeff' + rows.map(function (r) {
+      return r.map(function (c) { return '"' + c + '"'; }).join(',');
+    }).join('\r\n');
+    downloadText('书签-' + dayKey(Date.now()) + '.csv', 'text/csv;charset=utf-8', csv);
+    msg('已导出 ' + bmItems.length + ' 条书签', 'ok');
+  });
   $('bmOnlyAlbum').addEventListener('click', function () {
     bmFilterAlbum = !bmFilterAlbum;
     renderBm();
@@ -1785,7 +1819,8 @@
   function renderTimeline() {
     var box = $('tlBody');
     if (!box) return;
-    api('GET', '/history?days=' + tlDays).then(function (r) {
+    var kw = ($('tlKw') && $('tlKw').value.trim()) || '';
+    api('GET', '/history?days=' + tlDays + (kw ? '&kw=' + encodeURIComponent(kw) : '')).then(function (r) {
       var groups = (r && r.data && r.data.groups) || [];
       box.innerHTML = '';
       if (!groups.length) {
@@ -1845,6 +1880,14 @@
     });
   });
   if ($('btnTlRefresh')) $('btnTlRefresh').addEventListener('click', renderTimeline);
+  // v0.18.0：历史按书名/集名过滤，输入停 400ms 自动刷
+  if ($('tlKw')) {
+    var tlKwTimer = null;
+    $('tlKw').addEventListener('input', function () {
+      if (tlKwTimer) clearTimeout(tlKwTimer);
+      tlKwTimer = setTimeout(renderTimeline, 400);
+    });
+  }
 
 
   // 快捷键：空格 播放/暂停，← → 前后 10 秒，B 打书签，A 复读，Esc 逐层收起
@@ -3120,6 +3163,7 @@
 
   // ---------- 收听报告 ----------
   var rpPeriod = 'week';
+  var lastReport = null;   // v0.18.0：最近一次报告数据，供导出
 
   function fmtHM(sec) {
     var n = Math.round(Number(sec) || 0);
@@ -3141,6 +3185,7 @@
       var r = await api('GET', '/report?period=' + rpPeriod);
       if (r.success === false) { el.innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
       var d = r.data || {};
+      lastReport = d;   // 缓存给导出用
       var html = '';
       html += '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px;">';
       html += '<div class="stat"><div class="sv">' + esc(fmtHM(d.sec)) + '</div><div class="sl">' + esc(d.label) + '收听</div></div>';
@@ -3201,6 +3246,27 @@
       await api('POST', '/report/reset', {});
       msg('统计已清空');
       loadReport(rpPeriod);
+    });
+    // v0.18.0：报告导出 Markdown
+    $('btnRpExport').addEventListener('click', function () {
+      if (!lastReport) { msg('先点「本周 / 本月 / 累计」出一份报告再导出', 'err'); return; }
+      var d = lastReport;
+      var md = '# 收听报告（' + (d.label || rpPeriod) + '）\n\n';
+      md += '- 总收听：' + fmtHM(d.sec) + '\n';
+      md += '- 收听天数：' + (d.days || 0) + '\n';
+      md += '- 听完集数：' + (d.finished || 0) + '\n';
+      md += '- 日均：' + fmtHM(d.avgSec) + '\n\n';
+      md += d.text ? (d.text + '\n\n') : '';
+      if (d.top && d.top.length) {
+        md += '## 听得最多\n\n| 专辑 | 时长 |\n|---|---|\n';
+        d.top.forEach(function (a) { md += '| ' + String(a.name || '').replace(/\|/g, '\\|') + ' | ' + fmtHM(a.sec) + ' |\n'; });
+      }
+      if (d.daily && d.daily.length) {
+        md += '\n## 每日时长\n\n| 日期 | 时长 |\n|---|---|\n';
+        d.daily.forEach(function (x) { md += '| ' + x.day + ' | ' + fmtHM(x.sec) + ' |\n'; });
+      }
+      downloadText('收听报告-' + rpPeriod + '-' + dayKey(Date.now()) + '.md', 'text/markdown;charset=utf-8', md);
+      msg('报告已导出', 'ok');
     });
   }
 
@@ -3388,7 +3454,28 @@
       $('jobText').textContent = (j && j.error ? '❌ ' : '✅ ') +
         ((j && (j.title || j.current)) || '任务') + (j && j.error ? '：' + j.error : ' 完成') +
         (j && j.total ? '（' + j.done + '/' + j.total + ' 集）' : '');
-      setTimeout(function () { if (!jobActive) $('jobBar').classList.remove('show'); }, 5000);
+      // v0.18.0：有写入失败时直接给个重试按钮，不用重导整本
+      var oldRetry = $('jobRetry'); if (oldRetry) oldRetry.remove();
+      if (j && j.error && /写入失败/.test(j.error) && (j.failedTracks || []).length) {
+        var rbtn = document.createElement('button');
+        rbtn.className = 'small plain'; rbtn.id = 'jobRetry';
+        rbtn.style.marginLeft = '8px'; rbtn.style.flexShrink = '0';
+        rbtn.textContent = '↻ 重试 ' + j.failedTracks.length + ' 个失败集';
+        rbtn.addEventListener('click', async function () {
+          rbtn.disabled = true; rbtn.textContent = '重试中…';
+          try {
+            var rr = await api('POST', '/import/retry', {});
+            var dd = (rr && rr.data) || {};
+            if (rr.success === false) msg('❌ ' + rr.error, 'err');
+            else if (!dd.added) msg('没有需要重试的集');
+            else msg('已补上 ' + dd.added + ' 集' + (dd.left ? '，仍有 ' + dd.left + ' 集失败' : '，全部补齐 🎉'), dd.left ? 'err' : 'ok');
+            loadImported();
+          } catch (e) { msg('重试失败: ' + e.message, 'err'); }
+          var me = $('jobRetry'); if (me) me.remove();
+        });
+        $('jobBar').appendChild(rbtn);
+      }
+      setTimeout(function () { if (!jobActive) { $('jobBar').classList.remove('show'); var jr = $('jobRetry'); if (jr) jr.remove(); } }, canRetry ? 20000 : 5000);
       loadImported();
       loadSubs();
     }
@@ -4162,6 +4249,15 @@
     if (slv && slv !== '0') {
       var opt = $('pSleep').querySelector('option[value="' + slv + '"]');
       if (opt) { $('pSleep').value = slv; applySleep(slv, true); }
+      else if (Number(slv) > 0) {
+        // 自定义分钟档（v0.18.0）：不在固定选项里，回填到「自定义」
+        var copt = $('pSleep').querySelector('option[value="custom"]');
+        if (copt) {
+          copt.textContent = '自定义 ' + slv + ' 分';
+          $('pSleep').value = 'custom';
+          applySleep(slv, true);
+        }
+      }
     }
     loadSearchHistory();
     loadLogs();
