@@ -169,12 +169,10 @@
       if (btn.dataset.tab === 'subs') {
         loadSubs();
         if (!meLoaded) loadMySubs(false);
-        loadWatch();
-        loadCalendar();
         loadGroups();
       }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
-      if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
+      if (btn.dataset.tab === 'subs') { poll(); }
       if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); loadSpState(); }
     });
   });
@@ -3962,103 +3960,6 @@
     });
   }
 
-  // ---------- 关键词追更 ----------
-  async function loadWatch() {
-    var list = $('wList');
-    if (!list) return;
-    try {
-      var r = await api('GET', '/watch');
-      var d = r.data || {};
-      var cfg = d.cfg || {};
-      var items = d.items || [];
-      var job = d.job || {};
-      if ($('wEnabled')) $('wEnabled').value = cfg.enabled ? '1' : '0';
-      if ($('wPush')) $('wPush').value = cfg.pushDevice ? '1' : '0';
-      if ($('wTime') && cfg.time) $('wTime').value = cfg.time;
-      if ($('wMaxNew') && cfg.maxNew) $('wMaxNew').value = cfg.maxNew;
-
-      list.innerHTML = '';
-      if (!items.length) {
-        list.innerHTML = '<span class="muted small-txt">还没有关键词。加一个，比如「郭德纲」。</span>';
-      }
-      items.forEach(function (it) {
-        var line = document.createElement('div');
-        line.className = 'line';
-        var body = document.createElement('div');
-        body.className = 'body';
-        var n = document.createElement('div');
-        n.className = 'n';
-        n.textContent = it.kw;
-        var s2 = document.createElement('div');
-        s2.className = 's';
-        var bits = ['每次导最近 ' + (it.maxNew || 10) + ' 集'];
-        if (it.lastRunAt) bits.push('上次 ' + it.lastRunAt);
-        if (it.lastAdded) bits.push('新增 ' + it.lastAdded + ' 集');
-        if (it.lastError) bits.push('⚠️ ' + it.lastError);
-        s2.textContent = bits.join(' · ');
-        body.appendChild(n); body.appendChild(s2);
-
-        var ops = document.createElement('div');
-        ops.className = 'ops';
-        var bDel = document.createElement('button');
-        bDel.className = 'small plain';
-        bDel.textContent = '删除';
-        bDel.addEventListener('click', async function () {
-          if (!confirm('删除关键词「' + it.kw + '」？（已建好的歌单保留）')) return;
-          await api('POST', '/watch', { remove: it.id });
-          loadWatch();
-        });
-        ops.appendChild(bDel);
-        line.appendChild(body); line.appendChild(ops);
-        list.appendChild(line);
-      });
-
-      var info = [];
-      if (job.running) info.push('⏳ ' + (job.msg || '追更中'));
-      else if (job.msg) info.push('上次：' + job.msg + (job.at ? '（' + job.at + '）' : ''));
-      if (cfg.lastRunDate) info.push('今天已跑过');
-      if ($('wInfo')) {
-        $('wInfo').innerHTML = (info.length ? info.map(esc).join(' · ') + '<br />' : '') +
-          '不用逐张订阅：定时搜这个关键词，把新出现的专辑自动建成歌单（只取最近 N 集）。';
-      }
-    } catch (e) {
-      list.innerHTML = '<span class="err">加载失败: ' + esc(e.message) + '</span>';
-    }
-  }
-
-  if ($('btnWAdd')) {
-    $('btnWAdd').addEventListener('click', async function () {
-      var kw = $('wKw').value.trim();
-      if (!kw) { msg('先填一个关键词', 'err'); return; }
-      await api('POST', '/watch', { add: { kw: kw, maxNew: Number($('wMaxNew').value) || 10 } });
-      $('wKw').value = '';
-      msg('已添加关键词「' + kw + '」', 'ok');
-      loadWatch();
-    });
-    $('wKw').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('btnWAdd').click(); });
-
-    $('btnWSave').addEventListener('click', async function () {
-      await api('POST', '/watch', {
-        cfg: {
-          enabled: $('wEnabled').value === '1',
-          pushDevice: $('wPush').value === '1',
-          time: $('wTime').value || '08:30',
-          maxNew: Number($('wMaxNew').value) || 10
-        }
-      });
-      msg('✅ 追更设置已保存', 'ok');
-      loadWatch();
-    });
-
-    $('btnWRun').addEventListener('click', async function () {
-      var r = await api('POST', '/watch/run', {});
-      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('⏳ 追更已开始，稍等几十秒刷新看结果');
-      setTimeout(loadWatch, 4000);
-      setTimeout(loadWatch, 15000);
-    });
-  }
-
   // ---------- 已导入 ----------
   async function loadImported() {
     var el = $('importedList');
@@ -4330,56 +4231,6 @@
     });
   }
 
-  async function loadTts() {
-    try {
-      var r = await api('GET', '/config');
-      var t = (r.data && r.data.tts) || {};
-      $('ttsTime').value = t.time || '07:30';
-      $('ttsEnabled').value = t.enabled ? '1' : '0';
-      $('ttsPrefix').value = t.prefix || '喜马拉雅更新提醒';
-      if ($('ttsPlayAfter')) $('ttsPlayAfter').value = t.playAfter ? '1' : '0';
-    } catch (e) { /* */ }
-  }
-
-  $('btnTtsSave').addEventListener('click', async function () {
-    var v = $('ttsDevice').value;
-    var body = {
-      time: $('ttsTime').value || '07:30',
-      enabled: $('ttsEnabled').value === '1',
-      prefix: $('ttsPrefix').value.trim(),
-      playAfter: $('ttsPlayAfter') ? $('ttsPlayAfter').value === '1' : false
-    };
-    if (v) {
-      var p = v.split('|');
-      body.account_id = p[0]; body.device_id = p[1]; body.device_name = p[2];
-    } else {
-      // 选「跟随设置里的设备」：清空独立配置，运行时回落到 config.device
-      body.account_id = ''; body.device_id = ''; body.device_name = '';
-    }
-    try {
-      await api('POST', '/config', { tts: body });
-      msg('✅ 播报设置已保存', 'ok');
-      var st = await api('GET', '/status');
-      renderTtsState(st.data && st.data.tts);
-    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
-  });
-
-  $('btnTtsPreview').addEventListener('click', async function () {
-    try {
-      var r = await api('GET', '/tts/preview');
-      var d = (r && r.data) || {};
-      $('ttsInfo').innerHTML = '<b>播报稿预览：</b><br>' + escHtml(d.text || '（空）') +
-        (d.hint ? '<br><span class="muted">' + escHtml(d.hint) + '</span>' : '');
-    } catch (e) { msg('预览失败: ' + e.message, 'err'); }
-  });
-
-  $('btnTtsPlay').addEventListener('click', async function () {
-    try {
-      var r = await api('POST', '/tts/run', {});
-      msg(r.success === false ? '❌ ' + r.error : '🗣️ ' + (r.data.message || '已开始播报'), r.success === false ? 'err' : 'ok');
-    } catch (e) { msg('播报失败: ' + e.message, 'err'); }
-  });
-
   async function poll() {
     try {
       var r = await api('GET', '/status');
@@ -4525,96 +4376,6 @@
     } catch (e) { /* 静默 */ }
   }
 
-  // ---------- 追更日历 ----------
-  function calBar(pct, color) {
-    var w = Math.max(2, Math.min(100, Math.round(pct)));
-    return '<span class="calbar"><i style="width:' + w + '%;background:' + (color || 'var(--accent)') + '"></i></span>';
-  }
-
-  async function loadCalendar() {
-    var box = $('calBody');
-    if (!box) return;
-    box.innerHTML = '<div class="muted small-txt">算着呢…</div>';
-    try {
-      var r = await api('GET', '/subs/calendar');
-      if (!r || r.success === false) { box.innerHTML = '<span class="err">' + escHtml((r && r.error) || '读取失败') + '</span>'; return; }
-      var d = r.data || {};
-      renderCalendar(d, box);
-      if ($('calStat')) {
-        $('calStat').textContent = d.total
-          ? ('订阅 ' + d.total + ' 本，其中 ' + d.dated + ' 本能看出更新日期' + (d.noDate ? '，' + d.noDate + ' 本没有日期' : ''))
-          : '还没有订阅，先去上面「读取我的订阅」。';
-      }
-    } catch (e) {
-      box.innerHTML = '<span class="err">失败：' + escHtml(e.message) + '</span>';
-    }
-  }
-
-  function renderCalendar(d, box) {
-    box.innerHTML = '';
-    if (!d || !d.total) { box.innerHTML = '<div class="muted small-txt">—</div>'; return; }
-
-    // 一句话结论
-    if (d.tip) {
-      var tip = document.createElement('div');
-      tip.className = 'muted small-txt';
-      tip.style.marginBottom = '8px';
-      tip.textContent = '💡 ' + d.tip;
-      box.appendChild(tip);
-    }
-
-    // 分档
-    var maxB = 1;
-    (d.buckets || []).forEach(function (b) { if (b.count > maxB) maxB = b.count; });
-    var colors = { today: '#16a34a', week: '#22c55e', month: '#3b82f6', quarter: '#f59e0b', old: '#ef4444' };
-    (d.buckets || []).forEach(function (b) {
-      if (!b.count) return;
-      var row = document.createElement('div');
-      row.className = 'calrow';
-      row.innerHTML = '<span class="calname">' + escHtml(b.name) + '</span>' +
-        calBar(b.count / maxB * 100, colors[b.key]) +
-        '<span class="calnum">' + b.count + ' 本</span>';
-      box.appendChild(row);
-    });
-
-    // 周几
-    var dow = d.dow || [];
-    var maxD = 1;
-    dow.forEach(function (x) { if (x.count > maxD) maxD = x.count; });
-    if (dow.some(function (x) { return x.count; })) {
-      var h = document.createElement('div');
-      h.className = 'muted small-txt';
-      h.style.margin = '10px 0 4px';
-      h.textContent = '哪几天更新扎堆';
-      box.appendChild(h);
-      var grid = document.createElement('div');
-      grid.className = 'dowgrid';
-      dow.forEach(function (x) {
-        var cell = document.createElement('div');
-        cell.className = 'dowcell' + (x.count >= maxD && maxD > 0 ? ' hot' : '');
-        cell.innerHTML = '<b>' + x.count + '</b><span>' + escHtml(x.name.replace('周', '')) + '</span>';
-        grid.appendChild(cell);
-      });
-      box.appendChild(grid);
-    }
-
-    // 该考虑取关的
-    if (d.stale && d.stale.length) {
-      var h2 = document.createElement('div');
-      h2.className = 'muted small-txt';
-      h2.style.margin = '10px 0 4px';
-      h2.textContent = '超过三个月没更新（可能完结了，也可能该取关）';
-      box.appendChild(h2);
-      d.stale.slice(0, 6).forEach(function (x) {
-        var row = document.createElement('div');
-        row.className = 'calrow';
-        row.innerHTML = '<span class="calname" title="' + escHtml(x.name) + '">' + escHtml(x.name) + '</span>' +
-          '<span class="calnum stale">' + x.days + ' 天前</span>';
-        box.appendChild(row);
-      });
-    }
-  }
-
   // ---------- 订阅分组 ----------
   var grpBy = 'cat';
   var grpSel = {};
@@ -4706,7 +4467,6 @@
   if ($('grpByStatus')) $('grpByStatus').addEventListener('click', function () { setGrpBy('status'); });
   if ($('grpByAnchor')) $('grpByAnchor').addEventListener('click', function () { setGrpBy('anchor'); });
   if ($('btnGrpLoad')) $('btnGrpLoad').addEventListener('click', loadGroups);
-  if ($('btnCalLoad')) $('btnCalLoad').addEventListener('click', loadCalendar);
   if ($('btnGrpUnsub')) {
     $('btnGrpUnsub').addEventListener('click', async function () {
       var ids = Object.keys(grpSel).filter(function (k) { return grpSel[k]; });
@@ -4727,7 +4487,6 @@
     loadSpState();
     loadAuto();
     loadProgCfg();
-    loadTts();
     loadSubs();
     loadImported();
     renderIdleChips();
