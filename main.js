@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.18.0';
+var VERSION = '0.18.1';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -495,6 +495,7 @@ function mapTrack(t, albumName) {
     title: t.trackName || ('第' + t.index + '集'),
     album: t.albumName || albumName || '',
     duration: t.duration || 0,
+    updatedAt: String(t.updateTime || t.createTime || '').trim(),
     cover: t.trackCoverPath ? ('https://imagev2.xmcdn.com/' + t.trackCoverPath) : ''
   };
 }
