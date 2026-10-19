@@ -3423,9 +3423,9 @@
         bDel.className = 'small plain';
         bDel.textContent = '删除';
         bDel.addEventListener('click', async function () {
-          if (!confirm('删除歌单《' + a.name + '》及其导入记录？')) return;
-          // v0.18.5：歌曲库条目删不删，用户自己选——确定=连歌曲一起删，取消=只删歌单
-          var delSongs = confirm('是否同时删除歌曲库里的这 ' + (a.count || '') + ' 条歌曲？\n\n「确定」= 连歌曲库条目一起删（不可恢复）\n「取消」= 只删歌单，歌曲库条目保留');
+          // v0.18.6：两步选择——第一步确认删歌单（说明下一步会问曲库），第二步选曲库条目删不删
+          if (!confirm('删除歌单《' + a.name + '》及其导入记录？\n\n（下一步会问你是否连歌曲库条目一起删）')) return;
+          var delSongs = confirm('歌曲库里的这 ' + (a.count || '') + ' 条歌曲要一起删吗？\n\n「确定」= 连歌曲库条目一起删（不可恢复）\n「取消」= 只删歌单，歌曲库条目保留');
           try {
             var r = await api('POST', '/imported/delete', { playlist_id: a.playlistId, delete_songs: delSongs });
             var dd = (r && r.data) || {};
