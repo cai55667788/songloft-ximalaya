@@ -115,6 +115,7 @@
     .pager2 { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
     .pager2 input { width: 68px; flex: 0 0 auto; text-align: center; padding: 6px 8px; }
     .pager2 input#dFilter { width: 96px; text-align: left; }
+    #dSpeaker { width: auto; max-width: 200px; padding: 5px 8px; font-size: 13px; }
     /* v0.19.3：跳转模式切换（页 / 集） */
     #dJumpMode.on { border-color: var(--accent); color: var(--accent); }
     /* 跳集后短暂高亮目标集，一眼看到落在哪 */
@@ -424,7 +425,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.20.3</span>
+    <span class="ver" id="ver">v0.20.4</span>
   </div>
 
   <div class="tabs">
@@ -566,10 +567,10 @@
       <div class="btns">
         <button class="small" id="btnImportDetail">导入全部</button>
         <button class="small ghost" id="btnSub">订阅并跟进更新</button>
+        <select id="dSpeaker" title="这次「音箱播放」用哪台音箱；「跟随设置」= 设置页里选的那台"></select>
         <button class="small plain" id="btnPlayAll">▶ 音箱播放</button>
         <button class="small plain" id="btnDownload">⬇ 下载到本地</button>
-        <button class="small plain" id="btnSplit" title="按收听进度把这本书拆成「已听 / 未听」两个歌单">✂ 拆已听/未听</button>
-      </div>
+              </div>
       <div id="dHl" class="hide" style="margin-top:10px;"></div>
       <div class="muted small-txt" id="dDlTip" style="margin-top:6px;"></div>
       <div class="row" style="margin-top:10px;">
@@ -1004,6 +1005,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.20.3"></script>
+<script src="static/app.js?v=0.20.4"></script>
 </body>
 </html>
