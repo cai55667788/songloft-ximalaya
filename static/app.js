@@ -787,7 +787,7 @@
     var list = readRecent();
     el.innerHTML = '';
     if (!list.length) {
-      $('recentStat').textContent = '还没有收听记录。搜一张专辑点开，随便听一集就会出现在这里。';
+      $('recentStat').textContent = '还没有收听记录。在上面搜一张专辑点开，随便听一集就会出现在这里。';
       return;
     }
     var unfinished = list.filter(function (r) { return !r.finished; }).length;
@@ -2706,14 +2706,14 @@
     // v0.20.0：从「继续听」点进来的，返回时要回到继续听，而不是回到上次的搜索结果
     cur.fromListen = !!fromListen;
     var aid = String(albumId);
-    // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去，并记住来源以便返回
+    // 详情卡片在「发现」页内，从其它 tab 点进来要先切过去，并记住来源以便返回
     var activeTab = document.querySelector('.tab.active');
     if (!activeTab || activeTab.getAttribute('data-tab') !== 'search') {
       cur.fromTab = activeTab ? activeTab.getAttribute('data-tab') : 'search';
       document.querySelector('.tab[data-tab="search"]').click();
     }
     var TAB_NAME = { search: '发现', subs: '订阅', lib: '已导入', set: '设置' };
-    $('btnBack').textContent = '← 返回' + (TAB_NAME[cur.fromTab || 'search'] || '搜索');
+    $('btnBack').textContent = '← 返回' + (TAB_NAME[cur.fromTab || 'search'] || '发现');
     cur.id = String(albumId);
     cur.page = 1;
     $('searchCard').classList.add('hide');
