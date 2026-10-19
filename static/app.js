@@ -2606,10 +2606,20 @@
       var tt = document.createElement('span');
       tt.className = 'tt';
       tt.textContent = t.title;
+      tt.title = t.title;   // 悬停 / 长按可看完整标题
       var du = document.createElement('span');
       du.className = 'du';
       du.textContent = fmtDur(t.duration);
       d.appendChild(no); d.appendChild(tt);
+
+      // v0.18.1：每集的更新时间（接口给的是月精度，如 2025-04）
+      if (t.updatedAt) {
+        var tu = document.createElement('span');
+        tu.className = 'tu';
+        tu.textContent = t.updatedAt;
+        tu.title = '更新时间';
+        d.appendChild(tu);
+      }
 
       var pos = getPos(t.trackId);
       if (pos && pos.t) {
