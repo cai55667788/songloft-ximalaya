@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.18.1';
+var VERSION = '0.18.2';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -488,6 +488,26 @@ async function fetchAlbumOutline(albumId) {
   return data;
 }
 
+// updateTime 有两种格式：'2025-04' 或相对时间（'23天前' / '10小时前' / '3个月前' / '昨天'…）。
+// 统一归一化成 'YYYY-MM'，分集列表才不会一会儿 2026-09 一会儿 23天前。
+function normMonth(s) {
+  s = String(s || '').trim();
+  var m = s.match(/^(\d{4})-(\d{1,2})/);
+  if (m) return m[1] + '-' + (m[2].length < 2 ? '0' + m[2] : m[2]);
+  var r = s.match(/^(\d+)\s*(小时|天|日|周|个?月|年)前/);
+  var now = new Date();
+  var mm = function (d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); };
+  if (/今天/.test(s)) return mm(now);
+  if (/昨天/.test(s)) return mm(new Date(Date.now() - 86400000));
+  if (r) {
+    var n = Number(r[1]), u = r[2];
+    if (u === '小时') return mm(now);
+    var days = u === '天' || u === '日' ? n : u === '周' ? n * 7 : u === '年' ? n * 365 : n * 30;
+    return mm(new Date(Date.now() - days * 86400000));
+  }
+  return s;   // 认不出的格式原样返回，不硬造日期
+}
+
 function mapTrack(t, albumName) {
   return {
     index: t.index,
@@ -495,7 +515,7 @@ function mapTrack(t, albumName) {
     title: t.trackName || ('第' + t.index + '集'),
     album: t.albumName || albumName || '',
     duration: t.duration || 0,
-    updatedAt: String(t.updateTime || t.createTime || '').trim(),
+    updatedAt: normMonth(t.updateTime || t.createTime || ''),
     cover: t.trackCoverPath ? ('https://imagev2.xmcdn.com/' + t.trackCoverPath) : ''
   };
 }
