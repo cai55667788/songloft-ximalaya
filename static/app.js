@@ -420,11 +420,15 @@
   }
 
   $('audio').addEventListener('playing', function () { lastTickAt = Date.now(); });
+  // v0.18.7：切集/换源时清掉计时基准，否则新旧源的间隔会被算进收听时长
+  $('audio').addEventListener('loadedmetadata', function () { lastTickAt = 0; });
   $('audio').addEventListener('timeupdate', function () {
     if (this.paused) return;
     var now = Date.now();
     if (lastTickAt && now - lastTickAt > 0 && now - lastTickAt < 3000) {
-      listenedAcc += (now - lastTickAt) / 1000;
+      // v0.18.7：按音频实际推进时长计（1.5 倍速听 60 秒音频只算 60 秒，不是 90 秒）
+      var rate = this.playbackRate || 1;
+      listenedAcc += (now - lastTickAt) / 1000 * (rate > 0 ? rate : 1);
     }
     lastTickAt = now;
     // 每积累 60 秒落一次本地，防止页面被关掉丢太多
@@ -3496,6 +3500,9 @@
         });
         $('jobBar').appendChild(rbtn);
       }
+      // v0.18.7：原来这里引用了未声明的 canRetry → 任务结束时抛 ReferenceError，
+      // 导致下面的 loadImported/loadSubs 不执行、进度条不收起、重试按钮不消失。
+      var canRetry = !!(j && j.error && /写入失败/.test(j.error) && (j.failedTracks || []).length);
       setTimeout(function () { if (!jobActive) { $('jobBar').classList.remove('show'); var jr = $('jobRetry'); if (jr) jr.remove(); } }, canRetry ? 20000 : 5000);
       loadImported();
       loadSubs();
