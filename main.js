@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.18.2';
+var VERSION = '0.18.3';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -3012,14 +3012,29 @@ async function runSelfCheck(deep) {
   }
 
   // 6 音箱
+  // v0.18.3：改用 /mina/devices 探测——miot 插件 2026.10.17 版之后
+  // POST /mina/status 会 404，导致自检误报「设备无响应」，其实音箱一直在线。
   var dev = config.device || {};
   if (!dev.account_id || !dev.device_id) add('miot', '小爱音箱', 'warn', '未绑定设备，语音播报与语音控制不可用');
   else {
+    var found = null;
     try {
-      var st0 = await miotPost('/mina/status', { account_id: dev.account_id, device_id: dev.device_id });
-      add('miot', '小爱音箱', st0.ok ? 'ok' : 'warn', st0.ok ? ((dev.device_name || '设备') + ' 可访问') : '设备无响应（可稍后重试）');
-    } catch (e) {
-      add('miot', '小爱音箱', 'warn', '调用失败：' + String(e && e.message || e));
+      var dl = await miotGet('/mina/devices');
+      var arr = (dl.data && dl.data.data) || [];
+      arr.forEach(function (a) {
+        (a.devices || []).forEach(function (x) { if (x.deviceID === dev.device_id) found = x; });
+      });
+    } catch (e) { /* 走下面的兜底探测 */ }
+    if (found) {
+      add('miot', '小爱音箱', found.presence === 'offline' ? 'warn' : 'ok',
+        (found.name || dev.device_name || '设备') + (found.presence === 'online' ? ' 在线' : ' 离线（可稍后重试）'));
+    } else {
+      try {
+        var st0 = await miotPost('/mina/status', { account_id: dev.account_id, device_id: dev.device_id });
+        add('miot', '小爱音箱', st0.ok ? 'ok' : 'warn', st0.ok ? ((dev.device_name || '设备') + ' 可访问') : '设备列表里找不到已绑定的设备（可到设置页重新绑定）');
+      } catch (e) {
+        add('miot', '小爱音箱', 'warn', '调用失败：' + String(e && e.message || e));
+      }
     }
   }
 
