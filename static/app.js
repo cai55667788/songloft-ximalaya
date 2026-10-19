@@ -555,6 +555,16 @@
 
   var curPlayingId = '';  // 已成功加载音频的集，避免切集瞬间把旧进度写到新集
 
+  // v0.21.1：详情列表里标出「正在播」的集（轻量 toggle，不重绘列表、不动滚动位置）
+  function markPlayingRow() {
+    var box = $('dTracks');
+    if (!box || !box.children) return;
+    Array.prototype.forEach.call(box.children, function (el) {
+      if (!el.classList || !el.classList.contains('trk')) return;
+      el.classList.toggle('on', !!curPlayingId && el.getAttribute('data-tid') === String(curPlayingId));
+    });
+  }
+
   function savePos(trackId, time, dur) {
     if (!trackId || !dur || dur < 30) return;
     if (!curPlayingId || String(curPlayingId) !== String(trackId)) return;
@@ -988,6 +998,7 @@
     var my = ++playSeq;
     qi = idx;
     curPlayingId = '';
+    markPlayingRow();
     var t = queue[idx];
     var label = (t.index ? t.index + '. ' : '') + t.title;
     var alb = [];
@@ -1233,6 +1244,7 @@
     }
     pendingSeek = null;
     if (qi >= 0 && queue[qi]) curPlayingId = queue[qi].trackId;
+    markPlayingRow();
     updateProg();
     abRestore();
     if (fpOpen) syncFull(true);
@@ -1784,6 +1796,7 @@
     qi = -1;
     queue = [];
     curPlayingId = '';
+    markPlayingRow();
     abReset(true);
     closeFull();
     closeBm();
@@ -2993,6 +3006,7 @@
       d.className = 'trk';
       d.setAttribute('data-tid', String(t.trackId || ''));
       d.setAttribute('data-idx', String(t.index || ''));
+      if (String(t.trackId) === String(curPlayingId)) d.classList.add('on');   // v0.21.1：正在播的集高亮
       // v0.18.4：仿喜马拉雅 App——封面缩略图 + 标题/元信息 + 右侧播放
       var cv = document.createElement('img');
       cv.className = 'cv';
