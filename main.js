@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.18.6';
+var VERSION = '0.18.7';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -1588,7 +1588,9 @@ function bmAdd(raw) {
   if (!b) return { ok: false, error: '书签缺集号' };
   for (var i = 0; i < bookmarks.length; i++) {
     var x = bookmarks[i];
-    if (String(x.trackId) === b.trackId && Math.abs((Number(x.t) || 0) - b.t) <= 3) {
+    // v0.18.7：同集 ±3 秒只合并「都没写备注」的重复点击；
+    // 带了备注说明用户是刻意在附近再记一条，不能静默吞掉。
+    if (String(x.trackId) === b.trackId && Math.abs((Number(x.t) || 0) - b.t) <= 3 && !(b.note && x.note)) {
       if (b.note) x.note = b.note;
       x.at = Date.now();
       persistBookmarks();
@@ -1625,12 +1627,20 @@ async function persistBookmarks() {
 function histAdd(raw) {
   var h = normBookmark(raw);   // 字段与书签一致，复用归一化
   if (!h) return false;
-  var last = history[0];
-  if (last && String(last.trackId) === h.trackId && Date.now() - (Number(last.at) || 0) < 600 * 1000) {
-    last.at = Date.now();
-    last.t = Math.max(Number(last.t) || 0, h.t);
-    persistHistory();
-    return true;
+  // v0.18.7：不只看 history[0]——多设备交替听时（A 听 5 集、B 听 6 集、A 又回 5 集）
+  // 只在队头比较会插出重复条目，时间线把同一段收听展示两遍。
+  // 改成在「同集且 10 分钟内」的最近一条上合并。
+  var nowTs = Date.now();
+  for (var i = 0; i < history.length && i < 20; i++) {
+    var it = history[i];
+    if (String(it.trackId) === h.trackId && nowTs - (Number(it.at) || 0) < 600 * 1000) {
+      it.at = nowTs;
+      it.t = Math.max(Number(it.t) || 0, h.t);
+      // 挪回队头，保持「最近在前」
+      if (i > 0) { history.splice(i, 1); history.unshift(it); }
+      persistHistory();
+      return true;
+    }
   }
   h.id = 'h' + Date.now().toString(36);
   history.unshift(h);
@@ -1778,6 +1788,7 @@ function stampAuthor(tracks, author, albumName) {
 async function addTracksToPlaylist(playlistId, tracks, onProgress) {
   var added = 0, failed = 0;
   var failedTracks = [];   // v0.18.0：记下写入失败的具体集，支持一键重试
+  var maxOkIndex = 0;      // v0.18.7：成功写入的最大集号，用来算增量同步该从哪补
   for (var i = 0; i < tracks.length; i += BATCH) {
     var slice = tracks.slice(i, i + BATCH);
     try {
@@ -1786,6 +1797,9 @@ async function addTracksToPlaylist(playlistId, tracks, onProgress) {
       if (ids.length) {
         var r = await songloft.playlists.addSongs(playlistId, ids);
         added += (r && typeof r.added === 'number') ? r.added : ids.length;
+        var sliceMax = 0;
+        slice.forEach(function (t) { var ix = Number(t.index) || 0; if (ix > sliceMax) sliceMax = ix; });
+        if (sliceMax > maxOkIndex) maxOkIndex = sliceMax;
       }
     } catch (e) {
       failed += slice.length;
@@ -1794,7 +1808,7 @@ async function addTracksToPlaylist(playlistId, tracks, onProgress) {
     }
     if (onProgress) onProgress(slice.length);
   }
-  return { added: added, failed: failed, failedTracks: failedTracks };
+  return { added: added, failed: failed, failedTracks: failedTracks, lastIndex: maxOkIndex };
 }
 
 // ---------- 导入 ----------
@@ -1912,14 +1926,24 @@ async function runImportMulti(items, mode, mergedName) {
           job.done += n;
           persist().catch(function () { });
         });
+        // v0.18.7：记下本专辑实际写入成功数，供「待听清单是否划掉」判断
+        part.added = res.added;
+        part.count = fetched.tracks.length;
         if (res.failedTracks && res.failedTracks.length) {
           // 多专辑模式下失败集挂在 job 上统一重试（歌单可能不止一个，retry 只补最后一个失败歌单）
           job.failedTracks = (job.failedTracks || []).concat(res.failedTracks).slice(0, 200);
           job.retryPlaylistId = pl.id;
+          // v0.18.7：写入有失败时标记到 part.error，避免待听清单把这本「划掉」却其实没导进去
+          part.error = res.added
+            ? (res.failedTracks.length + ' 集写入失败')
+            : ('全部 ' + res.failedTracks.length + ' 集写入失败');
         }
 
-        var lastIdx = 0;
-        fetched.tracks.forEach(function (t) { if (t.index > lastIdx) lastIdx = t.index; });
+        // v0.18.7：lastIndex 只在「全部写入成功」时才推进到最大集号；
+        // 否则取本批成功写入的最大集号，保证下次增量同步能把漏掉的集补回来。
+        var maxIdx = 0;
+        fetched.tracks.forEach(function (t) { if (t.index > maxIdx) maxIdx = t.index; });
+        var lastIdx = (res.added && res.added === fetched.tracks.length) ? maxIdx : (res.lastIndex || 0);
 
         imported.unshift({
           albumId: String(it.id),
@@ -1953,7 +1977,13 @@ async function runImportMulti(items, mode, mergedName) {
     // 从待听清单来的：导完就出清单，成功的才清
     try {
       var okIds = [];
-      (job.parts || []).forEach(function (p) { if (!p.error) okIds.push(String(p.albumId)); });
+      (job.parts || []).forEach(function (p) {
+        // v0.18.7：必须真导进去了才划掉——原来只看 p.error，写入失败不抛异常，
+        // 会导致「清单划掉了但书没导进去」，用户以为已经处理过。
+        var cnt = Number(p.count) || 0;
+        var got = Number(p.added !== undefined ? p.added : cnt) || 0;
+        if (!p.error && got > 0 && got >= cnt) okIds.push(String(p.albumId));
+      });
       var dropped = todoDrop(okIds);
       if (dropped) songloft.log.info('[喜马拉雅] 待听清单已划掉 ' + dropped + ' 张专辑');
     } catch (e) { /* */ }
@@ -1989,6 +2019,16 @@ async function syncOne(sub, opts) {
       sub.updateDate = detail.updateDate;
     }
 
+    // v0.18.7：先补上次写入失败的集，再拉新集
+    if (opts.import && sub.playlistId && (sub.pendingTracks || []).length) {
+      var pend = sub.pendingTracks.slice();
+      stampAuthor(pend, sub.author, sub.name);
+      var pr2 = await addTracksToPlaylist(sub.playlistId, pend);
+      out.added += pr2.added;
+      sub.pendingTracks = pr2.failedTracks || [];
+      if (pr2.added) songloft.log.info('[喜马拉雅] 补上上次失败的 ' + pr2.added + ' 集：《' + (sub.name || sub.albumId) + '》');
+    }
+
     var r = await fetchNewTracks(sub.albumId, sub.lastIndex || 0);
     out.newCount = r.tracks.length;
     out.titles = r.tracks.map(function (t) { return t.index + '. ' + t.title; });
@@ -2002,6 +2042,14 @@ async function syncOne(sub, opts) {
       out.added = res.added;
       sub.lastIndex = r.lastIndex;
       sub.songCount = (Number(sub.songCount) || 0) + res.added;
+      // v0.18.7：写入失败的集挂到 sub 上，下次同步会先补这批（不能只靠 lastIndex 推进）
+      if (res.failedTracks && res.failedTracks.length) {
+        sub.pendingTracks = (sub.pendingTracks || []).concat(res.failedTracks).slice(-300);
+        out.error = res.failedTracks.length + ' 集写入失败，下次同步自动补';
+        songloft.log.warn('[喜马拉雅]《' + (sub.name || sub.albumId) + '》' + out.error);
+      } else {
+        sub.pendingTracks = [];
+      }
       sub.newCount = 0;
       sub.newTitles = [];
       sub.lastImportAt = nowStr();
@@ -2234,7 +2282,11 @@ async function tick() {
       if (!res.spoken) songloft.log.warn('[喜马拉雅] 播报未发出: ' + res.error);
       return;
     }
-    songloft.log.warn('[喜马拉雅] 定时播报已开启但没有选音箱，已跳过');
+    // v0.18.7：没选音箱也要标记「今天已提醒」，否则 tick 每 60 秒刷一条警告，
+    // 几分钟就把 100 条日志缓冲刷满，真正有用的错误全被挤掉。
+    songloft.log.warn('[喜马拉雅] 定时播报已开启但没有选音箱，今天跳过（次日再提醒）');
+    t.lastRunDate = today;
+    await persist();
   }
 
   // 定时自动同步
@@ -2248,8 +2300,18 @@ async function tick() {
   if (wc.enabled && watch.items.length && wc.lastRunDate !== today) {
     var at = String(wc.time || (config.auto && config.auto.time) || '08:30');
     if (now < at) return;
+    // v0.18.7：上次因任务占用没跑成时，等 1 小时再试，避免每分钟都去撞
+    if (wc.lastTryAt && (Date.now() - (new Date(String(wc.lastTryAt).replace(' ', 'T')).getTime() || 0)) < 3600000) return;
     songloft.log.info('[喜马拉雅] 触发关键词追更，共 ' + watch.items.length + ' 个关键词');
     var wr = await runWatchAll({ speak: !!wc.pushDevice });
+    // v0.18.7：任务被并发占用（返回 ok:false）时不能标记今天已跑，
+    // 否则当天定时追更被吞掉，用户以为追过了其实一集没拉。
+    if (wr && wr.ok === false) {
+      songloft.log.warn('[喜马拉雅] 定时追更未执行（' + (wr.message || '任务占用中') + '），1 小时后再试');
+      wc.lastTryAt = nowStr();
+      await persist();
+      return;
+    }
     wc.lastRunDate = today;
     wc.lastResultAt = nowStr();
     wc.lastAdded = wr.added || 0;
@@ -4061,13 +4123,12 @@ async function handleHTTPRequest(req) {
     var pid = Number(b4.playlist_id || b4.playlistId || q.playlist_id || q.pid) || 0;
     // v0.18.5：可选连歌曲库条目一起删（默认保留，由用户在前端选择）
     var delSongs = !!(b4.delete_songs || b4.deleteSongs);
-    var songDeleted = 0, songFailed = 0;
+    var songDeleted = 0, songFailed = 0, songTotal = 0;
     if (delSongs && pid) {
       try {
         var dhost = (await songloft.plugin.getHostUrl() || '').replace(/\/+$/, '');
         var dtok = await songloft.plugin.getToken();
-        // v0.18.5：宿主 /playlists/{id}/songs 默认只返回 20 条，必须翻页收全，
-        // 否则几百首的歌单只删掉前 20 首，剩下全成孤儿留在曲库里。
+        // v0.18.5：宿主默认只返回 20 条，必须翻页收全，否则几百首的歌单只删掉前 20 首。
         var plList = [], plOff = 0, plPage = 200;
         for (var pg = 0; pg < 200; pg++) {
           var plRaw = await songloft.playlists.getSongs(pid, { limit: plPage, offset: plOff });
@@ -4079,23 +4140,46 @@ async function handleHTTPRequest(req) {
           if (plTotal && plList.length >= plTotal) break;
           plOff += plBatch.length;
         }
-        for (var si = 0; si < plList.length; si++) {
-          var sg = plList[si];
+        songTotal = plList.length;
+        // v0.18.7：先把歌单和本地记录删掉（很快），再清曲库——否则几百首串行 DELETE
+        // 必然撞上宿主 ~60s 超时，歌单没删成、记录还在，用户以为删除失败，实际歌已被删了一部分。
+        try { await songloft.playlists.delete(pid); } catch (e) { /* 歌单可能已删 */ }
+        imported = imported.filter(function (x) { return x.playlistId !== pid; });
+        subs = subs.filter(function (s) { return s.playlistId !== pid; });
+        await persist();
+
+        // 并发 6 条删除，控住总耗时也控住宿主压力
+        var ids = [];
+        plList.forEach(function (sg) {
           var sgid = sg && (sg.id || sg.songId);
-          if (!sgid) continue;
+          if (sgid) ids.push(sgid);
+        });
+        var CONC = 6;
+        var delOne = async function (sgid) {
           try {
             var dresp = await fetchT(dhost + '/api/v1/songs/' + sgid,
               { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + dtok } }, 15);
-            if (dresp.ok) songDeleted++; else songFailed++;
+            // v0.18.7：宿主对「歌曲不存在」会返回 500 record not found，这不算失败
+            if (dresp.ok) songDeleted++;
+            else {
+              var ebody = '';
+              try { ebody = await dresp.text(); } catch (e2) { ebody = ''; }
+              if (/not found|不存在|record not found/i.test(ebody) || dresp.status === 404) songDeleted++;
+              else songFailed++;
+            }
           } catch (e) { songFailed++; }
+        };
+        for (var ci = 0; ci < ids.length; ci += CONC) {
+          await Promise.all(ids.slice(ci, ci + CONC).map(delOne));
         }
-        songloft.log.info('[喜马拉雅] 删除歌曲库条目: 成功 ' + songDeleted + '，失败 ' + songFailed + '（歌单共 ' + plList.length + ' 首）');
+        songloft.log.info('[喜马拉雅] 删除歌曲库条目: 成功 ' + songDeleted + '，失败 ' + songFailed + '（歌单共 ' + songTotal + ' 首）');
         if (songFailed > 0) songloft.log.warn('[喜马拉雅] 有 ' + songFailed + ' 首歌曲库条目删除失败，可在曲库中手动清理');
+        return jsonResp({ success: true, data: { songDeleted: songDeleted, songFailed: songFailed, songTotal: songTotal } });
       } catch (e) {
-        songFailed = songFailed || -1;
-        songloft.log.warn('[喜马拉雅] 读取歌内歌曲失败，歌曲库条目未删: ' + String(e));
+        songloft.log.warn('[喜马拉雅] 清曲库出错: ' + String(e));
       }
     }
+    // 不走 delSongs 的正常路径（或上面出错后兜底）：确保歌单和记录都清掉
     try { if (pid) await songloft.playlists.delete(pid); } catch (e) { /* 歌单可能已删 */ }
     imported = imported.filter(function (x) { return x.playlistId !== pid; });
     subs = subs.filter(function (s) { return s.playlistId !== pid; });
