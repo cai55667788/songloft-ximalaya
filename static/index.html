@@ -525,6 +525,59 @@
       * { animation: none !important; transition: none !important; }
       html { scroll-behavior: auto; }
     }
+
+    /* ========== v0.21.1 易用性打磨（继续级联覆盖） ========== */
+    /* 「继续听」分段条整体成底座，选中项淡红 */
+    .lsnBar { background: var(--card); border: 1px solid var(--border-soft); border-radius: 999px; padding: 4px 6px; box-shadow: var(--shadow-card); }
+    .lsnBar .lsnSeg { border-color: transparent; background: transparent; }
+    .lsnBar .lsnSeg.on { background: var(--accent-soft); }
+    /* 顶栏滚动后出现投影（滚动驱动动画，不支持的内核自动跳过） */
+    @supports (animation-timeline: scroll()) {
+      .hdr::after {
+        content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 10px;
+        background: linear-gradient(rgba(16,24,40,.10), transparent);
+        opacity: 0; pointer-events: none;
+        animation: hdrsh linear both; animation-timeline: scroll(root); animation-range: 0 90px;
+      }
+      @keyframes hdrsh { to { opacity: 1; } }
+    }
+    /* 页签切换淡入 */
+    section[id^="tab-"]:not(.hide) { animation: secIn .22s ease; }
+    @keyframes secIn { from { opacity: .35; transform: translateY(5px); } }
+    /* 下拉框统一自定义箭头，与按钮等高 */
+    select {
+      -webkit-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px;
+    }
+    @media (prefers-color-scheme: dark) {
+      select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239aa1ad' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+    }
+    #dSpeaker { min-height: 34px; }
+    /* 详情头更醒目 */
+    .dhead img { border-radius: 14px; box-shadow: 0 6px 18px rgba(0,0,0,.14); }
+    .dhead .name { font-size: 17px; }
+    /* 分页区与列表分隔 */
+    .pager { padding-top: 10px; margin-top: 12px; border-top: 1px dashed var(--border-soft); }
+    .pager2 { margin-top: 8px; }
+    /* 消息条进度填充渐变 */
+    #jobBar .fill { background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #ff8fab)); border-radius: 3px; }
+    /* 全屏播放页顶部光晕 */
+    #fullPlayer {
+      background:
+        radial-gradient(560px 300px at 50% -60px, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+        var(--bg);
+    }
+    /* 空态 / 载入文案居中成块 */
+    .card span.muted:only-child { display: block; text-align: center; padding: 16px 6px; }
+    /* 搜索结果封面 */
+    .res-item img { border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.10); }
+    /* 正在播的集 */
+    .trk.on { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .trk.on .tt { color: var(--accent); font-weight: 600; }
+    /* 热词 chip 按压反馈 */
+    .chip { transition: transform .06s ease, color .15s ease, border-color .15s ease, background .15s ease; }
+    .chip:active { transform: scale(.95); }
 </style>
 </head>
 <body>
@@ -532,7 +585,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.21.0</span>
+    <span class="ver" id="ver">v0.21.1</span>
   </div>
 
   <div class="tabs">
@@ -1113,6 +1166,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.21.0"></script>
+<script src="static/app.js?v=0.21.1"></script>
 </body>
 </html>
