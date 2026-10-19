@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.20.2';
+var VERSION = '0.20.3';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -1177,6 +1177,27 @@ async function loadAll() {
 
   // v0.17.0 起不再有 AI，旧配置里的 ai 段直接丢掉
   if (config.ai) delete config.ai;
+
+  // v0.20.3：关键词追更 / 定时语音播报的界面已经下线，但旧配置里可能还开着。
+  // 留着的话后台仍会到点自动导入、往音箱推声音，而用户已经找不到开关——
+  // 等于「悄悄替你做事」。这里一次性强制关掉，并写一条日志说明。
+  var mutedJobs = [];
+  if (config.tts && config.tts.enabled) {
+    config.tts.enabled = false;
+    mutedJobs.push('定时语音播报');
+  }
+  if (config.watch && config.watch.enabled) {
+    config.watch.enabled = false;
+    mutedJobs.push('关键词追更');
+  }
+  if (mutedJobs.length) {
+    // 只写 config 这一个 key：此时 loadAll 还没读完，调 persist() 会把尚未加载的
+    // 书签/历史等空数组覆盖回存储，等于清空数据。
+    try { await songloft.storage.set(CFG_KEY, JSON.stringify(config)); } catch (e) { /* */ }
+    // 两处都记：插件日志（设置页能看）与宿主日志（排查用）
+    logInfo('config', '以下定时任务已随界面下线自动关闭：' + mutedJobs.join('、'));
+    songloft.log.info('[喜马拉雅] 以下定时任务已随界面下线自动关闭：' + mutedJobs.join('、'));
+  }
 
   if (!login || typeof login.cookie !== 'string') login = { cookie: '', savedAt: '' };
   if (!Array.isArray(subs)) subs = [];
