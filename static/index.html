@@ -438,7 +438,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.20.0</span>
+    <span class="ver" id="ver">v0.20.1</span>
   </div>
 
   <div class="tabs">
@@ -495,7 +495,7 @@
       <button class="small plain lsnSeg on" data-seg="recent" title="按专辑看听到哪了，一键继续">🎧 继续听</button>
       <button class="small plain lsnSeg" data-seg="tl" title="逐条记录听了哪一集、什么时候">🕒 历史</button>
       <button class="small plain lsnSeg" data-seg="dash" title="每天几点听、听多久">📈 习惯</button>
-      <button class="small plain lsnSeg" data-seg="rp" title="按周/月/累计的收听统计">📊 报告</button>
+      <button class="small plain lsnSeg" data-seg="rp" title="今日 / 本周 / 累计听了多少，听了哪些">📊 播放统计</button>
     </div>
     <div class="card" id="lsn-recent">
       <h2>🎧 最近收听</h2>
@@ -529,7 +529,8 @@
       </div>
     </div>
     <div class="card hide" id="lsn-rp">
-      <h2>📊 收听报告</h2>
+      <h2>📊 播放统计</h2>
+      <div id="rpOverview" class="muted small-txt" style="display:none;gap:14px;flex-wrap:wrap;margin-bottom:12px;"></div>
       <div class="btns">
         <button class="small plain rpBtn" data-period="week">本周</button>
         <button class="small plain rpBtn" data-period="month">本月</button>
@@ -538,7 +539,7 @@
         <button class="small plain" id="btnRpExport" title="把当前报告存成 Markdown 文件">⬇ 导出 MD</button>
       </div>
       <div id="rpBody" style="margin-top:12px;">
-        <div class="muted small-txt">点上面的「本周 / 本月 / 累计」看统计。</div>
+        <div class="muted small-txt">下面按「本周 / 本月 / 累计」出明细。</div>
       </div>
       <div class="btns" style="margin-top:10px;">
         <button class="small ghost" id="btnRpReset">清空统计</button>
@@ -657,31 +658,6 @@
         <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
       </div>
       <div id="grpBody" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>📋 待听清单 <span id="todoBadge" class="muted small-txt"></span></h2>
-      <div class="muted small-txt" id="todoStat">清单是空的。搜到想听又不想马上导入的，点「＋待听」丢进来。</div>
-      <div class="row" style="margin-top:8px;">
-        <div><label>导入时的书单名（可空，默认按日期）</label><input type="text" id="todoPlName" placeholder="如：通勤路上听" /></div>
-      </div>
-      <div class="btns">
-        <label class="muted small-txt" style="margin:0;display:flex;align-items:center;gap:6px;">
-          <input type="checkbox" id="btnTodoAll" style="accent-color:var(--accent)" /> 全选
-        </label>
-        <button class="small" id="btnTodoImport">勾选的合成一个书单</button>
-        <button class="small plain" id="btnTodoClear">清空</button>
-      </div>
-      <div id="todoBody" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>🎙 按主播追更</h2>
-      <div class="muted small-txt" id="anchorStat">点「刷新」按钮，把订阅/导入里出现过的主播聚起来，一次看他还有什么书。</div>
-      <div class="btns">
-        <button class="small plain" id="btnAnchorRefresh">刷新</button>
-      </div>
-      <div id="anchorBody" style="margin-top:8px;"></div>
     </div>
 
     <div class="card">
@@ -1098,6 +1074,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.20.0"></script>
+<script src="static/app.js?v=0.20.1"></script>
 </body>
 </html>
