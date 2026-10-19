@@ -578,6 +578,54 @@
     /* 热词 chip 按压反馈 */
     .chip { transition: transform .06s ease, color .15s ease, border-color .15s ease, background .15s ease; }
     .chip:active { transform: scale(.95); }
+
+    /* ========== v0.21.4 播放界面打磨 ========== */
+    /* 全屏播放页：更沉浸的封面与排版 */
+    #fullPlayer .fpwrap { padding: 14px 20px 30px; gap: 14px; }
+    #fullPlayer .fphead .fptitle { font-size: 12px; letter-spacing: .02em; }
+    #fullPlayer .fpcover img {
+      width: 84%; max-width: 340px; border-radius: 24px;
+      box-shadow: 0 14px 40px rgba(0,0,0,.20), 0 0 0 8px color-mix(in srgb, var(--accent) 6%, transparent);
+    }
+    #fullPlayer .fpname { font-size: 19px; line-height: 1.45; padding: 0 4px; }
+    #fullPlayer .fpmeta { margin-top: -8px; }
+    #fullPlayer .fpprog { margin-top: 4px; }
+    #fullPlayer .fpprog input[type=range] { height: 26px; }
+    #fullPlayer .fptime { font-size: 12px; margin-top: 0; }
+    /* 控制按钮：更大更好按 */
+    #fullPlayer .fpctrl { gap: 30px; margin-top: 6px; }
+    #fullPlayer .fpctrl .fpbig {
+      width: 72px; height: 72px; font-size: 28px;
+      box-shadow: 0 8px 22px rgba(164,19,60,.34);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    #fullPlayer .fpctrl .fpbig:active { transform: scale(.93); }
+    #fullPlayer .fpctrl button:not(.fpbig) {
+      width: 46px; height: 46px; padding: 0; border-radius: 50%;
+      font-size: 16px; display: inline-flex; align-items: center; justify-content: center;
+    }
+    /* 工具行：底座化 + 元素等高 */
+    #fullPlayer .fpbar {
+      background: var(--card); border: 1px solid var(--border-soft); border-radius: 14px;
+      padding: 10px 12px; gap: 10px; margin-top: 8px; box-shadow: var(--shadow-card);
+    }
+    #fullPlayer .fpbar button, #fullPlayer .fpbar select { min-height: 32px; }
+    #fullPlayer .fpbar #fpRate { width: 110px; }
+    #fullPlayer .fpbar #fpRateNum { min-width: 48px; font-size: 12px; }
+    /* 底部播放条：标题加重、按钮更好按、关闭钮加大 */
+    #player .ptitle { font-weight: 600; }
+    #player .inner { gap: 12px; }
+    #player .pbar button { min-height: 26px; border-radius: 8px; }
+    #player .pbar .psep { background: var(--border-soft); }
+    #player .x {
+      width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 50%; font-size: 17px;
+    }
+    #player .x:hover { background: var(--accent-soft); color: var(--accent); }
+    @media (max-width: 560px) {
+      #fullPlayer .fpcover img { width: 88%; }
+      #fullPlayer .fpctrl { gap: 26px; }
+    }
 </style>
 </head>
 <body>
@@ -585,7 +633,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.21.3</span>
+    <span class="ver" id="ver">v0.21.4</span>
   </div>
 
   <div class="tabs">
@@ -1173,6 +1221,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.21.3"></script>
+<script src="static/app.js?v=0.21.4"></script>
 </body>
 </html>
