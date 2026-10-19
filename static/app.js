@@ -454,6 +454,8 @@
   // ---------- 播放器（续播 / 连播 / 倍速 / 睡眠定时） ----------
   var queue = [];        // [{trackId, index, title, albumId, albumName}]
   var qi = -1;
+  // v0.19.2：队列来源页。跨页连播要用「队列拉到哪一页」，不能读详情页当前翻到哪一页
+  var queueMeta = { albumId: '', page: 1, hasMore: true };
   var pendingSeek = null;
   var RATE_KEY = 'xm_rate';
   function posKey(id) { return 'xm_pos_' + id; }
@@ -541,7 +543,15 @@
 
   function queueProg(item) {
     if (!progSyncEnabled || !item || !item.trackId) return;
-    progQueue = progQueue.filter(function (x) { return String(x.trackId) !== String(item.trackId); });
+    // v0.19.2：同一集的待上报项要**累加收听秒数**，不能直接替换。
+    // savePos 每 5 秒上报一次、flushProg 每 8 秒 flush，一个窗口里必然有一次替换，
+    // 被替换掉的那段秒数就永久丢了（10 秒只记到 5 秒，收听报告稳定少算）。
+    var old = null;
+    progQueue = progQueue.filter(function (x) {
+      if (String(x.trackId) === String(item.trackId)) { old = x; return false; }
+      return true;
+    });
+    if (old) item.listened = (Number(old.listened) || 0) + (Number(item.listened) || 0);
     progQueue.push(item);
     if (progQueue.length > 40) progQueue = progQueue.slice(-40);
     if (progTimer) return;
@@ -565,8 +575,11 @@
     if (progTimer) { clearTimeout(progTimer); progTimer = null; }
     if (!progQueue.length) return;
     var items = progQueue.slice(0, 50);
-    progQueue = [];
-    try { await api('POST', '/progress', { items: items }); } catch (e) { /* 离线时忽略，下次再传 */ }
+    try {
+      await api('POST', '/progress', { items: items });
+      // v0.19.2：发送成功后才从队列移除；原来先清空再发，请求一失败这批进度就没了
+      progQueue = progQueue.filter(function (x) { return items.indexOf(x) < 0; });
+    } catch (e) { /* 离线时保留在队列里，下次 queueProg 再冲 */ }
   }
 
   // 打开专辑时把服务端进度合并进本机（服务端更新则覆盖本机）
@@ -871,8 +884,13 @@
     renderResume();
   }
 
-  async function playAt(idx, retry) {
+  // v0.19.2：请求序号。连点两集时网络返回顺序不定，谁后返回谁抢到 src，
+  // 但 qi 已经被最后一次点击改掉 → 音频和 qi 错位，进度会写进别的集。
+  var playSeq = 0;
+
+  async function playAt(idx, retry, seekT) {
     if (idx < 0 || idx >= queue.length) return;
+    var my = ++playSeq;
     qi = idx;
     curPlayingId = '';
     var t = queue[idx];
@@ -889,12 +907,14 @@
     $('pTitle').textContent = '载入中… ' + label;
     try {
       var r = await api('GET', '/track/' + t.trackId + '/url');
+      if (my !== playSeq) return;   // 期间用户又点了别的集，这次结果作废
       if (!r || r.success === false) {
         // 拿不到地址：自动再试一次（接口抖动很常见），还不行才报错
         if (!retry) {
           $('pTitle').textContent = '重试中… ' + label;
           await new Promise(function (res) { setTimeout(res, 800); });
-          return playAt(idx, true);
+          if (my !== playSeq) return;
+          return playAt(idx, true, seekT);
         }
         $('pTitle').textContent = '❌ ' + ((r && r.error) || '取不到播放地址');
         reportUiError('播放地址获取失败 ' + t.trackId + '：' + ((r && r.error) || ''));
@@ -905,7 +925,9 @@
       a.src = r.data.url;
       $('pTitle').textContent = label + (r.data.local ? ' · 📁 本地' : '');
       a.playbackRate = Number(sGet(RATE_KEY) || 1) || 1;
-      pendingSeek = getPos(t.trackId);
+      // v0.19.2：书签/时间线点「从这里听」时必须用指定的时间点。
+      // 原来无条件改成 getPos()，把调用方刚设好的 pendingSeek 冲掉，书签跳转从来没生效过。
+      pendingSeek = (seekT != null) ? { t: Number(seekT) || 0 } : getPos(t.trackId);
       a.play().catch(function () { /* 浏览器要求先有用户交互 */ });
       mediaSync();
       driveSync();
@@ -913,13 +935,14 @@
       if ($('pQueue')) $('pQueue').textContent = '☰ ' + (idx + 1) + '/' + queue.length;
       if (typeof renderQueue === 'function' && qPanelOpen()) renderQueue();
     } catch (e) {
-      if (!retry) { return playAt(idx, true); }
+      if (my !== playSeq) return;
+      if (!retry) { return playAt(idx, true, seekT); }
       $('pTitle').textContent = '试听失败: ' + e.message;
       reportUiError('播放失败 ' + t.trackId + '：' + e.message);
     }
   }
 
-  function playQueue(list, idx, album) {
+  function playQueue(list, idx, album, seekT) {
     queue = sortByOrder((list || []).map(function (t) {
       return {
         trackId: t.trackId, index: t.index, title: t.title,
@@ -929,7 +952,9 @@
       };
     }));
     if (idx < 0) idx = 0;
-    playAt(idx);
+    // v0.19.2：队列自己记住来源页，跨页连播不能看详情页当前翻到哪一页
+    queueMeta = { albumId: (album && album.id) || '', page: (album && album.page) || cur.page || 1, hasMore: true };
+    playAt(idx, false, seekT);
   }
 
   // ---------- 锁屏 / 通知栏 / 耳机线控 ----------
@@ -1161,7 +1186,9 @@
     var seen = {};
     queue.forEach(function (x) { seen[String(x.trackId)] = 1; });
     var lastIdx = Number(c.index) || 0;
-    var page = cur.page || 1;
+    // v0.19.2：用队列自己的页码。原来读 cur.page（详情页当前翻到哪页），
+    // 边听边往后翻标题时，播完会直接跳到「下一页的下一页」，中间一整页被跳过。
+    var page = Number(queueMeta.page) || cur.page || 1;
     var desc = playOrder === 'desc';
 
     try {
@@ -1188,14 +1215,15 @@
       }
 
       // ② 当前页听完了，翻下一页（倒序时翻上一页）
-      if (desc ? page <= 1 : !cur.hasMore) return false;
+      if (desc ? page <= 1 : !queueMeta.hasMore) return false;
       var p = desc ? page - 1 : page + 1;
       var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
       if (!r || r.success === false) return false;
       var more = (r.data && r.data.tracks) || [];
       if (!more.length) return false;
-      cur.page = p;
-      cur.hasMore = !!r.data.hasMore;
+      var uiOnThisPage = (Number(cur.page) === p);   // 用户界面正好停在这一页才跟着刷新
+      queueMeta.page = p;
+      queueMeta.hasMore = !!r.data.hasMore;
       more.forEach(function (t) {
         queue.push({
           trackId: t.trackId, index: t.index, title: t.title,
@@ -1203,7 +1231,10 @@
         });
       });
       if (desc) { queue = sortByOrder(queue); qi = indexOfTrack(queue, c.trackId); }
-      if (!$('detailCard').classList.contains('hide')) {
+      // v0.19.2：只有界面本来就在这一页才重绘，否则会把用户正在看的那页顶掉
+      if (uiOnThisPage && !$('detailCard').classList.contains('hide')) {
+        cur.page = p;
+        cur.hasMore = !!r.data.hasMore;
         renderTracks(more);
         // v0.19.0：别在这里手改按钮 disabled，统一交给 syncPageBtns 判（它知道总页数）
         syncPageBtns();
@@ -1223,18 +1254,21 @@
   $('audio').addEventListener('ended', async function () {
     var a = this;
     if (qi >= 0) savePos(queue[qi].trackId, a.duration, a.duration);
-    // 单集循环优先：直接从头再放这一集
-    if (loopOne && qi >= 0) {
-      try { a.currentTime = 0; a.play(); } catch (e) { /* */ }
-      skipDone = {};
-      renderQueue();
-      return;
-    }
+    // v0.19.2：「本集播完」要排在单集循环前面。
+    // 原来 loopOne 先 return，开着 🔂 单集时睡眠定时整夜不生效（睡前场景正好会同时开这两个）。
     if (sleepMode === 'end') {
       sleepMode = 'off';
+      sSet(SLEEP_KEY, '0');          // 停过就别再记忆，否则下次打开又停一次
       $('pSleep').value = '0';
       $('pSleepTip').textContent = '已按「本集播完」停止';
       a.pause();
+      renderQueue();
+      return;
+    }
+    // 单集循环：直接从头再放这一集
+    if (loopOne && qi >= 0) {
+      try { a.currentTime = 0; a.play(); } catch (e) { /* */ }
+      skipDone = {};
       renderQueue();
       return;
     }
@@ -1408,7 +1442,12 @@
     sleepMode = 'off';
     var min = Number(v) || 0;
     sleepAt = min ? Date.now() + min * 60000 : 0;
-    if (!min) { $('pSleepTip').textContent = ''; return; }
+    if (!min) {
+      $('pSleepTip').textContent = '';
+      // v0.19.2：关掉也要落盘，否则下次打开会读回上次的分钟数自动开始倒计时
+      if (!silent) sSet(SLEEP_KEY, '0');
+      return;
+    }
     $('pSleepTip').textContent = '剩 ' + min + ':00';
     sleepTimer = setInterval(function () {
       var left = sleepAt - Date.now();
@@ -1432,9 +1471,11 @@
     // v0.18.0：自定义分钟档，睡前想睡 40 分钟这种不再迁就固定档位
     if (this.value === 'custom') {
       var inp = prompt('定时多少分钟后停止？（1-720）', '20');
-      if (inp === null) { this.value = '0'; applySleep('0', true); return; }
+      // v0.19.2：取消时也要落盘成 '0'。原来 silent=true 不写 localStorage，
+      // 下次打开页面会读回上次的分钟数并自动开始倒计时。
+      if (inp === null) { this.value = '0'; applySleep('0', false); return; }
       var min = Math.round(Number(inp));
-      if (!min || min < 1) { msg('定时已取消'); this.value = '0'; applySleep('0', true); return; }
+      if (!min || min < 1) { msg('定时已取消'); this.value = '0'; applySleep('0', false); return; }
       min = Math.min(720, min);
       var copt = this.querySelector('option[value="custom"]');
       if (copt) copt.textContent = '自定义 ' + min + ' 分';
@@ -1709,9 +1750,9 @@
       msg('跳到 ' + fmtTime(b.t));
       return;
     }
-    pendingSeek = { t: Number(b.t) || 0 };
+    // v0.19.2：时间点要透传进 playQueue —— 直接设 pendingSeek 会被 playAt 里的 getPos() 冲掉
     playQueue([{ trackId: b.trackId, index: b.index, title: b.title, albumId: b.albumId, albumName: b.albumName, cover: b.cover }], 0,
-      { id: b.albumId, name: b.albumName, cover: b.cover });
+      { id: b.albumId, name: b.albumName, cover: b.cover }, Number(b.t) || 0);
     closeBm();
   }
 
@@ -1811,6 +1852,7 @@
       abA = t; abB = 0; abEnabled = false;
       msg('🅰 起点 ' + fmtTime(t) + '，听到终点再点一次', 'ok');
       abTip();
+      abPersist();   // v0.19.2：原来设完从不落盘，切集/重载后复读点就丢了
       return;
     }
     if (!abB) {
@@ -1819,6 +1861,7 @@
       msg('🔁 开始复读 ' + fmtTime(abA) + ' - ' + fmtTime(abB), 'ok');
       a.currentTime = abA;
       abTip();
+      abPersist();
       return;
     }
     abReset(false);
@@ -1988,9 +2031,9 @@
           s.textContent = bits.join(' · ');
           b.appendChild(n); b.appendChild(s);
           b.addEventListener('click', function () {
-            pendingSeek = { t: Number(it.t) || 0 };
+            // v0.19.2：时间点透传，否则会被 playAt 里的 getPos() 覆盖
             playQueue([{ trackId: it.trackId, index: it.index, title: it.title, albumId: it.albumId, albumName: it.albumName, cover: it.cover }], 0,
-              { id: it.albumId, name: it.albumName, cover: it.cover });
+              { id: it.albumId, name: it.albumName, cover: it.cover }, Number(it.t) || 0);
           });
           row.appendChild(tm); row.appendChild(b);
           box.appendChild(row);
@@ -2843,12 +2886,16 @@
       for (var i = 0; i < curTracks.length; i++) {
         if (Number(curTracks[i].index) === Number(curLast.index) + step) { nIdx = i; break; }
       }
-      curLast._next = nIdx;
+      // v0.19.2：存 trackId 而不是数组下标。
+      // 下标绑定的是当时的 curTracks，翻页或切顺序后数组变了，点「接着听」会播成同下标的另一集。
+      curLast._nextId = nIdx >= 0 ? String(curTracks[nIdx].trackId) : '';
+      curLast._nextIdx = curTracks[nIdx] ? curTracks[nIdx].index : 0;
       $('btnResume').textContent = nIdx >= 0
         ? '▶ 接着听 第 ' + curTracks[nIdx].index + ' 集'
         : '▶ 重听 第 ' + (curLast.index || '?') + ' 集（已听完）';
     } else {
-      curLast._next = -1;
+      curLast._nextId = '';
+      curLast._nextIdx = 0;
       $('btnResume').textContent = '▶ 继续听 第 ' + (curLast.index || '?') + ' 集（' + fmtTime(curLast.t || 0) + '）';
     }
   }
@@ -2859,7 +2906,13 @@
       if (curTracks.length) playQueue(curTracks, 0, album);
       return;
     }
-    if (curLast._next >= 0) { playQueue(curTracks, curLast._next, album); return; }
+    if (curLast._nextId) {
+      var ni = indexOfTrack(curTracks, curLast._nextId);
+      if (ni >= 0) { playQueue(curTracks, ni, album); return; }
+      // 下一集不在当前页了（翻到别的页）：单独播它，进度照常续上
+      playQueue([{ trackId: curLast._nextId, index: curLast._nextIdx, title: '第 ' + curLast._nextIdx + ' 集' }], 0, album);
+      return;
+    }
     for (var i = 0; i < curTracks.length; i++) {
       if (String(curTracks[i].trackId) === String(curLast.trackId)) { playQueue(curTracks, i, album); return; }
     }
@@ -2937,19 +2990,26 @@
     return cur.lastPage || 0;
   }
 
+  // v0.19.2：翻页请求序号。连点两下按钮时 cur.page 还没变，
+  // 第二次点击会算出同一个页码（等于没点）；两次请求乱序返回还会渲染错页。
+  var pageSeq = 0;
+
   async function gotoPage(p, opts) {
     opts = opts || {};
     p = Math.floor(Number(p) || 0);
     if (!p || p < 1) return;
+    var my = ++pageSeq;
     // 用户手输页码时先拿到总页数，越界就夹到边界并说明，而不是傻乎乎请求一个空页
     var clipped = false;
     if (opts.jump) {
       var tot = await ensureLastPage();
+      if (my !== pageSeq) return;
       if (tot && p > tot) { p = tot; clipped = true; }
     }
     $('dTracks').innerHTML = '<span class="muted">载入中…</span>';
     try {
       var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
+      if (my !== pageSeq) return;   // 又点了别的页，这次结果作废
       if (r.success === false) { $('dTracks').textContent = '加载失败: ' + r.error; return; }
       var list = (r.data && r.data.tracks) || [];
       // 空页兜底：接口页码比实际页数大时，回退到上一个有效页
@@ -2961,13 +3021,15 @@
       cur.hasMore = !!(r.data && r.data.hasMore);
       renderTracks(list);
       await ensureLastPage();
+      if (my !== pageSeq) return;
       jumpDirty = false;
       syncPageBtns();
+      renderResume();
       if (opts.jump) {
         if (clipped) msg('总共只有 ' + tot + ' 页，已跳到第 ' + p + ' 页');
         else msg('已跳到第 ' + p + ' 页' + (cur.lastPage ? ' / ' + cur.lastPage : ''));
       }
-    } catch (e) { $('dTracks').textContent = '加载失败: ' + e.message; }
+    } catch (e) { if (my === pageSeq) $('dTracks').textContent = '加载失败: ' + e.message; }
   }
 
   // v0.19.0：按钮语义 = 集数方向（与正序倒序无关）。
@@ -3225,6 +3287,9 @@
       var ck = document.createElement('input');
       ck.type = 'checkbox';
       ck.className = 'ck';
+      // v0.19.2：加载更多会整表重建，勾选状态必须回填。
+      // 原来不回填 → 界面全空着但 meSel 还留着，「导入所选」作用到看不见的专辑。
+      ck.checked = !!meSel[a.id];
       ck.addEventListener('change', function () { meSel[a.id] = ck.checked; meUpdateSel(); });
 
       var img = document.createElement('img');
@@ -3709,6 +3774,10 @@
 
   function renderJob(j) {
     if (j && j.running) {
+      // v0.19.2：任务进行中必须确保轮询在跑。
+      // 原来只在导入按钮里 startPolling，页面在导入途中被刷新时 boot() 只调一次 poll，
+      // 看到 running 就显示进度条但定时器是空的 → 进度条永久卡住、msg() 也不再自动收起。
+      if (!pollTimer) pollTimer = setInterval(poll, 2500);
       jobActive = true;
       $('jobBar').classList.add('show');
       var pct = j.total ? Math.round(j.done * 100 / j.total) : 0;
@@ -3724,7 +3793,8 @@
     }
     if (jobActive) {
       jobActive = false;
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      // v0.19.2：定时器的生命周期只在 poll() 末尾统一管（它还会看下载任务是否在跑）。
+      // 这里原来无条件清掉，会把同时在进行的下载进度也停更。
       $('jobFill').style.width = '100%';
       $('jobText').className = 'txt ' + (j && j.error ? 'err' : 'ok');
       $('jobText').textContent = (j && j.error ? '❌ ' : '✅ ') +
