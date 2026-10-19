@@ -44,6 +44,12 @@
     button.small { padding: 5px 11px; font-size: 13px; margin: 0; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    /* v0.18.8：音箱遥控面板 */
+    .spctl { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .spctl button { flex: 1 1 auto; min-width: 72px; }
+    .spvol { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+    .spvol input[type=range] { flex: 1; min-width: 80px; accent-color: var(--ok); }
+    .spvnum { font-variant-numeric: tabular-nums; min-width: 28px; text-align: right; font-size: 13px; }
     .muted { color: var(--muted); }
     .small-txt { font-size: 12px; }
     .ok { color: var(--ok); } .err { color: var(--err); }
@@ -405,7 +411,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.18.7</span>
+    <span class="ver" id="ver">v0.18.8</span>
   </div>
 
   <div class="tabs">
@@ -787,6 +793,35 @@
       <div class="muted small-txt" style="margin-top:6px;">来自「智能音箱（miot）」插件的设备列表。</div>
     </div>
 
+    <!-- v0.18.8：音箱遥控面板 -->
+    <div class="card">
+      <h2>🎛 音箱遥控</h2>
+      <div class="muted small-txt" id="spState">正在读取设备…</div>
+      <div class="spctl">
+        <button class="small plain" id="spStop" title="停止播放">■ 停止</button>
+        <button class="small plain" id="spPause" title="暂停">⏸ 暂停</button>
+        <button class="small plain" id="spResume" title="继续播放">▶ 继续</button>
+        <button class="small plain" id="spInterrupt" title="打断当前播放（比如正在说话）">✋ 打断</button>
+      </div>
+      <div class="spvol">
+        <button class="small plain" id="spVolDown" title="音量 -10">−</button>
+        <input type="range" id="spVol" min="0" max="100" step="1" value="40" />
+        <span class="spvnum" id="spVolNum">40</span>
+        <button class="small plain" id="spVolUp" title="音量 +10">＋</button>
+      </div>
+      <div class="btns" style="margin-top:8px;">
+        <button class="small plain" id="spMute">静音</button>
+        <button class="small plain" id="spVol40">音量 40</button>
+        <button class="small plain" id="spReplay">🔁 重播上次</button>
+      </div>
+      <div class="btns">
+        <button class="small plain" id="spPlayPl">▶ 在音箱播「本次导入的歌单」</button>
+      </div>
+      <div class="muted small-txt" style="margin-top:6px;">
+        音量条拖动后松手才下发，避免一路拖一路发把音箱刷爆。重播上次=把最近一次在音箱放的这集再放一遍。
+      </div>
+    </div>
+
     <div class="card">
       <h2>🩺 自检</h2>
       <div class="muted small-txt" id="scSummary">检查中…</div>
@@ -1013,6 +1048,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.18.7"></script>
+<script src="static/app.js?v=0.18.8"></script>
 </body>
 </html>
