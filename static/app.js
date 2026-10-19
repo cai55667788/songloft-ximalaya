@@ -133,7 +133,7 @@
     if (listenSeg === 'recent') { renderRecent(); pullRecent(); }
     else if (listenSeg === 'tl') renderTimeline();
     else if (listenSeg === 'dash') loadDashboard();
-    else loadReport(rpPeriod);
+    else { loadOverview(); loadReport(rpPeriod); }
   }
 
   function setListenSeg(seg, silent) {
@@ -170,8 +170,6 @@
         loadSubs();
         if (!meLoaded) loadMySubs(false);
         loadWatch();
-        loadAnchors();
-        loadTodo();
         loadCalendar();
         loadGroups();
       }
@@ -2431,21 +2429,7 @@
       bImport.className = 'small';
       bImport.textContent = '导入';
       bImport.addEventListener('click', function () { doImport(a.id, a.title, a.tracks); });
-      var bTodo = document.createElement('button');
-      bTodo.className = 'small plain';
-      bTodo.textContent = todoHas(a.id) ? '✓ 待听' : '＋待听';
-      bTodo.title = '先存进待听清单，回头一起听';
-      if (todoHas(a.id)) bTodo.classList.add('on');
-      bTodo.addEventListener('click', function () {
-        if (todoHas(a.id)) {
-          todoDel(a.id).then(function () { bTodo.textContent = '＋待听'; bTodo.classList.remove('on'); });
-        } else {
-          todoPut({ albumId: a.id, name: a.title, author: a.author, cover: a.cover }).then(function () {
-            bTodo.textContent = '✓ 待听'; bTodo.classList.add('on');
-          });
-        }
-      });
-      acts.appendChild(bImport); acts.appendChild(bDetail); acts.appendChild(bTodo);
+      acts.appendChild(bImport); acts.appendChild(bDetail);
 
       item.appendChild(ck); item.appendChild(img); item.appendChild(body); item.appendChild(acts);
       el.appendChild(item);
@@ -3864,6 +3848,22 @@
     return n + ' 秒';
   }
 
+  // v0.20.1：播放统计总览（今日 / 本周 / 累计 / 连续天数），一次请求
+  async function loadOverview() {
+    var el = $('rpOverview');
+    if (!el) return;
+    try {
+      var r = await api('GET', '/report/overview');
+      var d = (r && r.data) || {};
+      el.style.display = 'flex';
+      el.innerHTML =
+        '<div class="stat"><div class="sv">' + esc(fmtHM(d.daySec)) + '</div><div class="sl">今日' + (d.dayFin ? ' · ' + d.dayFin + ' 集' : '') + '</div></div>' +
+        '<div class="stat"><div class="sv">' + esc(fmtHM(d.weekSec)) + '</div><div class="sl">本周' + (d.weekFin ? ' · ' + d.weekFin + ' 集' : '') + '</div></div>' +
+        '<div class="stat"><div class="sv">' + esc(fmtHM(d.allSec)) + '</div><div class="sl">累计' + (d.allFin ? ' · ' + d.allFin + ' 集' : '') + '</div></div>' +
+        '<div class="stat"><div class="sv">' + (d.streakNow || 0) + ' 天</div><div class="sl">连续（最长 ' + (d.streakBest || 0) + ' 天）</div></div>';
+    } catch (e) { el.style.display = 'flex'; el.innerHTML = '<span class="err">总览加载失败: ' + esc(e.message) + '</span>'; }
+  }
+
   async function loadReport(period) {
     rpPeriod = period || rpPeriod;
     var el = $('rpBody');
@@ -3936,6 +3936,7 @@
       if (!confirm('清空所有收听统计？（不影响播放进度）')) return;
       await api('POST', '/report/reset', {});
       msg('统计已清空');
+      loadOverview();
       loadReport(rpPeriod);
     });
     // v0.18.0：报告导出 Markdown
@@ -4402,97 +4403,6 @@
     if (t) { token = t.replace(/^Bearer /, ''); sSet('xm_token', token); }
   }
 
-  // ---------- 按主播追更 ----------
-  var anchorData = null;
-
-  async function loadAnchors() {
-    var box = $('anchorBody');
-    if (!box) return;
-    box.innerHTML = '<div class="muted small-txt">读取中…</div>';
-    try {
-      var r = await api('GET', '/anchors');
-      if (!r || r.success === false) { box.innerHTML = '<div class="err">' + esc((r && r.error) || '读取失败') + '</div>'; return; }
-      anchorData = r.data || { items: [] };
-      renderAnchors();
-    } catch (e) { box.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; }
-  }
-
-  function renderAnchors() {
-    var box = $('anchorBody');
-    var items = (anchorData && anchorData.items) || [];
-    box.innerHTML = '';
-    if ($('anchorStat')) {
-      $('anchorStat').textContent = items.length
-        ? ('共 ' + items.length + ' 位主播' + (anchorData.from === 'sub' ? '（来自账号订阅）' : '（来自本地订阅与导入记录）'))
-        : '还没有数据：先订阅或导入几张专辑';
-    }
-    if (!items.length) return;
-    items.forEach(function (a) {
-      var card = document.createElement('div');
-      card.style.cssText = 'border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin-bottom:8px;';
-      var hd = document.createElement('div');
-      hd.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-      hd.innerHTML = '<b>' + escHtml(a.name) + '</b><span class="muted small-txt">' + a.count + ' 张</span>';
-      var btn = document.createElement('button');
-      btn.className = 'small plain';
-      btn.textContent = '展开';
-      hd.appendChild(btn);
-      card.appendChild(hd);
-
-      var body = document.createElement('div');
-      body.className = 'hide';
-      body.style.marginTop = '8px';
-      var picked = {};
-      a.albums.forEach(function (x) {
-        var row = document.createElement('label');
-        row.style.cssText = 'display:flex;align-items:flex-start;gap:7px;margin:0 0 6px;font-size:12px;cursor:pointer;';
-        var ck = document.createElement('input');
-        ck.type = 'checkbox';
-        ck.style.marginTop = '2px';
-        ck.checked = (x.from === 'imp');
-        ck.disabled = (x.from === 'imp');
-        if (x.from === 'imp') picked[x.albumId] = 0;
-        ck.addEventListener('change', function () { picked[x.albumId] = ck.checked ? 1 : 0; });
-        var lab = document.createElement('span');
-        lab.innerHTML = escHtml(x.name) + (x.total ? ' <span class="muted">· ' + x.total + ' 集</span>' : '') +
-          (x.from === 'imp' ? ' <span class="muted">· 已导入</span>' : '') +
-          (x.updateDate ? ' <span class="muted">· ' + escHtml(x.updateDate) + '</span>' : '');
-        lab.addEventListener('click', function (ev) { ev.preventDefault(); openDetail(x.albumId); });
-        row.appendChild(ck); row.appendChild(lab);
-        body.appendChild(row);
-      });
-      var ops = document.createElement('div');
-      ops.className = 'btns';
-      ops.style.marginTop = '6px';
-      var sub = document.createElement('button');
-      sub.className = 'small';
-      sub.textContent = '订阅勾选的';
-      sub.addEventListener('click', async function () {
-        var ids = Object.keys(picked).filter(function (k) { return picked[k]; });
-        if (!ids.length) { msg('先勾选要订阅的专辑', 'err'); return; }
-        sub.disabled = true;
-        try {
-          var r2 = await api('POST', '/anchors/subscribe', { albumIds: ids });
-          if (!r2 || r2.success === false) { msg('❌ ' + ((r2 && r2.error) || '失败'), 'err'); return; }
-          var d2 = r2.data || {};
-          msg('已订阅 ' + (d2.added || 0) + ' 张' + (d2.existed ? '，' + d2.existed + ' 张本来就有' : '') +
-            (d2.failed && d2.failed.length ? '，' + d2.failed.length + ' 张失败' : ''), 'ok');
-          loadSubs();
-        } finally { sub.disabled = false; }
-      });
-      ops.appendChild(sub);
-      body.appendChild(ops);
-      card.appendChild(body);
-      btn.addEventListener('click', function () {
-        var hid = body.classList.toggle('hide');
-        btn.textContent = hid ? '展开' : '收起';
-      });
-      box.appendChild(card);
-    });
-  }
-
-  if ($('btnAnchorRefresh')) $('btnAnchorRefresh').addEventListener('click', loadAnchors);
-
   // ---------- 导出订阅清单 ----------
   function downloadText(filename, mime, content) {
     try {
@@ -4806,137 +4716,8 @@
         var r = await api('POST', '/subs/unsub', { albumIds: ids });
         if (r && r.success === false) { msg(r.error || '操作失败', 'err'); return; }
         msg('已取消 ' + ((r.data && r.data.removed) || 0) + ' 张订阅');
-        loadGroups(); loadSubs(); loadTodo(true);
+        loadGroups(); loadSubs();
       } catch (e) { msg('操作失败: ' + e.message, 'err'); }
-    });
-  }
-
-  // ---------- 待听清单 ----------
-  var todoCache = [];
-
-  function todoHas(id) {
-    id = String(id || '');
-    for (var i = 0; i < todoCache.length; i++) if (String(todoCache[i].albumId) === id) return true;
-    return false;
-  }
-
-  async function loadTodo(silent) {
-    var box = $('todoBody');
-    try {
-      var r = await api('GET', '/todo');
-      todoCache = (r && r.data && r.data.items) || [];
-      var n = todoCache.length;
-      if ($('todoBadge')) $('todoBadge').textContent = n ? '(' + n + ')' : '';
-      if ($('todoStat')) {
-        $('todoStat').textContent = n
-          ? '共 ' + n + ' 张专辑，' + (n ? '挑几张一起导入成一本书单' : '')
-          : '清单是空的。搜到想听又不想马上导入的，点「＋待听」丢进来。';
-      }
-      if (!box) return;
-      box.innerHTML = '';
-      // v0.19.4：列表重建后每行都是未勾状态，全选框却还亮着 —— 再点一次只是「取消勾选」，
-      // 看着像点了没反应。这里跟着复位。
-      if ($('btnTodoAll')) $('btnTodoAll').checked = false;
-      if (!n) { box.textContent = silent ? '' : '—'; return; }
-      todoCache.forEach(function (x) {
-        var item = document.createElement('div');
-        item.className = 'res-item';
-
-        var ck = document.createElement('input');
-        ck.type = 'checkbox';
-        ck.className = 'ck';
-        ck.setAttribute('data-id', x.albumId);
-
-        var img = document.createElement('img');
-        img.src = x.cover || '';
-        img.alt = '';
-        img.onerror = function () { img.style.visibility = 'hidden'; };
-
-        var body = document.createElement('div');
-        body.className = 'body';
-        var t = document.createElement('div');
-        t.className = 't';
-        t.textContent = x.name || ('专辑 ' + x.albumId);
-        var m = document.createElement('div');
-        m.className = 'm';
-        var bits = [];
-        if (x.author) bits.push(x.author);
-        if (x.at) bits.push(new Date(x.at).toISOString().slice(5, 10).replace('-', '/') + ' 加入');
-        m.textContent = bits.join(' · ');
-        body.appendChild(t); body.appendChild(m);
-        body.addEventListener('click', function () { document.querySelector('.tab[data-tab="search"]').click(); openDetail(x.albumId); });
-
-        var acts = document.createElement('div');
-        acts.className = 'acts';
-        var bGo = document.createElement('button');
-        bGo.className = 'small plain';
-        bGo.textContent = '详情';
-        bGo.addEventListener('click', function () { document.querySelector('.tab[data-tab="search"]').click(); openDetail(x.albumId); });
-        var bDel = document.createElement('button');
-        bDel.className = 'small plain';
-        bDel.textContent = '移出';
-        bDel.addEventListener('click', function () {
-          todoDel(x.albumId).then(function () { loadTodo(); });
-        });
-        acts.appendChild(bGo); acts.appendChild(bDel);
-
-        item.appendChild(ck); item.appendChild(img); item.appendChild(body); item.appendChild(acts);
-        box.appendChild(item);
-      });
-    } catch (e) {
-      if (!silent && $('todoStat')) $('todoStat').innerHTML = '<span class="err">读取失败：' + escHtml(e.message) + '</span>';
-    }
-  }
-
-  async function todoPut(it) {
-    try {
-      var r = await api('POST', '/todo', it);
-      if (r && r.success === false) throw new Error(r.error || '加入失败');
-      var hit = null;
-      for (var i = 0; i < todoCache.length; i++) if (String(todoCache[i].albumId) === String(it.albumId)) hit = todoCache[i];
-      if (!hit) todoCache.unshift({ albumId: String(it.albumId), name: it.name || '', author: it.author || '', cover: it.cover || '', at: Date.now() });
-      if ($('todoBadge')) $('todoBadge').textContent = todoCache.length ? '(' + todoCache.length + ')' : '';
-      msg('已加入待听清单');
-      return true;
-    } catch (e) { msg('加入待听失败: ' + e.message, 'err'); return false; }
-  }
-
-  async function todoDel(albumId) {
-    try {
-      await api('POST', '/todo', { remove: String(albumId) });
-      todoCache = todoCache.filter(function (x) { return String(x.albumId) !== String(albumId); });
-      if ($('todoBadge')) $('todoBadge').textContent = todoCache.length ? '(' + todoCache.length + ')' : '';
-      msg('已移出待听清单');
-      return true;
-    } catch (e) { msg('移出失败: ' + e.message, 'err'); return false; }
-  }
-
-  if ($('btnTodoAll')) {
-    $('btnTodoAll').addEventListener('change', function () {
-      var on = $('btnTodoAll').checked;
-      document.querySelectorAll('#todoBody .ck').forEach(function (c) { c.checked = on; });
-    });
-  }
-  if ($('btnTodoImport')) {
-    $('btnTodoImport').addEventListener('click', async function () {
-      var ids = [];
-      document.querySelectorAll('#todoBody .ck').forEach(function (c) { if (c.checked) ids.push(c.getAttribute('data-id')); });
-      if (!ids.length) { msg('先勾选要导入的专辑', 'warn'); return; }
-      var name = ($('todoPlName') && $('todoPlName').value.trim()) || '';
-      try {
-        var r = await api('POST', '/todo/import', { albumIds: ids, playlistName: name });
-        if (r && r.success === false) { msg(r.error || '导入失败', 'err'); return; }
-        msg((r.data && r.data.message) || '已开始导入');
-        loadTodo(true);
-        poll();
-      } catch (e) { msg('导入失败: ' + e.message, 'err'); }
-    });
-  }
-  if ($('btnTodoClear')) {
-    $('btnTodoClear').addEventListener('click', async function () {
-      if (!confirm('清空待听清单？')) return;
-      try { await api('POST', '/todo', { clear: true }); todoCache = []; loadTodo(); msg('待听清单已清空'); }
-      catch (e) { msg('清空失败: ' + e.message, 'err'); }
     });
   }
 
@@ -4977,7 +4758,6 @@
     loadLogs();
     runSelfCheck(false);
     loadCookieHealth();
-    loadTodo(true);
     // 上次在车里用的，下次打开还在车里（回家后手动退出即可）
     if (sGet(DRIVE_KEY) === '1') driveShow(true);
     document.querySelectorAll('.tlBtn').forEach(function (b) {
