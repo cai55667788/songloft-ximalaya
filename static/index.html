@@ -90,8 +90,9 @@
     .trk { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
     .trk:last-child { border-bottom: none; }
     .trk .no { color: var(--muted); width: 30px; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
-    .trk .tt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .trk .tt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; }   /* 标题最多两行，不再一眼截断 */
     .trk .du { color: var(--muted); font-size: 12px; flex: none; }
+    .trk .tu { color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
     .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 10px; }
 
     /* 订阅 / 已导入行 */
@@ -399,7 +400,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.18.0</span>
+    <span class="ver" id="ver">v0.18.1</span>
   </div>
 
   <div class="tabs">
@@ -1007,6 +1008,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.18.0"></script>
+<script src="static/app.js?v=0.18.1"></script>
 </body>
 </html>
