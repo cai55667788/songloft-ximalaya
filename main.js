@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.18.7';
+var VERSION = '0.18.8';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -65,6 +65,9 @@ var progress = { tracks: {}, albums: {}, at: '' };
 var login = { cookie: '', savedAt: '' };
 var lastSync = { at: '', result: '', trigger: '' };
 var lastTts = { at: '', text: '', result: '' };
+// v0.18.8：音箱最近一次操作（音量、在播的集），用来支持「音量 +10」这类相对指令
+// 注意别叫 speak：/tts/run 分支里有同名局部变量，var 提升会把全局遮蔽掉（踩过）
+var SPK = { last: {} };
 
 var syncing = false;
 var importing = false;
@@ -2332,6 +2335,28 @@ function ttsDevice() {
   return { account_id: acc, device_id: dev, device_name: name };
 }
 
+// v0.18.8：音箱播放控制用的设备解析——显式传入优先，否则用设置页绑定的那台
+function speakerDevice(deviceId) {
+  var d = config.device || {};
+  var acc = d.account_id || '';
+  var dev = String(deviceId || d.device_id || '');
+  var name = d.device_name || '';
+  return { account_id: acc, device_id: dev, device_name: name };
+}
+
+// miot 的返回有两种失败形态：HTTP 非 2xx，或 200 但体内 success:false
+function miotOk(r) {
+  if (!r || !r.ok) return false;
+  if (r.data && r.data.success === false) return false;
+  return true;
+}
+
+function miotErr(r) {
+  if (r && r.data && r.data.error) return String(r.data.error);
+  if (r && r.data && r.data.message) return String(r.data.message);
+  return '音箱没有响应，可在自检页确认设备是否在线';
+}
+
 // 把「本次同步的新增」拼成一段适合 TTS 朗读的话
 function buildTtsText(updates, totalAdded) {
   var prefix = String((config.tts && config.tts.prefix) || '喜马拉雅更新提醒').trim();
@@ -4358,17 +4383,155 @@ async function handleHTTPRequest(req) {
   if (path === '/tts/run' && method === 'POST') {
     if (ttsRunning) return jsonResp({ success: false, error: '播报任务已在运行' }, 409);
     var tb2 = readBodyJson(req);
-    var speak = tb2.speak !== false;
+    var ttsSpeak = tb2.speak !== false;
     var custom = String(tb2.text || '').trim();
     var dev2 = ttsDevice();
-    if (speak && (!dev2.account_id || !dev2.device_id)) {
+    if (ttsSpeak && (!dev2.account_id || !dev2.device_id)) {
       return jsonResp({ success: false, error: '没有配置播报音箱，请先在「设置」里选择设备' }, 400);
     }
     ttsRunning = true;
-    runTtsReport({ speak: speak, text: custom, trigger: '手动' })
+    runTtsReport({ speak: ttsSpeak, text: custom, trigger: '手动' })
       .catch(function (e) { songloft.log.warn('[喜马拉雅] 播报异常: ' + String(e)); })
       .then(function () { ttsRunning = false; });
     return jsonResp({ success: true, data: { message: '已开始同步并播报，稍后留意音箱' } });
+  }
+
+  // ---------- 音箱播放控制（v0.18.8） ----------
+  // 实测可用：/mina/volume、/mina/pause、/mina/resume、/mina/stop、/mina/play-url
+  //（/mina/status 在新版 miot 上 POST 不通，不要拿来判状态）
+  if (path === '/speaker/state' && method === 'GET') {
+    var spDev = speakerDevice(q.device_id);
+    if (!spDev.account_id || !spDev.device_id) {
+      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
+    }
+    var spVol = null, spName = spDev.device_name || '';
+    try {
+      var dl2 = await miotGet('/mina/devices');
+      var arr2 = (dl2.data && dl2.data.data) || [];
+      arr2.forEach(function (a) {
+        (a.devices || []).forEach(function (x) {
+          if (x.deviceID === spDev.device_id) {
+            spName = x.name || spName;
+            if (x.presence) spDev.presence = x.presence;
+            if (typeof x.volume === 'number') spVol = x.volume;
+          }
+        });
+      });
+    } catch (e) { /* 拿不到设备列表就用缓存 */ }
+    return jsonResp({
+      success: true,
+      data: {
+        account_id: spDev.account_id,
+        device_id: spDev.device_id,
+        device_name: spName,
+        presence: spDev.presence || 'unknown',
+        volume: spVol,
+        last: (SPK.last || null)
+      }
+    });
+  }
+
+  // 统一的「一条指令打到音箱」入口
+  if (path === '/speaker/ctl' && method === 'POST') {
+    var cb = readBodyJson(req);
+    var act = String(cb.action || '').trim();
+    var sdev = speakerDevice(cb.device_id);
+    if (!sdev.account_id || !sdev.device_id) {
+      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
+    }
+    var base = { account_id: sdev.account_id, device_id: sdev.device_id };
+    var actMap = {
+      pause: ['/mina/pause', base, '已暂停'],
+      resume: ['/mina/resume', base, '已继续'],
+      stop: ['/mina/stop', base, '已停止'],
+      interrupt: ['/mina/interrupt', base, '已打断当前播放']
+    };
+    try {
+      if (act === 'volume') {
+        var vol = Number(cb.volume);
+        if (!isFinite(vol)) return jsonResp({ success: false, error: '音量需要 0-100 的数字' }, 400);
+        vol = Math.max(0, Math.min(100, Math.round(vol)));
+        var rv = await miotPost('/mina/volume', Object.assign({}, base, { volume: vol }));
+        if (!miotOk(rv)) return jsonResp({ success: false, error: miotErr(rv) }, 500);
+        SPK.last = SPK.last || {};
+        SPK.last.volume = vol;
+        await persist();
+        return jsonResp({ success: true, data: { message: '音量已调到 ' + vol, volume: vol } });
+      }
+      if (act === 'volup' || act === 'voldown') {
+        var cur = Number(SPK.last && SPK.last.volume);
+        if (!isFinite(cur)) cur = 40;
+        var step = Math.max(1, Math.min(30, Number(cb.step) || 10));
+        var nv = Math.max(0, Math.min(100, act === 'volup' ? cur + step : cur - step));
+        var rv2 = await miotPost('/mina/volume', Object.assign({}, base, { volume: nv }));
+        if (!miotOk(rv2)) return jsonResp({ success: false, error: miotErr(rv2) }, 500);
+        SPK.last = SPK.last || {};
+        SPK.last.volume = nv;
+        await persist();
+        return jsonResp({ success: true, data: { message: '音量 ' + nv, volume: nv } });
+      }
+      if (actMap[act]) {
+        var rr3 = await miotPost(actMap[act][0], actMap[act][1]);
+        if (!miotOk(rr3)) return jsonResp({ success: false, error: miotErr(rr3) }, 500);
+        return jsonResp({ success: true, data: { message: actMap[act][2] } });
+      }
+      return jsonResp({ success: false, error: '不认识的动作: ' + act }, 400);
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e) }, 500);
+    }
+  }
+
+  // 让音箱播「这一集」：取直链 → /mina/play-url
+  if (path === '/speaker/play-track' && method === 'POST') {
+    var pb = readBodyJson(req);
+    var tid = String(pb.track_id || pb.trackId || '').trim();
+    if (!tid) return jsonResp({ success: false, error: '缺少 track_id' }, 400);
+    var pdev2 = speakerDevice(pb.device_id);
+    if (!pdev2.account_id || !pdev2.device_id) {
+      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
+    }
+    try {
+      var link2 = (pb.url || '').trim();
+      if (!link2) link2 = await fetchTrackUrl(tid);
+      if (!link2) return jsonResp({ success: false, error: '取不到这一集的播放地址（可能需要登录）' }, 502);
+      if (pb.volume !== undefined && pb.volume !== null && pb.volume !== '') {
+        var pv = Math.max(0, Math.min(100, Number(pb.volume) || 0));
+        await miotPost('/mina/volume', { account_id: pdev2.account_id, device_id: pdev2.device_id, volume: pv });
+        SPK.last = SPK.last || {};
+        speak.last.volume = pv;
+      }
+      var rp = await miotPost('/mina/play-url', {
+        account_id: pdev2.account_id, device_id: pdev2.device_id, url: link2
+      });
+      if (!miotOk(rp)) return jsonResp({ success: false, error: miotErr(rp) }, 500);
+      SPK.last = Object.assign(SPK.last || {}, {
+        trackId: tid, title: String(pb.title || ''), at: nowStr(), url: link2
+      });
+      await persist();
+      return jsonResp({ success: true, data: { message: '已在音箱播放' + (pb.title ? '：' + pb.title : '') } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e) }, 500);
+    }
+  }
+
+  // 让音箱播整个歌单（走 miot 的 /player/play）
+  if (path === '/speaker/play-playlist' && method === 'POST') {
+    var qb = readBodyJson(req);
+    var qpl = Number(qb.playlist_id) || 0;
+    var qdev = speakerDevice(qb.device_id);
+    if (!qdev.account_id || !qdev.device_id) {
+      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
+    }
+    if (!qpl) return jsonResp({ success: false, error: '缺少 playlist_id' }, 400);
+    try {
+      var body2 = { account_id: qdev.account_id, device_id: qdev.device_id, playlist_id: qpl };
+      if (qb.mode === 'random') { body2.play_mode = 'random'; body2.start_position = 'random'; }
+      var rr4 = await miotPost('/player/play', body2);
+      if (!miotOk(rr4)) return jsonResp({ success: false, error: miotErr(rr4) }, 500);
+      return jsonResp({ success: true, data: { message: '已在音箱播放歌单' } });
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e) }, 500);
+    }
   }
 
   if (path === '/devices' && method === 'GET') {
