@@ -364,8 +364,10 @@
       var d = await api('GET', '/devices');
       var sel = $('device');
       var tsel = $('ttsDevice');
+      var dsel = $('dSpeaker');   // v0.20.4：详情页「音箱播放」这次用哪台音箱
       sel.innerHTML = '<option value="">（请选择音箱）</option>';
       if (tsel) tsel.innerHTML = '<option value="">跟随设置里的设备</option>';
+      if (dsel) dsel.innerHTML = '<option value="">跟随设置里的音箱</option>';
       var accounts = (d && d.data && d.data.data) || (d && d.data) || [];
       if (Array.isArray(accounts)) {
         accounts.forEach(function (acc) {
@@ -382,10 +384,27 @@
               if (o2.value === ttsDeviceSaved) o2.selected = true;
               tsel.appendChild(o2);
             }
+            if (dsel) dsel.appendChild(opt.cloneNode(true));
           });
         });
       }
+      if (dsel) {
+        // 上次在详情页挑的音箱记在浏览器里，刷新后仍然生效；选「跟随设置」就清掉
+        var pickSaved = '';
+        try { pickSaved = localStorage.getItem('xm_spk_pick') || ''; } catch (e) { /* */ }
+        if (pickSaved) dsel.value = pickSaved;
+      }
     } catch (e) { /* */ }
+  }
+  if ($('dSpeaker')) {
+    $('dSpeaker').addEventListener('change', function () {
+      try {
+        if (this.value) localStorage.setItem('xm_spk_pick', this.value);
+        else localStorage.removeItem('xm_spk_pick');
+      } catch (e) { /* */ }
+      var p = this.value.split('|');
+      msg(this.value ? ('音箱播放将使用「' + (p[2] || '所选音箱') + '」') : '音箱播放恢复跟随设置', 'ok');
+    });
   }
   $('device').addEventListener('change', async function () {
     var v = $('device').value;
@@ -496,16 +515,20 @@
   });
 
   async function playPlaylist(playlistId, name) {
-    var dv = $('device').value || deviceSaved;
+    // v0.20.4：详情页选了音箱就按选的播（不动设置里的默认设备）；没选则沿用原逻辑
+    var pick = ($('dSpeaker') && $('dSpeaker').value) || '';
+    var dv = pick || $('device').value || deviceSaved;
     if (!dv) { msg('请先在「设置」里选择音箱', 'err'); return; }
-    $('device').value = dv;
     var p = dv.split('|');
     try {
-      await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } });
+      if (!pick) {
+        $('device').value = dv;
+        await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } });
+      }
       var r = await api('POST', '/play', {
         account_id: p[0], device_id: p[1], playlist_id: playlistId, mode: $('mode').value
       });
-      msg(r.success ? '▶ 已在音箱播放《' + name + '》' : '❌ ' + r.error, r.success ? 'ok' : 'err');
+      msg(r.success ? ('▶ 已在' + (pick ? '「' + (p[2] || '所选音箱') + '」' : '音箱') + '播放《' + name + '》') : '❌ ' + r.error, r.success ? 'ok' : 'err');
     } catch (e) { msg('播放失败: ' + e.message, 'err'); }
   }
 
@@ -2828,23 +2851,7 @@
     } catch (e) { msg('启动失败: ' + e.message, 'err'); }
   }
 
-  // ---------- 拆成「已听 / 未听」两个歌单 ----------
-  async function splitHeard() {
-    if (!cur.id) return;
-    if (!confirm('把这本书按收听进度拆成「已听」和「未听」两个歌单？\n已听 = 进度到结尾前 20 秒内的。原有歌单不动。')) return;
-    if ($('btnSplit')) $('btnSplit').disabled = true;
-    try {
-      var r = await api('POST', '/split-heard', { albumId: cur.id });
-      if (!r || r.success === false) { msg('❌ ' + ((r && r.error) || '拆分失败'), 'err'); return; }
-      var d = r.data || {};
-      if (d.skipped) { msg('不用拆：' + (d.reason || ''), 'err'); return; }
-      msg('✂ 已生成「' + (d.heard && d.heard.name) + '」' + (d.heard && d.heard.added) + ' 集 / 「' +
-        (d.unheard && d.unheard.name) + '」' + (d.unheard && d.unheard.added) + ' 集', 'ok');
-    } catch (e) {
-      msg('❌ ' + e.message, 'err');
-    } finally { if ($('btnSplit')) $('btnSplit').disabled = false; }
-  }
-  if ($('btnSplit')) $('btnSplit').addEventListener('click', splitHeard);
+  // v0.20.4：「拆已听/未听」界面下线（后端 /split-heard 路由保留）
 
   // ---------- 听书习惯仪表盘 ----------
   async function loadDashboard() {
