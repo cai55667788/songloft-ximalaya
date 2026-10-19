@@ -1406,8 +1406,21 @@
     if (!el) return;
     var qs = $('qOrder');
     if (qs) qs.textContent = playOrder === 'desc' ? '↓ 倒序' : '↑ 正序';
+    // v0.20.3：队列面板显示「还剩多久」，长专辑里比「还剩 200 集」更有概念
+    var restSec = 0, noDur = 0;
+    for (var ri = Math.max(0, qi); ri < queue.length; ri++) {
+      var rd = Number(queue[ri] && queue[ri].duration) || 0;
+      if (!rd) { noDur += 1; continue; }
+      if (ri === qi) {
+        var gp = getPos(queue[ri].trackId) || {};
+        rd = Math.max(0, rd - (Number(gp.t) || 0));
+      }
+      restSec += rd;
+    }
+    var restTxt = restSec > 0 ? (' · 剩约 ' + fmtHM(restSec)) : '';
     $('qStat').textContent = queue.length
-      ? '共 ' + queue.length + ' 集 · 当前第 ' + (qi >= 0 ? qi + 1 : 0) + ' 集'
+      ? ('共 ' + queue.length + ' 集 · 当前第 ' + (qi >= 0 ? qi + 1 : 0) + ' 集' + restTxt +
+         (noDur ? ' · ' + noDur + ' 集时长未知' : ''))
       : '';
     el.innerHTML = '';
     if (!queue.length) {
@@ -2698,6 +2711,9 @@
     $('btnBack').textContent = '← 返回' + (TAB_NAME[cur.fromTab || 'search'] || '发现');
     cur.id = String(albumId);
     cur.page = 1;
+    // v0.20.3：换专辑要清掉上一本的集名筛选，否则新专辑可能一进来就「筛出 0 集」
+    nameFilter = '';
+    if ($('dFilter')) $('dFilter').value = '';
     $('searchCard').classList.add('hide');
     showListen(false);   // v0.20.0：详情页也不能露出「继续听」
     $('detailCard').classList.remove('hide');
@@ -2910,6 +2926,7 @@
   var curTracks = [];
   // v0.19.3：当前页真正显示出来的集（应用「只看未听」过滤之后）
   var curVisible = [];
+  var nameFilter = '';   // v0.20.3：本页集名关键词筛选（长专辑里靠标题找某一集）
   var curLast = null;
   var filterUnheard = false;
 
@@ -2925,7 +2942,22 @@
     el.innerHTML = '';
     curTracks = sortByOrder(tracks || []);
     tracks = curTracks;
-    if (!tracks.length) { el.innerHTML = '<span class="muted">没有曲目</span>'; return; }
+    // v0.20.3：按集名筛当前页。只在已加载的这一页里筛，翻页不清空关键词。
+    if (nameFilter) {
+      var kwLow = nameFilter.toLowerCase();
+      tracks = tracks.filter(function (t) {
+        return String(t.title || '').toLowerCase().indexOf(kwLow) >= 0;
+      });
+    }
+    if (!tracks.length) {
+      curVisible = [];
+      cur.pageStatText = nameFilter ? ('筛「' + nameFilter + '」· 本页 0 集') : '本页 0 集';
+      renderStatLine();
+      el.innerHTML = '<span class="muted">' + (nameFilter
+        ? ('本页没有集名含「' + escHtml(nameFilter) + '」的集，翻页看看')
+        : '没有曲目') + '</span>';
+      return;
+    }
     var album = {
       id: cur.id,
       name: (cur.detail && cur.detail.name) || '',
@@ -2939,7 +2971,7 @@
       else if (s === 'part') partN += 1;
     });
     // v0.19.3：文案拆开存，总集数要等 outline 回来才知道（syncPageBtns 里再拼一次）
-    cur.pageStatText = '本页 ' + tracks.length + ' 集 · 已听完 ' + doneN +
+    cur.pageStatText = (nameFilter ? '筛「' + nameFilter + '」· ' : '') + '本页 ' + tracks.length + ' 集 · 已听完 ' + doneN +
       (partN ? ' · 听了一半 ' + partN : '') + ' · 未听 ' + (tracks.length - doneN - partN);
     renderStatLine();
 
@@ -3015,7 +3047,7 @@
       d.appendChild(pl);
       // v0.19.4：和「本页连播」同一个问题 —— 过滤模式下队列里不能塞进被隐藏的已听集
       d.addEventListener('click', function () {
-        var lst = filterUnheard ? curVisible : curTracks;
+        var lst = (filterUnheard || nameFilter) ? curVisible : curTracks;
         var j = indexOfTrack(lst, t.trackId);
         playQueue(lst, j < 0 ? 0 : j, album);
       });
@@ -3332,10 +3364,12 @@
     if (!p) { msg('取不到目录，先翻一页再试', 'err'); return; }
     await gotoPage(p);
     // 目标集可能被「只看未听」过滤掉了，跳之前临时关掉，免得用户看到空落
-    if (filterUnheard) {
-      filterUnheard = false;
-      if ($('ckUnheard')) $('ckUnheard').checked = false;
-      renderTracks(sortByOrder(curTracks));
+    // v0.20.3：筛着集名时跳集，目标很可能被筛掉 → 先清筛选再定位
+    if (filterUnheard || nameFilter) {
+      var needRedraw = false;
+      if (filterUnheard) { filterUnheard = false; if ($('ckUnheard')) $('ckUnheard').checked = false; needRedraw = true; }
+      if (nameFilter) { nameFilter = ''; if ($('dFilter')) $('dFilter').value = ''; needRedraw = true; }
+      if (needRedraw) renderTracks(sortByOrder(curTracks));
     }
     var el = null;
     var rows = ($('dTracks') && $('dTracks').children) || [];
@@ -3370,11 +3404,30 @@
     setOrder(playOrder === 'desc' ? 'asc' : 'desc');
   });
   syncOrderBtn();
+  // v0.20.3：详情页「筛集名」输入（本页实时过滤）
+  if ($('dFilter')) {
+    var dFilterTimer = null;
+    $('dFilter').addEventListener('input', function () {
+      var self = this;
+      if (dFilterTimer) clearTimeout(dFilterTimer);
+      dFilterTimer = setTimeout(function () {
+        nameFilter = String(self.value || '').trim();
+        if (curTracks.length) renderTracks(curTracks);
+      }, 160);
+    });
+    $('dFilter').addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      this.value = '';
+      nameFilter = '';
+      if (curTracks.length) renderTracks(curTracks);
+    });
+  }
+
   $('btnPlayPage').addEventListener('click', function () {
     // v0.19.3：勾了「只看未听」时连播的应该只是看得见的那些集
     // v0.19.4：去掉 curVisible.length 兜底 —— 整页都听完时它正好是 0，
     // 兜底会让「本页连播」回落到 curTracks，把过滤掉的已听集全播一遍
-    var list = filterUnheard ? curVisible : curTracks;
+    var list = (filterUnheard || nameFilter) ? curVisible : curTracks;
     if (!list.length) { msg(filterUnheard ? '本页没有未听的集' : '本页没有曲目', 'err'); return; }
     playQueue(list, 0, {
       id: cur.id, name: (cur.detail && cur.detail.name) || '',
