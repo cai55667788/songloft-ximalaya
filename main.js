@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.18.4';
+var VERSION = '0.18.5';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -4059,11 +4059,48 @@ async function handleHTTPRequest(req) {
   if ((path === '/imported' && method === 'DELETE') || (path === '/imported/delete' && method === 'POST')) {
     var b4 = readBodyJson(req);
     var pid = Number(b4.playlist_id || b4.playlistId || q.playlist_id || q.pid) || 0;
+    // v0.18.5：可选连歌曲库条目一起删（默认保留，由用户在前端选择）
+    var delSongs = !!(b4.delete_songs || b4.deleteSongs);
+    var songDeleted = 0, songFailed = 0;
+    if (delSongs && pid) {
+      try {
+        var dhost = (await songloft.plugin.getHostUrl() || '').replace(/\/+$/, '');
+        var dtok = await songloft.plugin.getToken();
+        // v0.18.5：宿主 /playlists/{id}/songs 默认只返回 20 条，必须翻页收全，
+        // 否则几百首的歌单只删掉前 20 首，剩下全成孤儿留在曲库里。
+        var plList = [], plOff = 0, plPage = 200;
+        for (var pg = 0; pg < 200; pg++) {
+          var plRaw = await songloft.playlists.getSongs(pid, { limit: plPage, offset: plOff });
+          var plBatch = (plRaw && (plRaw.songs || plRaw.items)) || (Array.isArray(plRaw) ? plRaw : []);
+          if (!plBatch.length) break;
+          plList = plList.concat(plBatch);
+          var plTotal = plRaw && plRaw.total;
+          if (plBatch.length < plPage) break;
+          if (plTotal && plList.length >= plTotal) break;
+          plOff += plBatch.length;
+        }
+        for (var si = 0; si < plList.length; si++) {
+          var sg = plList[si];
+          var sgid = sg && (sg.id || sg.songId);
+          if (!sgid) continue;
+          try {
+            var dresp = await fetchT(dhost + '/api/v1/songs/' + sgid,
+              { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + dtok } }, 15);
+            if (dresp.ok) songDeleted++; else songFailed++;
+          } catch (e) { songFailed++; }
+        }
+        songloft.log.info('[喜马拉雅] 删除歌曲库条目: 成功 ' + songDeleted + '，失败 ' + songFailed + '（歌单共 ' + plList.length + ' 首）');
+        if (songFailed > 0) songloft.log.warn('[喜马拉雅] 有 ' + songFailed + ' 首歌曲库条目删除失败，可在曲库中手动清理');
+      } catch (e) {
+        songFailed = songFailed || -1;
+        songloft.log.warn('[喜马拉雅] 读取歌内歌曲失败，歌曲库条目未删: ' + String(e));
+      }
+    }
     try { if (pid) await songloft.playlists.delete(pid); } catch (e) { /* 歌单可能已删 */ }
     imported = imported.filter(function (x) { return x.playlistId !== pid; });
     subs = subs.filter(function (s) { return s.playlistId !== pid; });
     await persist();
-    return jsonResp({ success: true });
+    return jsonResp({ success: true, data: { songDeleted: songDeleted, songFailed: songFailed } });
   }
 
   // ---------- 订阅 ----------
