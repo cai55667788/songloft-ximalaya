@@ -1053,10 +1053,27 @@
 
   // v0.19.1：播放条上的音箱遥控（复用设置页的 spCtl）
   if ($('pSpk')) {
+    // v0.19.3：展开时把「哪台音箱 / 在不在线 / 当前音量」显示出来，调音量心里有数
+    async function loadPsInfo() {
+      var el = $('psInfo');
+      if (!el) return;
+      try {
+        var r = await api('GET', '/speaker/state');
+        var d = (r && r.data) || {};
+        var name = d.device_name || (d.device && d.device.device_name) || '未绑定';
+        var on = d.presence === 'online';
+        var vol = (typeof d.volume === 'number') ? d.volume : (d.last && d.last.volume);
+        el.textContent = name + (d.device_name || d.device ? (on ? ' · 在线' : ' · 离线') : '') +
+          (typeof vol === 'number' ? ' · 音量 ' + vol : '');
+        el.title = el.textContent;
+      } catch (e) { el.textContent = '状态读取失败'; }
+    }
     $('pSpk').addEventListener('click', function () {
       var p = $('pSpkPanel');
       p.classList.toggle('hide');
-      this.classList.toggle('on', !p.classList.contains('hide'));
+      var open = !p.classList.contains('hide');
+      this.classList.toggle('on', open);
+      if (open) loadPsInfo();
     });
     $('psPush').addEventListener('click', async function () {
       var t = queue[qi];
@@ -1069,8 +1086,12 @@
     $('psPause').addEventListener('click', function () { spCtl('pause'); });
     $('psResume').addEventListener('click', function () { spCtl('resume'); });
     $('psStop').addEventListener('click', function () { spCtl('stop'); });
-    $('psVolDown').addEventListener('click', async function () { if (await spCtl('voldown', { step: 10 })) loadSpState(); });
-    $('psVolUp').addEventListener('click', async function () { if (await spCtl('volup', { step: 10 })) loadSpState(); });
+    $('psVolDown').addEventListener('click', async function () {
+      if (await spCtl('voldown', { step: 10 })) { loadSpState(); loadPsInfo(); }
+    });
+    $('psVolUp').addEventListener('click', async function () {
+      if (await spCtl('volup', { step: 10 })) { loadSpState(); loadPsInfo(); }
+    });
   }
 
   if ($('driveExit')) $('driveExit').addEventListener('click', function () { driveShow(false); });
@@ -2543,6 +2564,8 @@
   var cur = { id: '', page: 1, hasMore: false, detail: null };
   // v0.19.0：跳页输入框是否被用户改过（改过就不自动回填页码，免得打字被覆盖）
   var jumpDirty = false;
+  // v0.19.3：跳转方式 'page' 按页码 / 'index' 按集号
+  var jumpMode = 'page';
 
   async function openDetail(albumId) {
     // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去，并记住来源以便返回
@@ -2590,6 +2613,8 @@
       renderResume();
       loadLibMarks(cur.id);
       cur.lastPage = 0;
+      cur.outlinePages = [];
+      cur.lastIndex = 0;
       cur.page = 1;
       jumpDirty = false;
       if ($('dJump')) $('dJump').value = '1';
@@ -2750,8 +2775,17 @@
   }
 
   var curTracks = [];
+  // v0.19.3：当前页真正显示出来的集（应用「只看未听」过滤之后）
+  var curVisible = [];
   var curLast = null;
   var filterUnheard = false;
+
+  // 「共 N 集 · 本页 30 集 · 已听完 x …」——总集数来自目录，先渲染页面稍后再补
+  function renderStatLine() {
+    if (!$('dProgStat')) return;
+    var total = cur.lastIndex ? '共 ' + cur.lastIndex + ' 集 · ' : '';
+    $('dProgStat').textContent = total + (cur.pageStatText || '');
+  }
 
   function renderTracks(tracks) {
     var el = $('dTracks');
@@ -2771,16 +2805,18 @@
       if (s === 'done') doneN += 1;
       else if (s === 'part') partN += 1;
     });
-    if ($('dProgStat')) {
-      $('dProgStat').textContent = '本页 ' + tracks.length + ' 集 · 已听完 ' + doneN +
-        (partN ? ' · 听了一半 ' + partN : '') + ' · 未听 ' + (tracks.length - doneN - partN);
-    }
+    // v0.19.3：文案拆开存，总集数要等 outline 回来才知道（syncPageBtns 里再拼一次）
+    cur.pageStatText = '本页 ' + tracks.length + ' 集 · 已听完 ' + doneN +
+      (partN ? ' · 听了一半 ' + partN : '') + ' · 未听 ' + (tracks.length - doneN - partN);
+    renderStatLine();
 
     var shown = 0;
+    curVisible = [];   // v0.19.3：记录当前真正显示出来的集，「本页连播」要用它，不能播被过滤掉的已听集
     tracks.forEach(function (t, i) {
       var state = trackStat(t.trackId);
       if (filterUnheard && state === 'done') return;
       shown += 1;
+      curVisible.push(t);
       var d = document.createElement('div');
       d.className = 'trk';
       d.setAttribute('data-tid', String(t.trackId || ''));
@@ -2971,22 +3007,48 @@
     if ($('dPage')) {
       $('dPage').textContent = '第 ' + cur.page + ' 页' + (tot ? ' / ' + tot : '');
     }
-    if ($('dJumpTot')) $('dJumpTot').textContent = '/ ' + (tot || '—');
+    // v0.19.3：右侧单位跟着跳转模式走（按集号时显示总集数）
+    if ($('dJumpMode') && typeof syncJumpMode === 'function') syncJumpMode();
+    else if ($('dJumpTot')) $('dJumpTot').textContent = '/ ' + (tot || '—');
     if ($('dJump')) {
-      if (tot) $('dJump').max = String(tot);
-      // 只有输入框没被用户动过时才回填，避免打字打到一半被覆盖
-      if (!jumpDirty) $('dJump').value = String(cur.page);
+      if (jumpMode === 'index') {
+        if (cur.lastIndex) $('dJump').max = String(cur.lastIndex);
+      } else {
+        if (tot) $('dJump').max = String(tot);
+        // 只有输入框没被用户动过时才回填，避免打字打到一半被覆盖
+        if (!jumpDirty) $('dJump').value = String(cur.page);
+      }
     }
     if ($('dJumpGo')) $('dJumpGo').disabled = !tot;
+    // 目录到手后总集数才有值，这里补一次「共 N 集」
+    if (typeof renderStatLine === 'function') renderStatLine();
   }
 
-  // 取一次总页数（跳页/夹紧范围要用）。已有就只做一次缓存。
+  // 取一次目录信息（总页数 + 每页集号区间）。已有就只做一次缓存。
+  // v0.19.3：「跳到第 N 集」靠 pages[].min/max 精确换算出页码，不用用户自己算。
   async function ensureLastPage() {
     if (cur.lastPage) return cur.lastPage;
     try {
       var od = await api('GET', '/album/' + cur.id + '/outline');
-      cur.lastPage = Number((od && od.data && od.data.lastPage)) || 0;
+      var data = (od && od.data) || {};
+      cur.lastPage = Number(data.lastPage) || 0;
+      cur.outlinePages = Array.isArray(data.pages) ? data.pages : [];
+      cur.lastIndex = Number(data.lastIndex) || 0;
+      cur.firstIndex = Number(data.firstIndex) || 1;
     } catch (e) { }
+    return cur.lastPage || 0;
+  }
+
+  // 集号 → 页码。命中区间直接返回；集号有缺口时落到「第一个 max 大于它的页」。
+  function pageOfIndex(n) {
+    var pages = cur.outlinePages || [];
+    for (var i = 0; i < pages.length; i++) {
+      var p = pages[i];
+      if (n >= Number(p.min) && n <= Number(p.max)) return Number(p.page) || 0;
+    }
+    for (var j = 0; j < pages.length; j++) {
+      if (Number(pages[j].max) >= n) return Number(pages[j].page) || 0;
+    }
     return cur.lastPage || 0;
   }
 
@@ -3041,16 +3103,79 @@
     var tot = await ensureLastPage();
     if (tot) gotoPage(tot);
   });
-  // 跳页
+  // 跳转：支持「按页码」和「按集号」两种。
+  // v0.19.3：495 集的专辑里知道「第 300 集」很正常，但没人知道它在第 10 页还是第 11 页。
+  function syncJumpMode() {
+    var byIdx = jumpMode === 'index';
+    if ($('dJumpMode')) {
+      $('dJumpMode').textContent = byIdx ? '集' : '页';
+      $('dJumpMode').classList.toggle('on', byIdx);
+      $('dJumpMode').title = byIdx ? '当前按集号跳转（点击切回按页码）' : '当前按页码跳转（点击切换为按集号）';
+    }
+    if ($('dJump')) $('dJump').placeholder = byIdx ? '集号' : '页码';
+    if ($('dJumpTot')) {
+      $('dJumpTot').textContent = byIdx
+        ? '/ ' + (cur.lastIndex || '—')
+        : '/ ' + (cur.lastPage || '—');
+    }
+  }
+  if ($('dJumpMode')) $('dJumpMode').addEventListener('click', function () {
+    jumpMode = jumpMode === 'page' ? 'index' : 'page';
+    jumpDirty = true;              // 切模式后别用当前页码覆盖用户输入
+    syncJumpMode();
+    if ($('dJump')) $('dJump').value = '';
+  });
+
   async function doJump() {
     var box = $('dJump');
     if (!box) return;
     var v = Math.floor(Number(String(box.value).trim()) || 0);
-    if (!v || v < 1) { msg('请输入要跳到的页码（从 1 开始）', 'err'); return; }
+    if (!v || v < 1) {
+      msg(jumpMode === 'index' ? '请输入要跳到的集号（从 1 开始）' : '请输入要跳到的页码（从 1 开始）', 'err');
+      return;
+    }
     jumpDirty = false;
     box.blur && box.blur();
+    if (jumpMode === 'index') {
+      await jumpToIndex(v);
+      return;
+    }
     await gotoPage(v, { jump: true });
   }
+
+  // 跳到第 N 集：靠 outline 的 pages[].min/max 算出页码，落地后再滚动 + 高亮那一集
+  async function jumpToIndex(n) {
+    await ensureLastPage();
+    var maxIdx = cur.lastIndex || 0;
+    var clipped = (maxIdx && n > maxIdx);
+    if (clipped) n = maxIdx;
+    var p = pageOfIndex(n);
+    if (!p) { msg('取不到目录，先翻一页再试', 'err'); return; }
+    await gotoPage(p);
+    // 目标集可能被「只看未听」过滤掉了，跳之前临时关掉，免得用户看到空落
+    if (filterUnheard) {
+      filterUnheard = false;
+      if ($('ckUnheard')) $('ckUnheard').checked = false;
+      renderTracks(sortByOrder(curTracks));
+    }
+    var el = null;
+    var rows = ($('dTracks') && $('dTracks').children) || [];
+    for (var i = 0; i < rows.length; i++) {
+      var ds = rows[i].dataset || {};
+      if (Number(ds['data-idx'] || ds.idx) === n) { el = rows[i]; break; }
+    }
+    // 越界提示并进最后一条 msg，否则会被「已跳到…」覆盖掉
+    var prefix = clipped ? ('这本专辑只到第 ' + maxIdx + ' 集，') : '';
+    if (el) {
+      try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { }
+      el.classList.add('hl');
+      setTimeout(function () { el.classList.remove('hl'); }, 2600);
+      msg(prefix + '已跳到第 ' + p + ' 页 · 第 ' + n + ' 集');
+    } else {
+      msg(prefix + '已跳到第 ' + p + ' 页（第 ' + n + ' 集不在这一页，可能已下架）', clipped ? 'err' : '');
+    }
+  }
+
   if ($('dJumpGo')) $('dJumpGo').addEventListener('click', doJump);
   if ($('dJump')) {
     $('dJump').addEventListener('input', function () { jumpDirty = true; });
@@ -3067,8 +3192,13 @@
   });
   syncOrderBtn();
   $('btnPlayPage').addEventListener('click', function () {
-    if (!curTracks.length) { msg('本页没有曲目', 'err'); return; }
-    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '' });
+    // v0.19.3：勾了「只看未听」时连播的应该只是看得见的那些集
+    var list = (filterUnheard && curVisible.length) ? curVisible : curTracks;
+    if (!list.length) { msg(filterUnheard ? '本页没有未听的集' : '本页没有曲目', 'err'); return; }
+    playQueue(list, 0, {
+      id: cur.id, name: (cur.detail && cur.detail.name) || '',
+      cover: (cur.detail && cur.detail.cover) || '', page: cur.page
+    });
   });
   $('btnBack').addEventListener('click', function () {
     $('detailCard').classList.add('hide');
