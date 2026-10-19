@@ -585,7 +585,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.21.2</span>
+    <span class="ver" id="ver">v0.21.3</span>
   </div>
 
   <div class="tabs">
@@ -916,6 +916,17 @@
         <span class="spvnum" id="spVolNum">40</span>
         <button class="small plain" id="spVolUp" title="音量 +10">＋</button>
       </div>
+      <div class="spvol" style="margin-top:8px;">
+        <span class="muted small-txt" style="flex:none;">倍速</span>
+        <select id="spSpeed" title="音箱倍速（0.5–2.0，对走 miot 播放的队列实时生效）">
+          <option value="0.75">0.75x</option>
+          <option value="1">1.0x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="1.75">1.75x</option>
+          <option value="2">2.0x</option>
+        </select>
+      </div>
       <div class="btns" style="margin-top:8px;">
         <button class="small plain" id="spMute">静音</button>
         <button class="small plain" id="spVol40">音量 40</button>
@@ -1066,6 +1077,14 @@
       <button class="small plain" id="psStop" title="音箱停止">⏹</button>
       <button class="small plain" id="psVolDown" title="音箱音量 −10">🔉−</button>
       <button class="small plain" id="psVolUp" title="音箱音量 ＋10">🔊＋</button>
+      <select id="psSpeed" title="音箱倍速（0.5–2.0）" style="max-width:96px;">
+        <option value="0.75">0.75x</option>
+        <option value="1">1.0x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2.0x</option>
+      </select>
     </span>
     <button class="small plain" id="pDrive" title="车载模式：大按钮，开车时不开屏幕也能操作">🚗 车载</button>
   </div>
@@ -1154,6 +1173,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.21.2"></script>
+<script src="static/app.js?v=0.21.3"></script>
 </body>
 </html>
