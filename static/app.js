@@ -832,6 +832,7 @@
     }
     if (curTracks.length) renderTracks(sortByOrder(curTracks));
     syncOrderBtn();
+    if (typeof syncPageBtns === 'function') syncPageBtns();
     if (!silent) {
       // 切倒序：列表翻到最后一页，跟「从最新一集起播」对齐；切正序：回第一页
       if (cur.id && !$('detailCard').classList.contains('hide')) {
@@ -849,15 +850,19 @@
   async function jumpToOrderPage(toLast) {
     try {
       var o = await api('GET', '/album/' + cur.id + '/outline');
-      var p = toLast ? (o && o.data && o.data.lastPage) : 1;
+      var od = (o && o.data) || {};
+      cur.lastPage = Number(od.lastPage) || 0;
+      var p = toLast ? (cur.lastPage || 1) : 1;
       if (p && p !== cur.page) {
         await gotoPage(p);
-        msg('倒序：已跳到第 ' + p + ' 页（最新集在前）');
+        msg(playOrder === 'desc' ? '倒序：已跳到第 ' + p + ' 页（最新集在前）' : '正序：已回到第 1 页');
       } else {
         msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
+        syncPageBtns();
       }
     } catch (e) {
       msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
+      syncPageBtns();
     }
     syncOrderBtn();
     renderResume();
@@ -2514,11 +2519,13 @@
       renderTracks(d.tracks || []);
       renderResume();
       loadLibMarks(cur.id);
+      cur.lastPage = 0;
       $('dPage').textContent = '第 1 页';
-      $('dPrev').disabled = true;
-      $('dNext').disabled = !d.hasMore;
+      cur.page = 1;
+      syncPageBtns();
       // 倒序时直接翻到最后一页，最新一集在最前
       if (playOrder === 'desc' && d.hasMore) await jumpToOrderPage(true);
+      else syncPageBtns();
     } catch (e) { $('dName').textContent = '加载失败: ' + e.message; }
   }
 
@@ -2847,6 +2854,40 @@
     msg('已清除播放进度');
   });
 
+  // v0.18.9：翻页方向必须跟随播放顺序。
+  // 原来 dPrev/dNext 写死成 page±1，倒序时在第 1 页点「下一页」会跑到第 2 页，
+  // 而第 2 页的集数比第 1 页大 → 倒序列表反而成了旧→新，越翻越乱。
+  // 现在倒序时：「下一页」= 集数更小的页（page-1），「上一页」= 集数更大的页（page+1）。
+  function syncPageBtns() {
+    var desc = playOrder === 'desc';
+    var lastPage = cur.lastPage || 0;
+    if (desc) {
+      // 倒序：默认停在最后一页（最大集数在顶）
+      var hi = lastPage || (cur.hasMore ? null : cur.page);
+      if ($('dPrev')) {
+        $('dPrev').textContent = '更新 ▸';
+        $('dPrev').title = '集数更大的那一页';
+        $('dPrev').disabled = hi ? cur.page >= hi : !cur.hasMore;
+      }
+      if ($('dNext')) {
+        $('dNext').textContent = '◂ 更早';
+        $('dNext').title = '集数更小的那一页';
+        $('dNext').disabled = cur.page <= 1;
+      }
+    } else {
+      if ($('dPrev')) {
+        $('dPrev').textContent = '上一页';
+        $('dPrev').title = '集数更小的那一页';
+        $('dPrev').disabled = cur.page <= 1;
+      }
+      if ($('dNext')) {
+        $('dNext').textContent = '下一页';
+        $('dNext').title = '集数更大的那一页';
+        $('dNext').disabled = !cur.hasMore;
+      }
+    }
+  }
+
   async function gotoPage(p) {
     if (p < 1) return;
     $('dTracks').innerHTML = '<span class="muted">载入中…</span>';
@@ -2856,14 +2897,20 @@
       cur.page = p;
       cur.hasMore = r.data.hasMore;
       renderTracks(r.data.tracks || []);
-      $('dPage').textContent = '第 ' + p + ' 页';
-      $('dPrev').disabled = p <= 1;
-      $('dNext').disabled = !r.data.hasMore;
+      // v0.18.9：还没拿到总页数就补取一次目录，页码才能显示「第 N 页 / 总页数」
+      if (!cur.lastPage) {
+        try {
+          var od2 = await api('GET', '/album/' + cur.id + '/outline');
+          cur.lastPage = Number((od2 && od2.data && od2.data.lastPage)) || 0;
+        } catch (e2) { }
+      }
+      $('dPage').textContent = '第 ' + p + ' 页' + (cur.lastPage ? ' / ' + cur.lastPage : '');
+      syncPageBtns();
     } catch (e) { $('dTracks').textContent = '加载失败: ' + e.message; }
   }
 
-  $('dPrev').addEventListener('click', function () { gotoPage(cur.page - 1); });
-  $('dNext').addEventListener('click', function () { gotoPage(cur.page + 1); });
+  $('dPrev').addEventListener('click', function () { gotoPage(playOrder === 'desc' ? cur.page + 1 : cur.page - 1); });
+  $('dNext').addEventListener('click', function () { gotoPage(playOrder === 'desc' ? cur.page - 1 : cur.page + 1); });
   $('ckUnheard').addEventListener('change', function () {
     filterUnheard = !!this.checked;
     renderTracks(sortByOrder(curTracks));
