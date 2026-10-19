@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.20.0';
+var VERSION = '0.20.1';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -1442,6 +1442,9 @@ function buildReport(period) {
     from = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
   } else if (period === 'all') {
     from = 0;
+  } else if (period === 'day') {
+    var td = new Date();
+    from = new Date(td.getFullYear(), td.getMonth(), td.getDate()).getTime();
   } else {
     var today = new Date();
     var dow = today.getDay() === 0 ? 7 : today.getDay();   // 周一为一周开始
@@ -1454,7 +1457,7 @@ function buildReport(period) {
     var p = progress.tracks[k];
     if (p.finished && Number(p.at) >= from) finishedN += 1;
   });
-  var label = period === 'month' ? '本月' : (period === 'all' ? '累计' : '本周');
+  var label = period === 'month' ? '本月' : (period === 'all' ? '累计' : (period === 'day' ? '今日' : '本周'));
   var text;
   if (!r.sec) {
     text = label + '还没有收听记录。';
@@ -3326,8 +3329,22 @@ async function handleHTTPRequest(req) {
   // ---------- 收听统计 / 报告 ----------
   if (path === '/report' && method === 'GET') {
     var period = String(q.period || 'week');
-    if (['week', 'month', 'all'].indexOf(period) < 0) period = 'week';
+    if (['day', 'week', 'month', 'all'].indexOf(period) < 0) period = 'week';
     return jsonResp({ success: true, data: buildReport(period) });
+  }
+
+  // v0.20.1：播放统计总览（今日 / 本周 / 累计 + 连续天数），前端一次请求拿全
+  if (path === '/report/overview' && method === 'GET') {
+    var od = buildReport('day');
+    var ow = buildReport('week');
+    var oa = buildReport('all');
+    var ost = calcStreak();
+    return jsonResp({ success: true, data: {
+      daySec: od.sec, dayFin: od.finished,
+      weekSec: ow.sec, weekFin: ow.finished,
+      allSec: oa.sec, allFin: oa.finished, albumCount: oa.albumCount,
+      streakNow: ost.now || 0, streakBest: ost.best || 0
+    } });
   }
 
   if (path === '/dashboard' && method === 'GET') {
