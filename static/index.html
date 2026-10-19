@@ -27,6 +27,12 @@
     .tabs { display: flex; gap: 6px; margin-bottom: 12px; overflow-x: auto; }
     .tab { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--muted); font-size: 13px; cursor: pointer; white-space: nowrap; }
     .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    /* v0.20.0：搜索 + 收听合并成「发现」页，两条分段横条 */
+    .lsnBar { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 8px; -webkit-overflow-scrolling: touch; }
+    .lsnBar::-webkit-scrollbar { height: 0; }
+    .lsnSeg { flex: 0 0 auto; }
+    .lsnSeg.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+    .lsnHint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
     .card h2 { margin: 0 0 12px; font-size: 15px; }
     label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
@@ -432,12 +438,11 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.19.4</span>
+    <span class="ver" id="ver">v0.20.0</span>
   </div>
 
   <div class="tabs">
-    <button class="tab active" data-tab="search">搜索</button>
-    <button class="tab" data-tab="recent">收听</button>
+    <button class="tab active" data-tab="search">发现</button>
     <button class="tab" data-tab="subs">订阅 <span id="subBadge"></span></button>
     <button class="tab" data-tab="lib">已导入</button>
     <button class="tab" data-tab="set">设置</button>
@@ -483,6 +488,64 @@
         <button class="small" id="btnImportSel">导入所选</button>
       </div>
     </div>
+
+  <!-- ===== 发现：搜索 + 收听（同一页，未搜索时看「继续听」） ===== -->
+  <div id="listenWrap">
+    <div class="lsnBar">
+      <button class="small plain lsnSeg on" data-seg="recent" title="按专辑看听到哪了，一键继续">🎧 继续听</button>
+      <button class="small plain lsnSeg" data-seg="tl" title="逐条记录听了哪一集、什么时候">🕒 历史</button>
+      <button class="small plain lsnSeg" data-seg="dash" title="每天几点听、听多久">📈 习惯</button>
+      <button class="small plain lsnSeg" data-seg="rp" title="按周/月/累计的收听统计">📊 报告</button>
+    </div>
+    <div class="card" id="lsn-recent">
+      <h2>🎧 最近收听</h2>
+      <div class="muted small-txt" id="recentStat">还没有收听记录。搜一张专辑点开，随便听一集就会出现在这里。</div>
+      <div class="btns">
+        <button class="small plain" id="btnRecentRefresh">刷新</button>
+        <button class="small ghost" id="btnRecentClear">清空记录</button>
+      </div>
+      <div id="recentList" style="margin-top:8px;"></div>
+    </div>
+    <div class="card hide" id="lsn-tl">
+      <h2>🕒 播放历史时间线</h2>
+      <div class="btns">
+        <button class="small plain tlBtn active" data-days="1">今天</button>
+        <button class="small plain tlBtn" data-days="7">近 7 天</button>
+        <button class="small plain tlBtn" data-days="30">近 30 天</button>
+        <button class="small plain" id="btnTlRefresh">刷新</button>
+        <input type="text" id="tlKw" placeholder="搜历史：书名或集名" style="width:150px;" />
+      </div>
+      <div class="muted small-txt" id="tlStat" style="margin-top:8px;">—</div>
+      <div id="tlBody" style="margin-top:6px;"></div>
+      <div class="muted small-txt" style="margin-top:6px;">按「听了哪一集、听到哪儿、什么时候」逐条记录，跨设备合并，最多保留 2000 条。</div>
+    </div>
+    <div class="card hide" id="lsn-dash">
+      <h2>📈 听书习惯</h2>
+      <div class="btns">
+        <button class="small plain" id="btnDashRefresh">刷新</button>
+      </div>
+      <div id="dashBody" style="margin-top:10px;">
+        <div class="muted small-txt">加载中…</div>
+      </div>
+    </div>
+    <div class="card hide" id="lsn-rp">
+      <h2>📊 收听报告</h2>
+      <div class="btns">
+        <button class="small plain rpBtn" data-period="week">本周</button>
+        <button class="small plain rpBtn" data-period="month">本月</button>
+        <button class="small plain rpBtn" data-period="all">累计</button>
+        <button class="small" id="btnRpSpeak" title="用音箱把报告念出来">🔊 念给我听</button>
+        <button class="small plain" id="btnRpExport" title="把当前报告存成 Markdown 文件">⬇ 导出 MD</button>
+      </div>
+      <div id="rpBody" style="margin-top:12px;">
+        <div class="muted small-txt">点上面的「本周 / 本月 / 累计」看统计。</div>
+      </div>
+      <div class="btns" style="margin-top:10px;">
+        <button class="small ghost" id="btnRpReset">清空统计</button>
+      </div>
+      <div class="muted small-txt" style="margin-top:6px;">只统计在本插件播放器里实际播放的时长；上报到 NAS，换设备也合并。</div>
+    </div>
+  </div>
 
     <div class="card hide" id="detailCard">
       <div class="row" style="margin-bottom:10px;">
@@ -546,60 +609,6 @@
     </div>
   </section>
 
-  <!-- ===== 收听（最近收听 / 继续听） ===== -->
-  <section id="tab-recent" class="hide">
-    <div class="card">
-      <h2>🎧 最近收听</h2>
-      <div class="muted small-txt" id="recentStat">还没有收听记录。搜一张专辑点开，随便听一集就会出现在这里。</div>
-      <div class="btns">
-        <button class="small plain" id="btnRecentRefresh">刷新</button>
-        <button class="small ghost" id="btnRecentClear">清空记录</button>
-      </div>
-      <div id="recentList" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>🕒 播放历史时间线</h2>
-      <div class="btns">
-        <button class="small plain tlBtn active" data-days="1">今天</button>
-        <button class="small plain tlBtn" data-days="7">近 7 天</button>
-        <button class="small plain tlBtn" data-days="30">近 30 天</button>
-        <button class="small plain" id="btnTlRefresh">刷新</button>
-        <input type="text" id="tlKw" placeholder="搜历史：书名或集名" style="width:150px;" />
-      </div>
-      <div class="muted small-txt" id="tlStat" style="margin-top:8px;">—</div>
-      <div id="tlBody" style="margin-top:6px;"></div>
-      <div class="muted small-txt" style="margin-top:6px;">按「听了哪一集、听到哪儿、什么时候」逐条记录，跨设备合并，最多保留 2000 条。</div>
-    </div>
-
-    <div class="card">
-      <h2>📈 听书习惯</h2>
-      <div class="btns">
-        <button class="small plain" id="btnDashRefresh">刷新</button>
-      </div>
-      <div id="dashBody" style="margin-top:10px;">
-        <div class="muted small-txt">加载中…</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>📊 收听报告</h2>
-      <div class="btns">
-        <button class="small plain rpBtn" data-period="week">本周</button>
-        <button class="small plain rpBtn" data-period="month">本月</button>
-        <button class="small plain rpBtn" data-period="all">累计</button>
-        <button class="small" id="btnRpSpeak" title="用音箱把报告念出来">🔊 念给我听</button>
-        <button class="small plain" id="btnRpExport" title="把当前报告存成 Markdown 文件">⬇ 导出 MD</button>
-      </div>
-      <div id="rpBody" style="margin-top:12px;">
-        <div class="muted small-txt">点上面的「本周 / 本月 / 累计」看统计。</div>
-      </div>
-      <div class="btns" style="margin-top:10px;">
-        <button class="small ghost" id="btnRpReset">清空统计</button>
-      </div>
-      <div class="muted small-txt" style="margin-top:6px;">只统计在本插件播放器里实际播放的时长；上报到 NAS，换设备也合并。</div>
-    </div>
-  </section>
 
   <!-- ===== 订阅 ===== -->
   <section id="tab-subs" class="hide">
@@ -1089,6 +1098,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.19.4"></script>
+<script src="static/app.js?v=0.20.0"></script>
 </body>
 </html>
