@@ -1577,16 +1577,21 @@
     setOrder(playOrder === 'desc' ? 'asc' : 'desc');
   });
 
-  // 倍速（跨会话记忆）
-  var rateSel = $('pRate');
-  var savedRate = sGet(RATE_KEY);
-  if (savedRate) rateSel.value = savedRate;
-  rateSel.addEventListener('change', function () {
-    var v = Number(this.value) || 1;
+  // 倍速（无级滑杆 0.5–3.0，跨会话记忆；两处滑杆互相同步）
+  function setRate(v, quiet) {
+    v = Math.min(3, Math.max(0.5, Math.round(v * 100) / 100)) || 1;
     $('audio').playbackRate = v;
     sSet(RATE_KEY, String(v));
-    msg('倍速 ' + v + 'x');
-  });
+    var sv = String(Math.round(v * 100));
+    if ($('pRate').value !== sv) $('pRate').value = sv;
+    if ($('fpRate').value !== sv) $('fpRate').value = sv;
+    $('pRateNum').textContent = v.toFixed(2) + 'x';
+    $('fpRateNum').textContent = v.toFixed(2) + 'x';
+    if (!quiet) msg('倍速 ' + v.toFixed(2) + 'x');
+  }
+  $('pRate').addEventListener('input', function () { setRate(Number(this.value) / 100); });
+  $('fpRate').addEventListener('input', function () { setRate(Number(this.value) / 100); });
+  setRate(Number(sGet(RATE_KEY) || 1) || 1, true);
 
   // 睡眠定时
   // 记忆上次选择：多数人固定「本集播完」或「30 分钟」，每次重开都要重选很烦
@@ -2102,7 +2107,11 @@
     $('fpCur').textContent = fmtTime(cur);
     if (!fpDragging) $('fpSeek').value = d ? Math.round(cur / d * 1000) : 0;
     $('fpPlay').textContent = a.paused ? '▶' : '⏸';
-    if ($('fpRate').value !== String(a.playbackRate)) $('fpRate').value = String(a.playbackRate || 1);
+    var rsv = String(Math.round((a.playbackRate || 1) * 100));
+    if ($('fpRate').value !== rsv) $('fpRate').value = rsv;
+    if ($('pRate').value !== rsv) $('pRate').value = rsv;
+    $('fpRateNum').textContent = (a.playbackRate || 1).toFixed(2) + 'x';
+    $('pRateNum').textContent = (a.playbackRate || 1).toFixed(2) + 'x';
     if ($('fpQueue')) $('fpQueue').textContent = queue.length > 1 ? '☰ ' + (qi + 1) + '/' + queue.length : '☰';
   }
 
@@ -2122,13 +2131,7 @@
     var a = $('audio'); a.currentTime = Math.min(a.duration || 1e9, (a.currentTime || 0) + 30);
   });
   $('fpBm').addEventListener('click', function () { addBmNowQuick(); });
-  $('fpRate').addEventListener('change', function () {
-    var v = Number(this.value) || 1;
-    $('audio').playbackRate = v;
-    sSet(RATE_KEY, String(v));
-    $('pRate').value = String(v);
-    msg('倍速 ' + v + 'x');
-  });
+  // v0.21.2：全屏播放条倍速改为无级滑杆，input 事件统一走上面的 setRate
   $('fpSeek').addEventListener('input', function () { fpDragging = true; });
   $('fpSeek').addEventListener('change', function () {
     var a = $('audio');
