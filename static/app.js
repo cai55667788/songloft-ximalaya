@@ -3423,8 +3423,16 @@
         bDel.className = 'small plain';
         bDel.textContent = '删除';
         bDel.addEventListener('click', async function () {
-          if (!confirm('删除歌单《' + a.name + '》及其导入记录？歌曲库条目保留。')) return;
-          await api('POST', '/imported/delete', { playlist_id: a.playlistId });
+          if (!confirm('删除歌单《' + a.name + '》及其导入记录？')) return;
+          // v0.18.5：歌曲库条目删不删，用户自己选——确定=连歌曲一起删，取消=只删歌单
+          var delSongs = confirm('是否同时删除歌曲库里的这 ' + (a.count || '') + ' 条歌曲？\n\n「确定」= 连歌曲库条目一起删（不可恢复）\n「取消」= 只删歌单，歌曲库条目保留');
+          try {
+            var r = await api('POST', '/imported/delete', { playlist_id: a.playlistId, delete_songs: delSongs });
+            var dd = (r && r.data) || {};
+            if (delSongs && dd.songFailed > 0) msg('歌单已删；歌曲库删除 ' + (dd.songDeleted || 0) + ' 条、失败 ' + dd.songFailed + ' 条', 'err');
+            else if (delSongs) msg('歌单与 ' + (dd.songDeleted || 0) + ' 条歌曲库条目已删除', 'ok');
+            else msg('歌单已删，歌曲库条目保留', 'ok');
+          } catch (e) { msg('删除失败: ' + e.message, 'err'); }
           loadImported();
         });
         ops.appendChild(bPlay); ops.appendChild(bDl); ops.appendChild(bOpen); ops.appendChild(bDel);
