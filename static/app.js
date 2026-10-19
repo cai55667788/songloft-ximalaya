@@ -490,6 +490,39 @@
     }, 260);
   });
 
+  // v0.21.3：音箱倍速（后端转发 miot /player/speed，0.5–2.0；两处下拉互相同步并记住选择）
+  var SPK_SPEED_KEY = 'xm_spk_speed';
+  async function spSpeedSet(v) {
+    try {
+      var r = await api('POST', '/speaker/speed', { speed: v });
+      if (r && r.success !== false) {
+        try { sSet(SPK_SPEED_KEY, String(v)); } catch (e) { /* */ }
+        msg((r.data && r.data.message) || ('音箱倍速 ' + Number(v).toFixed(2) + 'x'), 'ok');
+        return true;
+      }
+      msg('❌ ' + ((r && r.error) || '设置失败'), 'err');
+    } catch (e) { msg('设置失败: ' + e.message, 'err'); }
+    return false;
+  }
+  function spSpeedUI(v) {
+    var sv = String(v);
+    ['spSpeed', 'psSpeed'].forEach(function (id) {
+      var el = $(id);
+      if (el && el.value !== sv) el.value = sv;
+    });
+  }
+  ['spSpeed', 'psSpeed'].forEach(function (id) {
+    if ($(id)) $(id).addEventListener('change', function () {
+      var v = Number(this.value) || 1;
+      spSpeedUI(v);
+      spSpeedSet(v);
+    });
+  });
+  (function () {
+    var sv = Number(sGet(SPK_SPEED_KEY));
+    if (sv) spSpeedUI(sv);
+  })();
+
   $('spReplay').addEventListener('click', async function () {
     try {
       var st = await api('GET', '/speaker/state');
