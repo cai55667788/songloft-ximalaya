@@ -121,7 +121,7 @@
       if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); renderTimeline(); loadDashboard(); }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
-      if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); }
+      if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); loadSpState(); }
     });
   });
 
@@ -335,6 +335,106 @@
     var p = v.split('|');
     deviceSaved = v;
     try { await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } }); } catch (e) { /* */ }
+    loadSpState();
+  });
+
+  // ---------- v0.18.8：音箱遥控 ----------
+  var spVolTimer = null;
+  var spLastVol = 40;
+
+  function spSetVolUI(v) {
+    v = Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+    spLastVol = v;
+    var r = $('spVol'), n = $('spVolNum');
+    if (r) r.value = String(v);
+    if (n) n.textContent = String(v);
+  }
+
+  async function loadSpState() {
+    try {
+      var r = await api('GET', '/speaker/state');
+      if (!r || r.success === false) {
+        $('spState').textContent = '⚠️ ' + ((r && r.error) || '读取设备失败');
+        $('spState').className = 'muted small-txt err';
+        return;
+      }
+      var d = r.data || {};
+      var on = d.presence === 'online';
+      $('spState').className = 'muted small-txt' + (on ? '' : ' err');
+      $('spState').textContent = (on ? '🟢 ' : (d.presence === 'offline' ? '⚫ ' : '⚪ ')) +
+        (d.device_name || '音箱') + (on ? ' 在线' : d.presence === 'offline' ? ' 离线' : ' 状态未知') +
+        (d.last && d.last.title ? ' · 上次播：' + d.last.title : '');
+      if (typeof d.volume === 'number') spSetVolUI(d.volume);
+      else if (d.last && typeof d.last.volume === 'number') spSetVolUI(d.last.volume);
+    } catch (e) {
+      $('spState').textContent = '⚠️ ' + e.message;
+      $('spState').className = 'muted small-txt err';
+    }
+  }
+
+  async function spCtl(action, extra) {
+    var body = Object.assign({ action: action }, extra || {});
+    try {
+      var r = await api('POST', '/speaker/ctl', body);
+      if (r && r.success !== false) {
+        msg((r.data && r.data.message) || '已发送', 'ok');
+        return true;
+      }
+      msg('❌ ' + ((r && r.error) || '操作失败'), 'err');
+    } catch (e) { msg('操作失败: ' + e.message, 'err'); }
+    return false;
+  }
+
+  $('spStop').addEventListener('click', function () { spCtl('stop'); });
+  $('spPause').addEventListener('click', function () { spCtl('pause'); });
+  $('spResume').addEventListener('click', function () { spCtl('resume'); });
+  $('spInterrupt').addEventListener('click', function () { spCtl('interrupt'); });
+  $('spVolUp').addEventListener('click', async function () {
+    if (await spCtl('volup', { step: 10 })) loadSpState();
+  });
+  $('spVolDown').addEventListener('click', async function () {
+    if (await spCtl('voldown', { step: 10 })) loadSpState();
+  });
+  $('spMute').addEventListener('click', async function () {
+    if (await spCtl('volume', { volume: 0 })) spSetVolUI(0);
+  });
+  $('spVol40').addEventListener('click', async function () {
+    if (await spCtl('volume', { volume: 40 })) spSetVolUI(40);
+  });
+
+  // 拖动时只改 UI，松手（change）才下发，避免一路拖一路发
+  $('spVol').addEventListener('input', function () { spSetVolUI(this.value); });
+  $('spVol').addEventListener('change', function () {
+    var v = Number(this.value) || 0;
+    if (spVolTimer) clearTimeout(spVolTimer);
+    spVolTimer = setTimeout(async function () {
+      spVolTimer = null;
+      await spCtl('volume', { volume: v });
+    }, 260);
+  });
+
+  $('spReplay').addEventListener('click', async function () {
+    try {
+      var st = await api('GET', '/speaker/state');
+      var last = (st && st.data && st.data.last) || null;
+      if (!last || !last.trackId) { msg('还没有在音箱放过东西，先从歌单点「播到音箱」试试', 'err'); return; }
+      var r = await api('POST', '/speaker/play-track', { track_id: last.trackId, title: last.title, url: last.url });
+      msg(r.success !== false ? ('🔁 ' + ((r.data && r.data.message) || '已重播')) : ('❌ ' + r.error), r.success !== false ? 'ok' : 'err');
+    } catch (e) { msg('重播失败: ' + e.message, 'err'); }
+  });
+
+  $('spPlayPl').addEventListener('click', async function () {
+    var plId = 0, plName = '';
+    try {
+      var r = await api('GET', '/imported');
+      var list = (r && r.data && r.data.imported) || [];
+      if (!list.length) { msg('还没有导入过歌单', 'err'); return; }
+      plId = list[0].playlistId; plName = list[0].name;
+    } catch (e) { msg('读取歌单失败: ' + e.message, 'err'); return; }
+    try {
+      var rr = await api('POST', '/speaker/play-playlist', { playlist_id: plId, mode: $('mode').value });
+      msg(rr.success !== false ? ('▶ 已在音箱播放《' + plName + '》') : ('❌ ' + rr.error), rr.success !== false ? 'ok' : 'err');
+    } catch (e) { msg('播放失败: ' + e.message, 'err'); }
   });
 
   async function playPlaylist(playlistId, name) {
@@ -2639,10 +2739,29 @@
       var du = document.createElement('span');
       du.className = 'du';
       du.style.display = 'none';   // 时长已并入元信息行，占位保留以免样式回退
+      // v0.18.8：一集直接推到音箱播（不打断本地播放）
+      var spb = document.createElement('button');
+      spb.className = 'small plain';
+      spb.textContent = '🔊';
+      spb.title = '在音箱播放这一集';
+      spb.style.flex = 'none';
+      spb.addEventListener('click', async function (ev) {
+        ev.stopPropagation();
+        spb.disabled = true;
+        var old = spb.textContent;
+        spb.textContent = '…';
+        try {
+          var rr = await api('POST', '/speaker/play-track', { track_id: t.trackId, title: t.title });
+          msg(rr.success !== false ? ('🔊 已在音箱播放：' + t.title) : ('❌ ' + rr.error), rr.success !== false ? 'ok' : 'err');
+        } catch (e) { msg('推送到音箱失败: ' + e.message, 'err'); }
+        spb.textContent = old;
+        spb.disabled = false;
+      });
       var pl = document.createElement('button');
       pl.className = 'small plain';
       pl.textContent = '▶';
       d.appendChild(du);
+      d.appendChild(spb);
       d.appendChild(pl);
       d.addEventListener('click', function () { playQueue(curTracks, i, album); });
       el.appendChild(d);
@@ -4261,6 +4380,7 @@
   function boot() {
     loadLogin();
     loadDevices();
+    loadSpState();
     loadAuto();
     loadProgCfg();
     loadTts();
