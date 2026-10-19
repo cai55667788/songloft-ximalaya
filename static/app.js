@@ -1025,6 +1025,29 @@
   }
 
   if ($('pDrive')) $('pDrive').addEventListener('click', function () { driveShow(true); });
+
+  // v0.19.1：播放条上的音箱遥控（复用设置页的 spCtl）
+  if ($('pSpk')) {
+    $('pSpk').addEventListener('click', function () {
+      var p = $('pSpkPanel');
+      p.classList.toggle('hide');
+      this.classList.toggle('on', !p.classList.contains('hide'));
+    });
+    $('psPush').addEventListener('click', async function () {
+      var t = queue[qi];
+      if (!t) { msg('当前没有在播的集', 'err'); return; }
+      try {
+        var r = await api('POST', '/speaker/play-track', { track_id: t.trackId, title: t.title });
+        msg(r && r.success !== false ? '🔊 已推到音箱：《' + t.title + '》' : '❌ ' + (r && r.error || '推送失败'), r && r.success !== false ? 'ok' : 'err');
+      } catch (e) { msg('推送失败: ' + e.message, 'err'); }
+    });
+    $('psPause').addEventListener('click', function () { spCtl('pause'); });
+    $('psResume').addEventListener('click', function () { spCtl('resume'); });
+    $('psStop').addEventListener('click', function () { spCtl('stop'); });
+    $('psVolDown').addEventListener('click', async function () { if (await spCtl('voldown', { step: 10 })) loadSpState(); });
+    $('psVolUp').addEventListener('click', async function () { if (await spCtl('volup', { step: 10 })) loadSpState(); });
+  }
+
   if ($('driveExit')) $('driveExit').addEventListener('click', function () { driveShow(false); });
   if ($('drivePlay')) $('drivePlay').addEventListener('click', function () {
     var a = $('audio');
