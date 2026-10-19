@@ -419,13 +419,120 @@
   .grpname:hover { color: var(--accent); }
   .grpdate { flex: none; font-variant-numeric: tabular-nums; }
 
+
+    /* ========== v0.21.0 UI 视觉刷新（集中覆盖，旧规则不动） ========== */
+    :root {
+      --accent-deep: #7f0f2e;
+      --border-soft: #eceef2;
+      --shadow-card: 0 1px 2px rgba(16,24,40,.04), 0 6px 20px rgba(16,24,40,.06);
+      --shadow-float: 0 12px 32px rgba(0,0,0,.22);
+      --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --accent-deep: #c2455f;
+        --border-soft: #2e313a;
+        --shadow-card: 0 1px 2px rgba(0,0,0,.35), 0 6px 20px rgba(0,0,0,.28);
+        --shadow-float: 0 12px 32px rgba(0,0,0,.5);
+        --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      background:
+        radial-gradient(1100px 380px at 50% -140px, color-mix(in srgb, var(--accent) 7%, transparent), transparent 72%),
+        var(--bg);
+    }
+    * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 38%, transparent) transparent; }
+
+    /* 顶栏：滚动时 tab 仍可用 */
+    .hdr {
+      position: sticky; top: 0; z-index: 50;
+      margin: -14px -14px 12px; padding: 12px 14px 9px;
+      background: color-mix(in srgb, var(--bg) 80%, transparent);
+      -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4);
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .hdr .top { margin-bottom: 8px; }
+    .hdr .tabs { margin-bottom: 0; }
+    .top h1 { font-size: 19px; font-weight: 800; letter-spacing: .2px; }
+    .top .ver { font-weight: 600; background: var(--card); box-shadow: var(--shadow-card); border-color: var(--border-soft); }
+    .tab { transition: color .15s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease; font-weight: 500; }
+    .tab.active { font-weight: 600; box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 42%, transparent); }
+    @media (hover: hover) {
+      .tab:not(.active):hover { color: var(--text); border-color: color-mix(in srgb, var(--muted) 45%, var(--border)); background: var(--card); }
+    }
+    #subBadge { display: inline-block; min-width: 14px; text-align: center; color: #fff; background: var(--err);
+      border-radius: 999px; font-size: 10px; line-height: 14px; padding: 0 4px; margin-left: 2px; font-weight: 700; vertical-align: 1px; }
+    #subBadge:empty { display: none; }
+
+    /* 卡片与标题 */
+    .card { border-radius: 16px; box-shadow: var(--shadow-card); border-color: var(--border-soft); }
+    .card h2 { font-size: 15.5px; font-weight: 700; letter-spacing: .2px; }
+
+    /* 按钮：主按钮渐变 + 按压反馈；聚焦光环 */
+    button { transition: transform .06s ease, box-shadow .18s ease, filter .18s ease, background .15s ease; }
+    button:not(.plain):not(.ghost):not(.tab) {
+      background: linear-gradient(180deg, var(--accent), var(--accent-deep));
+      box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 32%, transparent);
+    }
+    @media (hover: hover) {
+      button:not(.plain):not(.ghost):not(.tab):hover { filter: brightness(1.07); box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 46%, transparent); }
+      button.plain:hover, button.ghost:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+    }
+    button:active { transform: scale(.97); }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: none; box-shadow: var(--ring);
+    }
+    input[type=text]:focus, input[type=number]:focus, input[type=time]:focus, textarea:focus, select:focus {
+      border-color: var(--accent); outline: none; box-shadow: var(--ring);
+    }
+    #kw { height: 42px; border-radius: 12px; }
+
+    /* 列表行：悬停高亮（不产生布局位移） */
+    .line, .trk, .res-item { border-bottom-color: var(--border-soft); border-radius: 10px; }
+    .line { margin-inline: -8px; padding-inline: 8px; }
+    .trk { margin-inline: -8px; padding-inline: 8px; }
+    .res-item { margin-inline: -8px; padding-inline: 8px; }
+    @media (hover: hover) {
+      .line:hover, .trk:hover, .res-item:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    }
+
+    /* 播放条：悬浮胶囊卡片 */
+    #player {
+      left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+      border-radius: 16px; border: 1px solid var(--border-soft); box-shadow: var(--shadow-float);
+    }
+    body.has-player { padding-bottom: calc(158px + env(safe-area-inset-bottom, 0px)); }
+    #jobBar {
+      left: 10px; right: 10px; bottom: 8px; border-radius: 12px;
+      border: 1px solid var(--border-soft); box-shadow: 0 8px 24px rgba(0,0,0,.18);
+    }
+    /* 底部抽屉更圆润 */
+    #qPanel .sheet, #bmPanel .sheet { border-radius: 18px 18px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.24); }
+
+    /* 数据块：淡红渐变，数值更醒目 */
+    .dash, .stat { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, var(--card)), var(--bg)); border-radius: 12px; }
+    .dash .dv { font-size: 20px; }
+    .stat .sv { font-size: 18px; }
+
+    @media (max-width: 560px) {
+      .hdr { margin: -10px -10px 10px; padding: 10px 10px 8px; }
+      body.has-player { padding-bottom: calc(200px + env(safe-area-inset-bottom, 0px)); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+      html { scroll-behavior: auto; }
+    }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.20.4</span>
+    <span class="ver" id="ver">v0.21.0</span>
   </div>
 
   <div class="tabs">
@@ -434,6 +541,7 @@
     <button class="tab" data-tab="lib">已导入</button>
     <button class="tab" data-tab="set">设置</button>
   </div>
+  </header>
 
   <!-- ===== 搜索 ===== -->
   <section id="tab-search">
@@ -1005,6 +1113,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.20.4"></script>
+<script src="static/app.js?v=0.21.0"></script>
 </body>
 </html>
