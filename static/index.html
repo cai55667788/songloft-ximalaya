@@ -103,7 +103,14 @@
     .trk .tm .ok { color: var(--ok); }
     .trk .du { color: var(--muted); font-size: 12px; flex: none; }
     .trk .tu { color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
-    .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 10px; }
+    .pager { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .pager button { flex: 0 0 auto; min-width: 0; padding: 6px 10px; }
+    /* v0.19.0：跳页行 —— 手机窄屏也能放下 */
+    .pager2 { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .pager2 input { width: 68px; flex: 0 0 auto; text-align: center; padding: 6px 8px; }
+    .pager2 .jp-num { font-variant-numeric: tabular-nums; }
+    .pager2 button { flex: 0 0 auto; }
+    #dPage { white-space: nowrap; }
 
     /* 订阅 / 已导入行 */
     .line { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
@@ -411,7 +418,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.18.9</span>
+    <span class="ver" id="ver">v0.19.0</span>
   </div>
 
   <div class="tabs">
@@ -508,10 +515,18 @@
       </div>
       <div id="dTracks" style="margin-top:12px;"></div>
       <div class="pager">
+        <button class="small plain" id="dFirst" title="第一页">⏮</button>
         <button class="small plain" id="dPrev">上一页</button>
         <span class="muted small-txt" id="dPage">第 1 页</span>
         <button class="small plain" id="dNext">下一页</button>
-        <button class="small" id="btnPlayPage" style="margin-left:8px;">▶ 本页连播</button>
+        <button class="small plain" id="dLast" title="最后一页">⏭</button>
+      </div>
+      <div class="pager2">
+        <span class="muted small-txt">跳到</span>
+        <input type="number" id="dJump" min="1" placeholder="页码" />
+        <span class="muted small-txt" id="dJumpTot">/ —</span>
+        <button class="small plain" id="dJumpGo">跳转</button>
+        <button class="small" id="btnPlayPage">▶ 本页连播</button>
       </div>
     </div>
   </section>
@@ -1048,6 +1063,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.18.9"></script>
+<script src="static/app.js?v=0.19.0"></script>
 </body>
 </html>
