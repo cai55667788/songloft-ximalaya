@@ -83,7 +83,10 @@
       setTimeout(function () { if (!jobActive) $('jobBar').classList.remove('show'); }, 4000);
     }
   }
-  function esc(s) { return String(s == null ? '' : s); }
+  // v0.19.4：原来 esc 只是 null 保护，却被当成「转义」用在 innerHTML 拼接里 ——
+  // 专辑名/集名/错误文案里带 <img onerror> 就会在 webview 里执行。统一按 HTML 转义。
+  // 注意：textContent / msg() 这类纯文本出口不要过 esc，否则会看到 &amp; 之类实体。
+  function esc(s) { return escHtml(s); }
   function escHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -95,11 +98,17 @@
     if (n >= 10000) return (n / 10000).toFixed(1) + '万';
     return String(n);
   }
+  // v0.19.4：原来不取整，接口给 59.6 秒就会渲染成「0:59.6」
   function fmtDur(sec) {
-    sec = Number(sec) || 0;
+    sec = Math.max(0, Math.round(Number(sec) || 0));
     var m = Math.floor(sec / 60), s = sec % 60;
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
+
+  // v0.19.4：「已听完」原来有三套阈值（列表 -20 / 续播条 -5 / 上报 -15），
+  // 同一集在不同位置状态会自相矛盾。统一成一个判据。
+  var DONE_GAP = 20;
+  function posDone(p) { return !!(p && p.d && Number(p.t) >= Number(p.d) - DONE_GAP); }
 
   // ---------- 标签页 ----------
   document.querySelectorAll('.tab').forEach(function (btn) {
@@ -271,7 +280,8 @@
           qrSetState('<span class="err">已拿到登录凭据，但验证未通过：' + esc(d.error || '') + '</span>');
         } else {
           qrSetState('<span class="ok">✅ 登录成功' + (d.user && d.user.nickname ? '：' + esc(d.user.nickname) : '') + '</span>');
-          msg('✅ 扫码登录成功' + (d.user && d.user.nickname ? '：' + esc(d.user.nickname) : ''), 'ok');
+          // msg() 走 textContent，不能再转义，否则昵称里的 & 会显示成 &amp;
+          msg('✅ 扫码登录成功' + (d.user && d.user.nickname ? '：' + d.user.nickname : ''), 'ok');
         }
         loadLogin();
         loadMySubs(true);
@@ -493,13 +503,13 @@
         index: c.index,
         title: c.title,
         t: o.t, d: o.d, at: o.at,
-        finished: !!(o.t >= o.d - 15)
+        finished: posDone(o)
       });
       // 跨设备：攒一条待上传的进度，8 秒合并上报一次
       queueProg({
         trackId: trackId, albumId: c.albumId, albumName: c.albumName || '',
         title: c.title, index: c.index, cover: c.cover || '',
-        t: o.t, d: o.d, at: o.at, finished: !!(o.t >= o.d - 15),
+        t: o.t, d: o.d, at: o.at, finished: posDone(o),
         listened: takeListened()
       });
     }
@@ -510,9 +520,11 @@
   var progQueue = [], progTimer = null;
 
   // 实际收听时长：播放中每走 1 秒计 1 秒，切集/暂停时结算到待上报的 listened 字段
-  var listenedAcc = 0;
-  var lastTickAt = 0;
   var LISTEN_KEY = 'xm_listened_pending';
+  // v0.19.4：LISTEN_KEY 原来只写不读 —— 每 60 秒辛苦落的盘，刷新页面就丢了，
+  // 而它存在的意义正是「关页少丢一点」。开机接上没上报的秒数。
+  var listenedAcc = Number(sGet(LISTEN_KEY)) || 0;
+  var lastTickAt = 0;
 
   function takeListened() {
     var n = Math.round(listenedAcc);
@@ -907,7 +919,9 @@
     $('pTitle').textContent = '载入中… ' + label;
     try {
       var r = await api('GET', '/track/' + t.trackId + '/url');
-      if (my !== playSeq) return;   // 期间用户又点了别的集，这次结果作废
+      // v0.19.4：队列被清空（关播放器 / 清空队列）时也要作废，否则音频会在后台自己响起来，
+      // 而且 curPlayingId 永远不会置上 —— 看不见、暂停不了、进度也不落盘。
+      if (my !== playSeq || !queue[idx]) return;
       if (!r || r.success === false) {
         // 拿不到地址：自动再试一次（接口抖动很常见），还不行才报错
         if (!retry) {
@@ -1202,19 +1216,29 @@
   async function extendQueue() {
     var c = queue[qi];
     if (!c || !c.albumId) return false;
-    if (String(cur.id) !== String(c.albumId)) return false;
+    // v0.19.4：不再要求「详情页开的正好是这张专辑」。从「收听」tab / 时间线播别的专辑的集时，
+    // 原来直接 return false，自动连播彻底失效（只播 1 集就报「已播完本页共 1 集」）。
+    var albumId = String(c.albumId);
+    var my = playSeq;   // 记下发起时的播放序号：await 回来后用户可能已经点了别的集
 
     var seen = {};
     queue.forEach(function (x) { seen[String(x.trackId)] = 1; });
     var lastIdx = Number(c.index) || 0;
     // v0.19.2：用队列自己的页码。原来读 cur.page（详情页当前翻到哪页），
     // 边听边往后翻标题时，播完会直接跳到「下一页的下一页」，中间一整页被跳过。
-    var page = Number(queueMeta.page) || cur.page || 1;
+    // v0.19.4：书签/最近收听/时间线这些单集入口没有 album.page，会退化成「详情页当前页」，
+    // 而那一集可能在完全不同的页 → 跨页续播会倒着跳。先用集号反推真实页码。
+    var page = 0;
+    if (String(cur.id) === albumId && cur.outlinePages && cur.outlinePages.length && Number(c.index)) {
+      page = pageOfIndex(Number(c.index)) || 0;
+    }
+    if (!page) page = Number(queueMeta.page) || (String(cur.id) === albumId ? cur.page : 1) || 1;
     var desc = playOrder === 'desc';
 
     try {
       // ① 当前页里排在后面的集还没进队列（例如从「最近收听」只带了一集过来）
-      var r0 = await api('GET', '/album/' + cur.id + '/tracks?page=' + page);
+      var r0 = await api('GET', '/album/' + albumId + '/tracks?page=' + page);
+      if (my !== playSeq) return false;   // v0.19.4：用户已经切到别的集，别再往队列里塞东西
       if (r0 && r0.success !== false) {
         var list = (r0.data && r0.data.tracks) || [];
         var added = 0;
@@ -1238,7 +1262,8 @@
       // ② 当前页听完了，翻下一页（倒序时翻上一页）
       if (desc ? page <= 1 : !queueMeta.hasMore) return false;
       var p = desc ? page - 1 : page + 1;
-      var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
+      var r = await api('GET', '/album/' + albumId + '/tracks?page=' + p);
+      if (my !== playSeq) return false;   // v0.19.4：同上
       if (!r || r.success === false) return false;
       var more = (r.data && r.data.tracks) || [];
       if (!more.length) return false;
@@ -1294,7 +1319,14 @@
       return;
     }
     if (qi >= 0 && qi + 1 < queue.length) { playAt(qi + 1); return; }
-    if (await extendQueue()) { playAt(qi + 1); return; }
+    var endSeq = playSeq;
+    if (await extendQueue()) {
+      // v0.19.4：extendQueue 里有网络请求（几百 ms ~ 2s）。这期间用户可能已经点了别的集，
+      // 无条件 playAt(qi+1) 会把他刚选的集顶掉，而且 qi 已是新位置，看起来像「自己乱跳」。
+      if (playSeq !== endSeq) return;
+      playAt(qi + 1);
+      return;
+    }
     msg('已播完' + (queue[qi] && queue[qi].albumName ? '《' + queue[qi].albumName + '》' : '本页') + '共 ' + queue.length + ' 集' +
       (playOrder === 'desc' ? '（倒序已到头，可切回正序）' : ''));
   });
@@ -1368,6 +1400,7 @@
     var wasCur = i === qi;
     queue.splice(i, 1);
     if (!queue.length) {
+      playSeq += 1;   // v0.19.4：队列空掉时同样作废在途 playAt
       qi = -1;
       $('audio').pause();
       renderQueue();
@@ -1394,6 +1427,7 @@
   $('qClear').addEventListener('click', function () {
     if (!queue.length) return;
     if (!confirm('清空播放队列？（不影响收听进度，详情页可以重新开播）')) return;
+    playSeq += 1;   // v0.19.4：同 pClose，作废在途 playAt
     queue = [];
     qi = -1;
     $('audio').pause();
@@ -1650,6 +1684,7 @@
     a.removeAttribute('src');
     $('player').classList.remove('show');
     if (document.body) document.body.classList.remove('has-player');
+    playSeq += 1;   // v0.19.4：作废所有在途 playAt，否则 1 秒后音频会自己响起来且无法控制
     qi = -1;
     queue = [];
     curPlayingId = '';
@@ -2567,7 +2602,10 @@
   // v0.19.3：跳转方式 'page' 按页码 / 'index' 按集号
   var jumpMode = 'page';
 
+  var detailSeq = 0;   // v0.19.4：连点两张专辑时，慢的旧请求不能覆盖后点开的那张
   async function openDetail(albumId) {
+    var my = ++detailSeq;
+    var aid = String(albumId);
     // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去，并记住来源以便返回
     var activeTab = document.querySelector('.tab.active');
     if (!activeTab || activeTab.getAttribute('data-tab') !== 'search') {
@@ -2588,8 +2626,23 @@
     $('dIntro').textContent = '';
     $('dTracks').innerHTML = '';
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    // v0.19.4：上一张专辑的分页/统计状态必须先清掉。原来只在成功分支里重置，
+    // 打开失败的专辑会残留「第 1 页 / 3」「共 9 集」，按集号跳转还会拿旧 outlinePages 算页码。
+    cur.lastPage = 0;
+    cur.outlinePages = [];
+    cur.lastIndex = 0;
+    cur.firstIndex = 1;
+    cur.pageStatText = '';
+    cur.hasMore = false;
+    jumpDirty = false;
+    if ($('dPage')) $('dPage').textContent = '第 1 页';
+    if ($('dJumpTot')) $('dJumpTot').textContent = '/ —';
+    if ($('dProgStat')) $('dProgStat').textContent = '';
+    if ($('dJump')) $('dJump').value = '1';
+    syncPageBtns();
     try {
-      var r = await api('GET', '/album/' + cur.id);
+      var r = await api('GET', '/album/' + aid);
+      if (my !== detailSeq) return;   // 已经点了别的专辑，这次结果作废
       if (r.success === false) { $('dName').textContent = '❌ ' + r.error; return; }
       var d = r.data;
       cur.detail = d;
@@ -2608,19 +2661,16 @@
       $('dIntroToggle').textContent = '展开简介';
       $('dIntro').classList.remove('open');
       renderSubState(d.subscription, d.subscribed);
-      await pullAlbumProgress(cur.id);
+      await pullAlbumProgress(aid);
+      if (my !== detailSeq) return;
       renderTracks(d.tracks || []);
       renderResume();
-      loadLibMarks(cur.id);
-      cur.lastPage = 0;
-      cur.outlinePages = [];
-      cur.lastIndex = 0;
+      loadLibMarks(aid);
       cur.page = 1;
-      jumpDirty = false;
-      if ($('dJump')) $('dJump').value = '1';
       syncPageBtns();
       // v0.19.0：先把总页数取回来，页码「第 1 页 / N」和跳页范围才有意义
       await ensureLastPage();
+      if (my !== detailSeq) return;
       syncPageBtns();
       // 倒序时直接翻到最后一页，最新一集在最前
       if (playOrder === 'desc' && d.hasMore) await jumpToOrderPage(true);
@@ -2844,7 +2894,7 @@
       if (t.updatedAt) tm.appendChild(document.createTextNode('更新 ' + t.updatedAt));
       var pos = getPos(t.trackId);
       if (pos && pos.t) {
-        var done = pos.d && pos.t >= pos.d - 20;
+        var done = posDone(pos);
         var mk = document.createElement('span');
         mk.className = done ? 'ok' : '';
         mk.textContent = done ? '✓ 听完' : '⏱ 听到 ' + fmtTime(pos.t);
@@ -2880,7 +2930,12 @@
       d.appendChild(du);
       d.appendChild(spb);
       d.appendChild(pl);
-      d.addEventListener('click', function () { playQueue(curTracks, i, album); });
+      // v0.19.4：和「本页连播」同一个问题 —— 过滤模式下队列里不能塞进被隐藏的已听集
+      d.addEventListener('click', function () {
+        var lst = filterUnheard ? curVisible : curTracks;
+        var j = indexOfTrack(lst, t.trackId);
+        playQueue(lst, j < 0 ? 0 : j, album);
+      });
       el.appendChild(d);
     });
     if (!shown) {
@@ -2892,7 +2947,7 @@
   function trackStat(trackId) {
     var pos = getPos(trackId);
     if (!pos || !pos.t) return 'none';
-    if (pos.d && pos.t >= pos.d - 20) return 'done';
+    if (posDone(pos)) return 'done';
     return 'part';
   }
 
@@ -2914,7 +2969,7 @@
     $('btnFromStart').style.display = '';
     $('btnClearPos').style.display = '';
 
-    var done = curLast.d && curLast.t >= curLast.d - 5;
+    var done = posDone(curLast);
     if (done) {
       // 按当前播放顺序找「下一集」：正序下一集 = 集数 +1，倒序下一集 = 集数 -1
       var step = playOrder === 'desc' ? -1 : 1;
@@ -2924,11 +2979,22 @@
       }
       // v0.19.2：存 trackId 而不是数组下标。
       // 下标绑定的是当时的 curTracks，翻页或切顺序后数组变了，点「接着听」会播成同下标的另一集。
-      curLast._nextId = nIdx >= 0 ? String(curTracks[nIdx].trackId) : '';
-      curLast._nextIdx = curTracks[nIdx] ? curTracks[nIdx].index : 0;
-      $('btnResume').textContent = nIdx >= 0
-        ? '▶ 接着听 第 ' + curTracks[nIdx].index + ' 集'
-        : '▶ 重听 第 ' + (curLast.index || '?') + ' 集（已听完）';
+      if (nIdx >= 0) {
+        curLast._nextId = String(curTracks[nIdx].trackId);
+        curLast._nextIdx = curTracks[nIdx].index;
+        $('btnResume').textContent = '▶ 接着听 第 ' + curTracks[nIdx].index + ' 集';
+      } else if (cur.lastIndex && Number(curLast.index) + step >= (cur.firstIndex || 1) &&
+        Number(curLast.index) + step <= cur.lastIndex) {
+        // v0.19.4：下一集在当前页之外（本页最后一集刚听完）。原来这里退化成「重听本集」，
+        // 和 ended 的自动连播（会翻下一页）行为不一致。
+        curLast._nextId = '';
+        curLast._nextIdx = Number(curLast.index) + step;
+        $('btnResume').textContent = '▶ 接着听 第 ' + curLast._nextIdx + ' 集';
+      } else {
+        curLast._nextId = '';
+        curLast._nextIdx = 0;
+        $('btnResume').textContent = '▶ 重听 第 ' + (curLast.index || '?') + ' 集（已听完）';
+      }
     } else {
       curLast._nextId = '';
       curLast._nextIdx = 0;
@@ -2936,11 +3002,24 @@
     }
   }
 
-  $('btnResume').addEventListener('click', function () {
-    var album = { id: cur.id, name: (cur.detail && cur.detail.name) || '' };
+  $('btnResume').addEventListener('click', async function () {
+    var album = { id: cur.id, name: (cur.detail && cur.detail.name) || '', page: cur.page };
     if (!curLast || !curLast.trackId) {
       if (curTracks.length) playQueue(curTracks, 0, album);
       return;
+    }
+    // v0.19.4：下一集只在集号上（不在当前页）→ 先翻到它所在的页再定位
+    if (!curLast._nextId && curLast._nextIdx) {
+      var np = pageOfIndex(curLast._nextIdx);
+      if (np && Number(np) !== Number(cur.page)) await gotoPage(np);
+      var nj = -1;
+      for (var k = 0; k < curTracks.length; k++) {
+        if (Number(curTracks[k].index) === Number(curLast._nextIdx)) { nj = k; break; }
+      }
+      if (nj >= 0) {
+        playQueue(curTracks, nj, { id: cur.id, name: (cur.detail && cur.detail.name) || '', page: cur.page });
+        return;
+      }
     }
     if (curLast._nextId) {
       var ni = indexOfTrack(curTracks, curLast._nextId);
@@ -2956,14 +3035,31 @@
     playQueue([{ trackId: curLast.trackId, index: curLast.index, title: curLast.title }], 0, album);
   });
 
-  $('btnFromStart').addEventListener('click', function () {
+  $('btnFromStart').addEventListener('click', async function () {
     if (!curTracks.length) return;
-    curTracks.forEach(function (t) { sSet(posKey(t.trackId), ''); });
+    var clearAll = function (list) { (list || []).forEach(function (t) { sSet(posKey(t.trackId), ''); }); };
+    clearAll(curTracks);
     sSet(lastKey(cur.id), '');
     renderTracks(curTracks);
     renderResume();
-    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '' });
+    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '', page: cur.page });
     msg('已清除本专辑播放进度，从第 1 集开始');
+    // v0.19.4：原来只清当前页的 30 集。其它页的 xm_pos_* 还在，跨页连播到第 2 页会从中途续播，
+    // 用户以为「从头听」已经清零了。这里把剩余分页也扫一遍（单页失败不影响已清的）。
+    try {
+      await ensureLastPage();
+      var pgs = (cur.outlinePages || []).map(function (p) { return Number(p.page) || 0; })
+        .filter(function (p) { return p && p !== Number(cur.page); });
+      var cleared = 1;
+      for (var i = 0; i < pgs.length; i++) {
+        try {
+          var rr = await api('GET', '/album/' + cur.id + '/tracks?page=' + pgs[i]);
+          clearAll((rr && rr.data && rr.data.tracks) || []);
+          cleared += 1;
+        } catch (e) { /* 单页失败忽略 */ }
+      }
+      if (cleared > 1) msg('已清除本专辑 ' + cleared + ' 页的播放进度，从第 1 集开始');
+    } catch (e) { /* */ }
   });
 
   $('btnClearPos').addEventListener('click', function () {
@@ -3193,7 +3289,9 @@
   syncOrderBtn();
   $('btnPlayPage').addEventListener('click', function () {
     // v0.19.3：勾了「只看未听」时连播的应该只是看得见的那些集
-    var list = (filterUnheard && curVisible.length) ? curVisible : curTracks;
+    // v0.19.4：去掉 curVisible.length 兜底 —— 整页都听完时它正好是 0，
+    // 兜底会让「本页连播」回落到 curTracks，把过滤掉的已听集全播一遍
+    var list = filterUnheard ? curVisible : curTracks;
     if (!list.length) { msg(filterUnheard ? '本页没有未听的集' : '本页没有曲目', 'err'); return; }
     playQueue(list, 0, {
       id: cur.id, name: (cur.detail && cur.detail.name) || '',
@@ -3601,13 +3699,33 @@
     } catch (e) { msg('保存失败: ' + e.message, 'err'); }
   });
 
+  // v0.19.4：后端 /sync、/subs/check（全量）改成异步立即返回 —— 订阅一多就必然撞宿主 60s 上限，
+  // 原来前端拿超时、用户重复点。这里轮询 /status 等它跑完，再读 lastSync 展示结果。
+  async function waitSyncDone(before) {
+    var sawOn = false;
+    for (var i = 0; i < 150; i++) {
+      await new Promise(function (res) { setTimeout(res, 2000); });
+      var st = await api('GET', '/status');
+      var d = (st && st.data) || {};
+      if (d.syncing) { sawOn = true; continue; }
+      var at = (d.lastSync || {}).at || '';
+      if (sawOn || (at && at !== before)) return d;
+      if (i >= 3) return d;   // 4 轮（8 秒）都没看到开始，多半是秒完成
+    }
+    return null;
+  }
+
   $('btnSyncAll').addEventListener('click', async function () {
     msg('⏳ 正在同步全部订阅…');
     try {
+      var s0 = await api('GET', '/status');
+      var before = ((s0 && s0.data && s0.data.lastSync) || {}).at || '';
       var r = await api('POST', '/sync', { import: true });
       if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('✅ ' + (r.lastSync ? r.lastSync.result : '同步完成'), 'ok');
-      subsCache = r.subs || subsCache;
+      var d0 = await waitSyncDone(before);
+      if (!d0) { msg('⏳ 同步还在跑，稍后回来看订阅列表', ''); return; }
+      msg('✅ ' + (((d0.lastSync || {}).result) || '同步完成'), 'ok');
+      if (d0.subs) subsCache = d0.subs;
       loadSubs();
     } catch (e) { msg('同步失败: ' + e.message, 'err'); }
   });
@@ -3615,11 +3733,14 @@
   $('btnCheckAll').addEventListener('click', async function () {
     msg('⏳ 正在检查更新（不导入）…');
     try {
+      var sc0 = await api('GET', '/status');
+      var cbefore = ((sc0 && sc0.data && sc0.data.lastSync) || {}).at || '';
       var r = await api('POST', '/subs/check', { import: false });
       if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      var d = r.data || {};
-      msg('检查完成：发现 ' + (d.newCount || 0) + ' 集更新', 'ok');
-      subsCache = r.subs || subsCache;
+      var dc = await waitSyncDone(cbefore);
+      if (!dc) { msg('⏳ 检查还在跑，稍后回来看订阅列表', ''); return; }
+      msg('检查完成：' + (((dc.lastSync || {}).result) || '订阅列表已更新'), 'ok');
+      if (dc.subs) subsCache = dc.subs;
       loadSubs();
     } catch (e) { msg('检查失败: ' + e.message, 'err'); }
   });
@@ -4606,6 +4727,9 @@
       }
       if (!box) return;
       box.innerHTML = '';
+      // v0.19.4：列表重建后每行都是未勾状态，全选框却还亮着 —— 再点一次只是「取消勾选」，
+      // 看着像点了没反应。这里跟着复位。
+      if ($('btnTodoAll')) $('btnTodoAll').checked = false;
       if (!n) { box.textContent = silent ? '' : '—'; return; }
       todoCache.forEach(function (x) {
         var item = document.createElement('div');
