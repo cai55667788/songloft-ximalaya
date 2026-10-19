@@ -834,9 +834,13 @@
     syncOrderBtn();
     if (typeof syncPageBtns === 'function') syncPageBtns();
     if (!silent) {
-      // 切倒序：列表翻到最后一页，跟「从最新一集起播」对齐；切正序：回第一页
+      // v0.19.0：手动切顺序只翻面、不搬页（停在第几页就翻第几页的面）
       if (cur.id && !$('detailCard').classList.contains('hide')) {
-        jumpToOrderPage(playOrder === 'desc');
+        msg(playOrder === 'desc'
+          ? '第 ' + cur.page + ' 页已切为倒序（本页最新集在前）'
+          : '第 ' + cur.page + ' 页已切为正序（本页最早集在前）');
+        // 当前页有数据就只重排，别重新请求；没有才去补取
+        if (!curTracks.length) gotoPage(cur.page);
       } else {
         renderResume();
         msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
@@ -846,18 +850,17 @@
     renderResume();
   }
 
-  // 倒序 → 最后一页；正序 → 第一页。取不到目录就停在当前页。
+  // v0.19.0：只在**刚打开专辑**时调用——倒序默认停在最后一页（最新集在前），正序停在第 1 页。
+  // 用户手动切顺序走 setOrder，那里只翻面不搬页，所以这里带 toLast 才有意义。
   async function jumpToOrderPage(toLast) {
     try {
-      var o = await api('GET', '/album/' + cur.id + '/outline');
-      var od = (o && o.data) || {};
-      cur.lastPage = Number(od.lastPage) || 0;
+      await ensureLastPage();
       var p = toLast ? (cur.lastPage || 1) : 1;
       if (p && p !== cur.page) {
         await gotoPage(p);
         msg(playOrder === 'desc' ? '倒序：已跳到第 ' + p + ' 页（最新集在前）' : '正序：已回到第 1 页');
       } else {
-        msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
+        msg(playOrder === 'desc' ? '第 ' + cur.page + ' 页已切为倒序（本页最新集在前）' : '第 ' + cur.page + ' 页已切为正序（本页最早集在前）');
         syncPageBtns();
       }
     } catch (e) {
@@ -1179,9 +1182,8 @@
       if (desc) { queue = sortByOrder(queue); qi = indexOfTrack(queue, c.trackId); }
       if (!$('detailCard').classList.contains('hide')) {
         renderTracks(more);
-        $('dPage').textContent = '第 ' + p + ' 页';
-        $('dPrev').disabled = p <= 1;
-        $('dNext').disabled = !cur.hasMore;
+        // v0.19.0：别在这里手改按钮 disabled，统一交给 syncPageBtns 判（它知道总页数）
+        syncPageBtns();
       }
       msg('已自动接入第 ' + p + ' 页');
       return true;
@@ -2473,6 +2475,8 @@
 
   // ---------- 详情 ----------
   var cur = { id: '', page: 1, hasMore: false, detail: null };
+  // v0.19.0：跳页输入框是否被用户改过（改过就不自动回填页码，免得打字被覆盖）
+  var jumpDirty = false;
 
   async function openDetail(albumId) {
     // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去，并记住来源以便返回
@@ -2520,8 +2524,12 @@
       renderResume();
       loadLibMarks(cur.id);
       cur.lastPage = 0;
-      $('dPage').textContent = '第 1 页';
       cur.page = 1;
+      jumpDirty = false;
+      if ($('dJump')) $('dJump').value = '1';
+      syncPageBtns();
+      // v0.19.0：先把总页数取回来，页码「第 1 页 / N」和跳页范围才有意义
+      await ensureLastPage();
       syncPageBtns();
       // 倒序时直接翻到最后一页，最新一集在最前
       if (playOrder === 'desc' && d.hasMore) await jumpToOrderPage(true);
@@ -2854,63 +2862,117 @@
     msg('已清除播放进度');
   });
 
-  // v0.18.9：翻页方向必须跟随播放顺序。
-  // 原来 dPrev/dNext 写死成 page±1，倒序时在第 1 页点「下一页」会跑到第 2 页，
-  // 而第 2 页的集数比第 1 页大 → 倒序列表反而成了旧→新，越翻越乱。
-  // 现在倒序时：「下一页」= 集数更小的页（page-1），「上一页」= 集数更大的页（page+1）。
+  // v0.19.0：页码状态统一出口。
+  // 每页都能独立正序/倒序 —— 因为「第几页」始终是接口里的页码（按集数从小到大切好的固定分页），
+  // 正序/倒序只影响**这一页内部哪一头朝上**，不会改变你停在哪一页。
+  // 4 个按钮语义固定成「集数方向」：⏮ 最小集数页 / ‹ 更小的页 / › 更大的页 / ⏭ 最大集数页，
+  // 文案再按当前顺序换成用户能听懂的话。
   function syncPageBtns() {
     var desc = playOrder === 'desc';
     var lastPage = cur.lastPage || 0;
-    if (desc) {
-      // 倒序：默认停在最后一页（最大集数在顶）
-      var hi = lastPage || (cur.hasMore ? null : cur.page);
-      if ($('dPrev')) {
-        $('dPrev').textContent = '更新 ▸';
-        $('dPrev').title = '集数更大的那一页';
-        $('dPrev').disabled = hi ? cur.page >= hi : !cur.hasMore;
-      }
-      if ($('dNext')) {
-        $('dNext').textContent = '◂ 更早';
-        $('dNext').title = '集数更小的那一页';
-        $('dNext').disabled = cur.page <= 1;
-      }
-    } else {
-      if ($('dPrev')) {
-        $('dPrev').textContent = '上一页';
-        $('dPrev').title = '集数更小的那一页';
-        $('dPrev').disabled = cur.page <= 1;
-      }
-      if ($('dNext')) {
-        $('dNext').textContent = '下一页';
-        $('dNext').title = '集数更大的那一页';
-        $('dNext').disabled = !cur.hasMore;
-      }
+    var hi = lastPage || 0;
+    var atMin = cur.page <= 1;
+    var atMax = hi ? cur.page >= hi : !cur.hasMore;
+
+    if ($('dFirst')) { $('dFirst').disabled = atMin; $('dFirst').title = '第 1 页（集数最小）'; }
+    if ($('dLast')) { $('dLast').disabled = hi ? atMax : !cur.hasMore; $('dLast').title = hi ? '第 ' + hi + ' 页（集数最大）' : '最后一页'; }
+
+    if ($('dPrev')) {
+      // dPrev 永远是「集数更小的那一页」
+      $('dPrev').textContent = desc ? '◂ 更早' : '上一页';
+      $('dPrev').title = '集数更小的那一页';
+      $('dPrev').disabled = atMin;
     }
+    if ($('dNext')) {
+      // dNext 永远是「集数更大的那一页」
+      $('dNext').textContent = desc ? '更新 ▸' : '下一页';
+      $('dNext').title = '集数更大的那一页';
+      $('dNext').disabled = atMax;
+    }
+
+    // 页码 + 跳页框
+    var tot = hi ? hi : 0;
+    if ($('dPage')) {
+      $('dPage').textContent = '第 ' + cur.page + ' 页' + (tot ? ' / ' + tot : '');
+    }
+    if ($('dJumpTot')) $('dJumpTot').textContent = '/ ' + (tot || '—');
+    if ($('dJump')) {
+      if (tot) $('dJump').max = String(tot);
+      // 只有输入框没被用户动过时才回填，避免打字打到一半被覆盖
+      if (!jumpDirty) $('dJump').value = String(cur.page);
+    }
+    if ($('dJumpGo')) $('dJumpGo').disabled = !tot;
   }
 
-  async function gotoPage(p) {
-    if (p < 1) return;
+  // 取一次总页数（跳页/夹紧范围要用）。已有就只做一次缓存。
+  async function ensureLastPage() {
+    if (cur.lastPage) return cur.lastPage;
+    try {
+      var od = await api('GET', '/album/' + cur.id + '/outline');
+      cur.lastPage = Number((od && od.data && od.data.lastPage)) || 0;
+    } catch (e) { }
+    return cur.lastPage || 0;
+  }
+
+  async function gotoPage(p, opts) {
+    opts = opts || {};
+    p = Math.floor(Number(p) || 0);
+    if (!p || p < 1) return;
+    // 用户手输页码时先拿到总页数，越界就夹到边界并说明，而不是傻乎乎请求一个空页
+    var clipped = false;
+    if (opts.jump) {
+      var tot = await ensureLastPage();
+      if (tot && p > tot) { p = tot; clipped = true; }
+    }
     $('dTracks').innerHTML = '<span class="muted">载入中…</span>';
     try {
       var r = await api('GET', '/album/' + cur.id + '/tracks?page=' + p);
       if (r.success === false) { $('dTracks').textContent = '加载失败: ' + r.error; return; }
-      cur.page = p;
-      cur.hasMore = r.data.hasMore;
-      renderTracks(r.data.tracks || []);
-      // v0.18.9：还没拿到总页数就补取一次目录，页码才能显示「第 N 页 / 总页数」
-      if (!cur.lastPage) {
-        try {
-          var od2 = await api('GET', '/album/' + cur.id + '/outline');
-          cur.lastPage = Number((od2 && od2.data && od2.data.lastPage)) || 0;
-        } catch (e2) { }
+      var list = (r.data && r.data.tracks) || [];
+      // 空页兜底：接口页码比实际页数大时，回退到上一个有效页
+      if (!list.length && opts.jump && p > 1) {
+        msg('第 ' + p + ' 页没有内容，已回到第 ' + (p - 1) + ' 页');
+        return gotoPage(p - 1);
       }
-      $('dPage').textContent = '第 ' + p + ' 页' + (cur.lastPage ? ' / ' + cur.lastPage : '');
+      cur.page = p;
+      cur.hasMore = !!(r.data && r.data.hasMore);
+      renderTracks(list);
+      await ensureLastPage();
+      jumpDirty = false;
       syncPageBtns();
+      if (opts.jump) {
+        if (clipped) msg('总共只有 ' + tot + ' 页，已跳到第 ' + p + ' 页');
+        else msg('已跳到第 ' + p + ' 页' + (cur.lastPage ? ' / ' + cur.lastPage : ''));
+      }
     } catch (e) { $('dTracks').textContent = '加载失败: ' + e.message; }
   }
 
-  $('dPrev').addEventListener('click', function () { gotoPage(playOrder === 'desc' ? cur.page + 1 : cur.page - 1); });
-  $('dNext').addEventListener('click', function () { gotoPage(playOrder === 'desc' ? cur.page - 1 : cur.page + 1); });
+  // v0.19.0：按钮语义 = 集数方向（与正序倒序无关）。
+  // 倒序只是把「新的一头」放到列表顶上，页码本身不变，所以翻页就是单纯的 page±1。
+  $('dPrev').addEventListener('click', function () { gotoPage(cur.page - 1); });
+  $('dNext').addEventListener('click', function () { gotoPage(cur.page + 1); });
+  if ($('dFirst')) $('dFirst').addEventListener('click', function () { gotoPage(1); });
+  if ($('dLast')) $('dLast').addEventListener('click', async function () {
+    var tot = await ensureLastPage();
+    if (tot) gotoPage(tot);
+  });
+  // 跳页
+  async function doJump() {
+    var box = $('dJump');
+    if (!box) return;
+    var v = Math.floor(Number(String(box.value).trim()) || 0);
+    if (!v || v < 1) { msg('请输入要跳到的页码（从 1 开始）', 'err'); return; }
+    jumpDirty = false;
+    box.blur && box.blur();
+    await gotoPage(v, { jump: true });
+  }
+  if ($('dJumpGo')) $('dJumpGo').addEventListener('click', doJump);
+  if ($('dJump')) {
+    $('dJump').addEventListener('input', function () { jumpDirty = true; });
+    $('dJump').addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.keyCode === 13) { ev.preventDefault(); doJump(); }
+    });
+  }
   $('ckUnheard').addEventListener('change', function () {
     filterUnheard = !!this.checked;
     renderTracks(sortByOrder(curTracks));
