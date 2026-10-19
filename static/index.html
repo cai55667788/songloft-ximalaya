@@ -195,7 +195,7 @@
     /* 拖动进度时的时间预览气泡 */
     .seekview { position: fixed; z-index: 9600; transform: translate(-50%, -100%); background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 3px 9px; font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: 0 4px 14px rgba(0,0,0,.18); pointer-events: none; white-space: nowrap; }
     .seekview.hide { display: none; }
-    #pVol { accent-color: var(--accent, #3b82f6); }
+    #pVol, #pRate, #fpRate { accent-color: var(--accent, #3b82f6); }
     /* 日志 / 自检 */
     .logrow { display: flex; gap: 8px; align-items: flex-start; padding: 6px 2px; border-bottom: 1px dashed var(--border); font-size: 12px; }
     .logrow:last-child { border-bottom: none; }
@@ -585,7 +585,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.21.1</span>
+    <span class="ver" id="ver">v0.21.2</span>
   </div>
 
   <div class="tabs">
@@ -1041,14 +1041,8 @@
     <input type="range" id="pVol" min="0" max="100" step="5" value="100" title="音量（会记住上次的设置）" style="width:80px;vertical-align:middle;" />
     <span class="psep"></span>
     <span class="muted">倍速</span>
-    <select id="pRate">
-      <option value="0.75">0.75x</option>
-      <option value="1">1.0x</option>
-      <option value="1.25">1.25x</option>
-      <option value="1.5">1.5x</option>
-      <option value="1.75">1.75x</option>
-      <option value="2">2.0x</option>
-    </select>
+    <input type="range" id="pRate" min="50" max="300" step="5" value="100" title="倍速无级调节：0.5x – 3.0x（会记住上次的设置）" style="width:88px;vertical-align:middle;" />
+    <span class="muted" id="pRateNum" style="width:44px;display:inline-block;text-align:right;font-variant-numeric:tabular-nums;">1.00x</span>
     <span class="psep"></span>
     <span class="muted">定时</span>
     <select id="pSleep">
@@ -1149,14 +1143,8 @@
       <button class="small plain" id="fpNext" title="下一集">⏭</button>
     </div>
     <div class="fpbar">
-      <select id="fpRate">
-        <option value="0.75">0.75x</option>
-        <option value="1">1.0x</option>
-        <option value="1.25">1.25x</option>
-        <option value="1.5">1.5x</option>
-        <option value="1.75">1.75x</option>
-        <option value="2">2.0x</option>
-      </select>
+      <input type="range" id="fpRate" min="50" max="300" step="5" value="100" title="倍速无级调节：0.5x – 3.0x" style="width:88px;vertical-align:middle;" />
+      <span id="fpRateNum" style="min-width:44px;display:inline-block;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;">1.00x</span>
       <button class="small plain" id="fpBack15" title="后退 15 秒">↺15</button>
       <button class="small plain" id="fpFwd30" title="前进 30 秒">30↻</button>
       <button class="small plain" id="fpBm" title="打书签">🔖</button>
@@ -1166,6 +1154,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.21.1"></script>
+<script src="static/app.js?v=0.21.2"></script>
 </body>
 </html>
