@@ -2165,7 +2165,12 @@
   });
   $('fpBm').addEventListener('click', function () { addBmNowQuick(); });
   // v0.21.2：全屏播放条倍速改为无级滑杆，input 事件统一走上面的 setRate
-  $('fpSeek').addEventListener('input', function () { fpDragging = true; });
+  $('fpSeek').addEventListener('input', function () {
+    fpDragging = true;
+    // v0.21.4：拖动进度时实时预览当前时间
+    var a = $('audio'), d = a.duration || 0;
+    if (d) $('fpCur').textContent = fmtTime(d * (Number(this.value) || 0) / 1000);
+  });
   $('fpSeek').addEventListener('change', function () {
     var a = $('audio');
     var d = a.duration || 0;
