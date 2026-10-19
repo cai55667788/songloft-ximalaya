@@ -2600,38 +2600,41 @@
       d.className = 'trk';
       d.setAttribute('data-tid', String(t.trackId || ''));
       d.setAttribute('data-idx', String(t.index || ''));
-      var no = document.createElement('span');
-      no.className = 'no';
-      no.textContent = t.index;
-      var tt = document.createElement('span');
+      // v0.18.4：仿喜马拉雅 App——封面缩略图 + 标题/元信息 + 右侧播放
+      var cv = document.createElement('img');
+      cv.className = 'cv';
+      cv.loading = 'lazy';
+      cv.src = t.cover || (cur.detail && cur.detail.cover) || '';
+      cv.onerror = function () { cv.style.visibility = 'hidden'; };
+      d.appendChild(cv);
+      var tb = document.createElement('div');
+      tb.className = 'tb';
+      var tt = document.createElement('div');
       tt.className = 'tt';
       tt.textContent = t.title;
       tt.title = t.title;   // 悬停 / 长按可看完整标题
-      var du = document.createElement('span');
-      du.className = 'du';
-      du.textContent = fmtDur(t.duration);
-      d.appendChild(no); d.appendChild(tt);
-
-      // v0.18.1：每集的更新时间（接口给的是月精度，如 2025-04）
-      if (t.updatedAt) {
-        var tu = document.createElement('span');
-        tu.className = 'tu';
-        tu.textContent = t.updatedAt;
-        tu.title = '更新时间';
-        d.appendChild(tu);
-      }
-
+      tb.appendChild(tt);
+      var tm = document.createElement('div');
+      tm.className = 'tm';
+      var mNo = document.createElement('span');
+      mNo.textContent = '第 ' + t.index + ' 集';
+      tm.appendChild(mNo);
+      tm.appendChild(document.createTextNode(fmtDur(t.duration)));
+      if (t.updatedAt) tm.appendChild(document.createTextNode('更新 ' + t.updatedAt));
       var pos = getPos(t.trackId);
       if (pos && pos.t) {
-        var mk = document.createElement('span');
-        mk.className = 'small-txt';
-        mk.style.marginRight = '8px';
         var done = pos.d && pos.t >= pos.d - 20;
-        mk.textContent = done ? '✓ 听完' : '⏱ ' + fmtTime(pos.t);
-        mk.style.color = done ? 'var(--ok)' : 'var(--muted)';
-        d.appendChild(mk);
+        var mk = document.createElement('span');
+        mk.className = done ? 'ok' : '';
+        mk.textContent = done ? '✓ 听完' : '⏱ 听到 ' + fmtTime(pos.t);
+        if (done) mk.style.color = 'var(--ok)';
+        tm.appendChild(mk);
       }
-
+      tb.appendChild(tm);
+      d.appendChild(tb);
+      var du = document.createElement('span');
+      du.className = 'du';
+      du.style.display = 'none';   // 时长已并入元信息行，占位保留以免样式回退
       var pl = document.createElement('button');
       pl.className = 'small plain';
       pl.textContent = '▶';
