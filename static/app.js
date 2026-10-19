@@ -110,14 +110,62 @@
   var DONE_GAP = 20;
   function posDone(p) { return !!(p && p.d && Number(p.t) >= Number(p.d) - DONE_GAP); }
 
+  // ---------- 发现页（搜索 + 收听合并，v0.20.0） ----------
+  // 原来「搜索」「收听」是两个 tab：想接着上次听要切 tab，想搜新书又要切回来，
+  // 两边都各有一半是空的。现在合成一页——搜索框常驻，没在搜索时下面就是「继续听」，
+  // 一搜就换成结果，返回/清空又回到继续听。
+  var LSN_SEG_KEY = 'listen_seg';
+  var listenSeg = 'recent';
+
+  function showListen(on) {
+    var w = $('listenWrap');
+    if (w) w.classList.toggle('hide', !on);
+  }
+
+  // 当前是否处在「看结果 / 看详情」的状态（此时不该把继续听铺出来）
+  function inSearchFlow() {
+    if (!$('detailCard').classList.contains('hide')) return true;
+    if ($('kw') && $('kw').value.trim()) return true;
+    return !!(results && results.length) || !!(trackRows && trackRows.length);
+  }
+
+  function loadListenPane() {
+    if (listenSeg === 'recent') { renderRecent(); pullRecent(); }
+    else if (listenSeg === 'tl') renderTimeline();
+    else if (listenSeg === 'dash') loadDashboard();
+    else loadReport(rpPeriod);
+  }
+
+  function setListenSeg(seg, silent) {
+    var ok = ['recent', 'tl', 'dash', 'rp'];
+    listenSeg = ok.indexOf(seg) >= 0 ? seg : 'recent';
+    ok.forEach(function (t) {
+      var pane = $('lsn-' + t);
+      if (pane) pane.classList.toggle('hide', t !== listenSeg);
+      var b = document.querySelector('.lsnSeg[data-seg="' + t + '"]');
+      if (b) b.classList.toggle('on', t === listenSeg);
+    });
+    sSet(LSN_SEG_KEY, listenSeg);
+    if (!silent) { showListen(true); loadListenPane(); }
+  }
+
+  // 回到「发现」的空闲态：搜索框空且没结果 → 铺开继续听
+  function syncDiscover() {
+    var idle = !inSearchFlow();
+    showListen(idle);
+    if (idle) loadListenPane();
+  }
+
   // ---------- 标签页 ----------
   document.querySelectorAll('.tab').forEach(function (btn) {
     btn.addEventListener('click', function () {
       document.querySelectorAll('.tab').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
-      ['search', 'recent', 'subs', 'lib', 'set'].forEach(function (t) {
-        $('tab-' + t).classList.toggle('hide', t !== btn.dataset.tab);
+      ['search', 'subs', 'lib', 'set'].forEach(function (t) {
+        var sec = $('tab-' + t);
+        if (sec) sec.classList.toggle('hide', t !== btn.dataset.tab);
       });
+      if (btn.dataset.tab === 'search') syncDiscover();
       if (btn.dataset.tab === 'subs') {
         loadSubs();
         if (!meLoaded) loadMySubs(false);
@@ -127,11 +175,15 @@
         loadCalendar();
         loadGroups();
       }
-      if (btn.dataset.tab === 'recent') { renderRecent(); pullRecent(); loadReport(rpPeriod); renderTimeline(); loadDashboard(); }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { loadTts(); poll(); }
       if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); loadSpState(); }
     });
+  });
+
+  // 收听分段按钮
+  document.querySelectorAll('.lsnSeg').forEach(function (b) {
+    b.addEventListener('click', function () { setListenSeg(b.dataset.seg); });
   });
 
   // ---------- 登录 ----------
@@ -774,6 +826,18 @@
       bPlay.className = 'small';
       bPlay.textContent = '▶ 继续听';
       bPlay.addEventListener('click', function () { resumeRecent(r); });
+      // v0.20.0：搜索与收听融合——从收听记录直接发起「搜这张专辑的单集」
+      var bFind = document.createElement('button');
+      bFind.className = 'small plain';
+      bFind.textContent = '🔍 集';
+      bFind.title = '用这张专辑的名字去搜单集（想听某一集时用）';
+      bFind.addEventListener('click', function () {
+        var nm = r.albumName || '';
+        if (!nm) { msg('这条记录没存专辑名，先去专辑页搜吧', 'warn'); return; }
+        setSearchMode('track');
+        $('kw').value = nm;
+        doSearch(nm);
+      });
       var bDel = document.createElement('button');
       bDel.className = 'small plain';
       bDel.textContent = '✕';
@@ -782,7 +846,7 @@
         writeRecent(readRecent().filter(function (x) { return String(x.albumId) !== String(r.albumId); }));
         renderRecent();
       });
-      ops.appendChild(bPlay); ops.appendChild(bOpen); ops.appendChild(bDel);
+      ops.appendChild(bPlay); ops.appendChild(bFind); ops.appendChild(bOpen); ops.appendChild(bDel);
       line.appendChild(img); line.appendChild(body); line.appendChild(ops);
       el.appendChild(line);
     });
@@ -791,7 +855,7 @@
   function openAlbumFromRecent(albumId) {
     document.querySelector('.tab[data-tab="search"]').click();
     $('searchCard').classList.add('hide');
-    openDetail(albumId);
+    openDetail(albumId, true);
   }
 
   function resumeRecent(r) {
@@ -2317,7 +2381,11 @@
     el.innerHTML = '';
     results = list || [];
     selected = {};
-    if (!results.length) { el.textContent = '没有找到相关专辑，换个关键词试试'; updateSelBar(); return; }
+    if (!results.length) {
+      el.textContent = '没有找到相关专辑，换个关键词试试；或者清空搜索框，从下面的「继续听」接着上次的。';
+      updateSelBar();
+      return;
+    }
 
     results.forEach(function (a) {
       var item = document.createElement('div');
@@ -2394,6 +2462,7 @@
     $('detailCard').classList.add('hide');
     $('searchCard').classList.remove('hide');
     $('trackMore').classList.add('hide');
+    showListen(false);   // v0.20.0：一搜就换成结果，别把「继续听」留在下面
     if (searchMode === 'track') { doSearchTracks(kw, 1, true); return; }
     try {
       var r = await api('POST', '/search', { kw: kw });
@@ -2407,7 +2476,29 @@
   }
 
   $('btnSearch').addEventListener('click', function () { doSearch($('kw').value.trim()); });
-  $('kw').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch($('kw').value.trim()); });
+  $('kw').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { doSearch($('kw').value.trim()); return; }
+    if (e.key === 'Escape') { $('kw').value = ''; resetToDiscover(); }
+  });
+  // v0.20.0：把搜索框清空 = 回到「继续听」，不用再切 tab
+  $('kw').addEventListener('input', function () {
+    if ($('kw').value.trim()) return;
+    resetToDiscover();
+  });
+  function resetToDiscover() {
+    $('searchMeta').textContent = '';
+    $('searchResults').innerHTML = '';
+    $('kwChips').innerHTML = '';
+    $('trackMore').classList.add('hide');
+    $('detailCard').classList.add('hide');
+    $('searchCard').classList.remove('hide');
+    results = [];
+    selected = {};
+    trackRows = [];
+    updateSelBar();
+    renderIdleChips();
+    syncDiscover();
+  }
   $('ckAll').addEventListener('change', async function () {
     var on = $('ckAll').checked;
     document.querySelectorAll('#searchResults .ck').forEach(function (c, i) {
@@ -2442,7 +2533,12 @@
       : '';
     $('detailCard').classList.add('hide');
     $('searchCard').classList.remove('hide');
+    // v0.20.0：切模式会清空结果，记得把 results 也清掉，否则「继续听」判定会用到旧值
+    results = [];
+    selected = {};
+    updateSelBar();
     renderIdleChips();
+    syncDiscover();
   }
   $('modeAlbum').addEventListener('click', function () { setSearchMode('album'); });
   $('modeTrack').addEventListener('click', function () { setSearchMode('track'); });
@@ -2453,6 +2549,7 @@
     if (reset) { $('searchResults').innerHTML = ''; $('kwChips').innerHTML = ''; trackRows = []; }
     $('detailCard').classList.add('hide');
     $('searchCard').classList.remove('hide');
+    showListen(false);   // v0.20.0：同上
     try {
       var r = await api('POST', '/search/tracks', { kw: trackKw, page: page || 1, rows: 20 });
       if (r.success === false) { $('searchMeta').innerHTML = '<span class="err">' + escHtml(r.error) + '</span>'; return; }
@@ -2603,8 +2700,11 @@
   var jumpMode = 'page';
 
   var detailSeq = 0;   // v0.19.4：连点两张专辑时，慢的旧请求不能覆盖后点开的那张
-  async function openDetail(albumId) {
+  cur.fromListen = false;   // v0.20.0：详情是不是从「继续听」点进来的
+  async function openDetail(albumId, fromListen) {
     var my = ++detailSeq;
+    // v0.20.0：从「继续听」点进来的，返回时要回到继续听，而不是回到上次的搜索结果
+    cur.fromListen = !!fromListen;
     var aid = String(albumId);
     // 详情卡片在「搜索」tab 内，从其它 tab 点进来要先切过去，并记住来源以便返回
     var activeTab = document.querySelector('.tab.active');
@@ -2612,11 +2712,12 @@
       cur.fromTab = activeTab ? activeTab.getAttribute('data-tab') : 'search';
       document.querySelector('.tab[data-tab="search"]').click();
     }
-    var TAB_NAME = { search: '搜索', recent: '收听', subs: '订阅', lib: '已导入', set: '设置' };
+    var TAB_NAME = { search: '发现', subs: '订阅', lib: '已导入', set: '设置' };
     $('btnBack').textContent = '← 返回' + (TAB_NAME[cur.fromTab || 'search'] || '搜索');
     cur.id = String(albumId);
     cur.page = 1;
     $('searchCard').classList.add('hide');
+    showListen(false);   // v0.20.0：详情页也不能露出「继续听」
     $('detailCard').classList.remove('hide');
     $('dName').textContent = '载入中…';
     $('dBadges').innerHTML = '';
@@ -3304,12 +3405,18 @@
     var from = cur.fromTab || 'search';
     cur.fromTab = 'search';
     if (from === 'search') {
-      $('searchCard').classList.remove('hide');
+      if (cur.fromListen) {
+        cur.fromListen = false;
+        resetToDiscover();   // 从继续听进来的，原样退回继续听（别把旧搜索结果捡回来）
+      } else {
+        $('searchCard').classList.remove('hide');
+        syncDiscover();      // 空着就回到继续听，搜过就还是结果
+      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
     var btn = document.querySelector('.tab[data-tab="' + from + '"]');
-    if (btn) btn.click(); else $('searchCard').classList.remove('hide');
+    if (btn) btn.click(); else { $('searchCard').classList.remove('hide'); syncDiscover(); }
   });
   $('dIntroToggle').addEventListener('click', function () {
     var open = $('dIntro').classList.toggle('open');
@@ -4843,6 +4950,9 @@
     loadSubs();
     loadImported();
     renderIdleChips();
+    // v0.20.0：恢复上次看的收听分段，并把「继续听」当作发现页首屏
+    setListenSeg(sGet(LSN_SEG_KEY) || 'recent', true);
+    syncDiscover();
     poll();
     pullRecent();
     renderTimeline();
