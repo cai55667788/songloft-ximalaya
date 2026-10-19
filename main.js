@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.21.2';
+var VERSION = '0.21.3';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -4644,6 +4644,27 @@ async function handleHTTPRequest(req) {
         return jsonResp({ success: true, data: { message: actMap[act][2] } });
       }
       return jsonResp({ success: false, error: '不认识的动作: ' + act }, 400);
+    } catch (e) {
+      return jsonResp({ success: false, error: String(e) }, 500);
+    }
+  }
+
+  // v0.21.3：音箱倍速（转发 miot /player/speed，范围 0.5–2.0；
+  // 仅对 miot 播放队列生效，电台/无时长曲目 miot 只记住不实时生效）
+  if (path === '/speaker/speed' && method === 'POST') {
+    var sb1 = readBodyJson(req);
+    var spd1 = Number(sb1.speed);
+    if (!isFinite(spd1)) return jsonResp({ success: false, error: '缺少 speed（0.5–2.0）' }, 400);
+    spd1 = Math.max(0.5, Math.min(2, Math.round(spd1 * 100) / 100));
+    var sdev1 = speakerDevice(sb1.device_id);
+    if (!sdev1.account_id || !sdev1.device_id) {
+      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
+    }
+    try {
+      var rs1 = await miotPost('/player/speed', { account_id: sdev1.account_id, device_id: sdev1.device_id, speed: spd1 });
+      if (!miotOk(rs1)) return jsonResp({ success: false, error: miotErr(rs1) }, 500);
+      var spdMsg1 = (rs1.data && rs1.data.data && rs1.data.data.message) || '';
+      return jsonResp({ success: true, data: { message: '音箱倍速 ' + spd1.toFixed(2) + 'x' + (spdMsg1 ? '（' + spdMsg1 + '）' : ''), speed: spd1 } });
     } catch (e) {
       return jsonResp({ success: false, error: String(e) }, 500);
     }
