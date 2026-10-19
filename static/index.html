@@ -410,21 +410,6 @@
       .trk:active { background: var(--bg); }
       button:active { filter: brightness(.92); }
     }
-    /* ---------- 追更日历 ---------- */
-  .calrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12px; }
-  .calname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .calbar { display: inline-block; width: 46%; max-width: 220px; height: 6px; border-radius: 3px;
-            background: rgba(128,128,128,.18); overflow: hidden; flex: none; }
-  .calbar i { display: block; height: 100%; border-radius: 3px; }
-  .calnum { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .calnum.stale { color: #ef4444; }
-  .dowgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
-  .dowcell { text-align: center; padding: 6px 2px; border-radius: 8px;
-             background: rgba(128,128,128,.10); font-size: 11px; line-height: 1.25; }
-  .dowcell b { display: block; font-size: 14px; }
-  .dowcell span { color: var(--muted); }
-  .dowcell.hot { background: color-mix(in srgb, var(--accent) 22%, transparent); }
-
   /* ---------- 订阅分组 ---------- */
   .grphead { display: flex; align-items: center; gap: 7px; margin: 10px 0 4px; font-weight: 600; font-size: 12.5px; }
   .grpitem { display: flex; align-items: center; gap: 7px; padding: 3px 0 3px 16px; font-size: 12px; }
@@ -438,7 +423,7 @@
 <div class="wrap">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.20.1</span>
+    <span class="ver" id="ver">v0.20.2</span>
   </div>
 
   <div class="tabs">
@@ -637,15 +622,6 @@
     </div>
 
     <div class="card">
-      <h2>📅 追更日历</h2>
-      <div class="muted small-txt" id="calStat">看看这些书大概什么时候更、哪些已经很久没动了。</div>
-      <div class="btns">
-        <button class="small plain" id="btnCalLoad">算一下</button>
-      </div>
-      <div id="calBody" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
       <h2>🗂 订阅分组</h2>
       <div class="muted small-txt">同一批订阅，换个角度看：按更新快慢、按有没有新集、按主播。</div>
       <div class="tabs" style="margin-top:8px;">
@@ -688,54 +664,6 @@
         <button class="small plain" id="btnCheckAll">只检查不导入</button>
       </div>
       <div class="muted small-txt" style="margin-top:8px;" id="lastSyncInfo">—</div>
-    </div>
-
-    <div class="card">
-      <h2>🗣️ 定时语音播报</h2>
-      <div class="row">
-        <div><label>每天几点播报</label><input type="time" id="ttsTime" value="07:30" /></div>
-        <div><label>开关</label>
-          <select id="ttsEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
-        </div>
-        <div><label>播报音箱</label><select id="ttsDevice"><option value="">跟随设置里的设备</option></select></div>
-      </div>
-      <label>开场白</label>
-      <input type="text" id="ttsPrefix" placeholder="喜马拉雅更新提醒" />
-      <div class="row" style="margin-top:8px;">
-        <div><label>播报完自动接着放</label>
-          <select id="ttsPlayAfter"><option value="0">不播</option><option value="1">播最近在听的那本</option></select>
-        </div>
-      </div>
-      <div class="btns">
-        <button class="small" id="btnTtsSave">保存设置</button>
-        <button class="small plain" id="btnTtsPreview">预览播报稿</button>
-        <button class="small ghost" id="btnTtsPlay">现在播一次</button>
-      </div>
-      <div class="muted small-txt" style="margin-top:8px;" id="ttsInfo">开启后每天到点先同步订阅，有新集就用音箱念出来（没新集不打扰）。选「自动接着放」后，念完会接着播你最近在听、还没听完的那本书。</div>
-    </div>
-
-    <div class="card">
-      <h2>🔎 关键词追更</h2>
-      <div class="row">
-        <div style="flex:2"><label>关注关键词</label><input type="text" id="wKw" placeholder="如：郭德纲 相声、股票复盘" /></div>
-        <div><label>每张只导最近 N 集</label><input type="number" id="wMaxNew" min="1" value="10" /></div>
-        <div style="flex:none"><button class="small" id="btnWAdd">添加</button></div>
-      </div>
-      <div class="row" style="margin-top:8px;">
-        <div><label>每天几点跑（跟自动同步一起）</label><input type="time" id="wTime" value="08:30" /></div>
-        <div><label>开关</label>
-          <select id="wEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
-        </div>
-        <div><label>有新内容时</label>
-          <select id="wPush"><option value="0">只加入歌单</option><option value="1">同时用音箱报告</option></select>
-        </div>
-      </div>
-      <div class="btns">
-        <button class="small" id="btnWSave">保存设置</button>
-        <button class="small plain" id="btnWRun">立即跑一次</button>
-      </div>
-      <div id="wList" style="margin-top:10px;"></div>
-      <div class="muted small-txt" style="margin-top:6px;" id="wInfo">不用逐张订阅：定时搜这个关键词，把新出现的专辑自动建成歌单（只取最近 N 集）。</div>
     </div>
 
     <div class="card">
@@ -1074,6 +1002,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.20.1"></script>
+<script src="static/app.js?v=0.20.2"></script>
 </body>
 </html>
