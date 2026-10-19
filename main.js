@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.19.3';
+var VERSION = '0.19.4';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -264,6 +264,21 @@ function todayStr() {
 
 function hhmmNow() {
   return nowStr().slice(11, 16);
+}
+
+// v0.19.4：配置里的 "8:30" / "9:05" 与 hhmmNow() 的 "08:30" 做字符串比较会得到 false，
+// 定时同步/播报/追更当天一次都不跑，而且没有任何日志。统一归一化 + 按分钟比较。
+function normHHMM(v) {
+  var m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim());
+  if (!m) return '';
+  var h = Number(m[1]), mi = Number(m[2]);
+  if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return '';
+  return (h < 10 ? '0' + h : String(h)) + ':' + (mi < 10 ? '0' + mi : String(mi));
+}
+
+function hmMin(v) {
+  var m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '').trim());
+  return m ? Number(m[1]) * 60 + Number(m[2]) : -1;
 }
 
 // ---------- 扫码登录（官方 passport 二维码） ----------
@@ -675,13 +690,18 @@ function agoText(ts) {
 }
 
 async function checkCookieHealth(force) {
+  // v0.19.4：三个分支原来都是整体赋值新建对象，会把 tick 刚写的 lastCheckDay 和上次的 lastOkAt 一起丢掉
+  // → 「每天一次」的巡检变成每 60 秒一次（一天 1440 次请求喜马拉雅，正是最招风控的模式），
+  //   失败后 lastOkAt 也永远归零，自检里「上次正常」变成「从未验证」。
+  var prevDay = cookieCheck.lastCheckDay || '';
+  var prevOkAt = Number(cookieCheck.lastOkAt) || 0;
   var sane = cookieLooksValid(login.cookie);
   if (!login.cookie) {
-    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: '未登录', cookieLength: 0 };
+    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: '未登录', cookieLength: 0, lastOkAt: prevOkAt, lastCheckDay: prevDay };
     return cookieHealthOut();
   }
   if (!sane.ok) {
-    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: sane.reason, cookieLength: login.cookie.length };
+    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: sane.reason, cookieLength: login.cookie.length, lastOkAt: prevOkAt, lastCheckDay: prevDay };
     logWarn('login', 'Cookie 格式异常：' + sane.reason);
     return cookieHealthOut();
   }
@@ -695,12 +715,13 @@ async function checkCookieHealth(force) {
       uid: (u.user && u.user.uid) || '',
       nickname: (u.user && u.user.nickname) || '',
       error: u.ok ? '' : (u.error || '登录态无效，请重新扫码'),
-      cookieLength: login.cookie.length
+      cookieLength: login.cookie.length,
+      lastOkAt: u.ok ? Date.now() : prevOkAt,   // v0.19.4：失败时保留上次成功时间
+      lastCheckDay: prevDay                     // v0.19.4：别把 tick 记的「今天已巡检」擦掉
     };
     if (!u.ok) logWarn('login', '登录态失效：' + cookieCheck.error);
-    else cookieCheck.lastOkAt = cookieCheck.at;
   } catch (e) {
-    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: String(e), cookieLength: login.cookie.length };
+    cookieCheck = { at: Date.now(), ok: false, uid: '', nickname: '', error: String(e), cookieLength: login.cookie.length, lastOkAt: prevOkAt, lastCheckDay: prevDay };
   }
   return cookieHealthOut();
 }
@@ -1121,6 +1142,12 @@ async function loadAll() {
       cookieCheck.lastOkAt = Number(cobj.lastOkAt) || 0;
       cookieCheck.lastCheckDay = String(cobj.lastCheckDay || '');
     }
+  } catch (e) { /* */ }
+  // v0.19.4：老配置里可能存着 "8:30" 这种没补零的时间，加载时统一归一化
+  try {
+    if (config && config.auto) config.auto.time = normHHMM(config.auto.time) || '08:30';
+    if (config && config.tts) config.tts.time = normHHMM(config.tts.time) || '07:30';
+    if (config && config.watch && config.watch.time) config.watch.time = normHHMM(config.watch.time) || '';
   } catch (e) { /* */ }
   if (!Array.isArray(bookmarks)) bookmarks = [];
   if (!Array.isArray(history)) history = [];
@@ -1729,7 +1756,10 @@ function progList(albumId, limit) {
     out.push(p);
   }
   out.sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); });
-  return limit ? out.slice(0, limit) : out;
+  // v0.19.4：Number('-1') 是 truthy，slice(0,-1) 会返回「除最后一条外的全部」，
+  // 负 limit 反而比默认 200 返回得更多。非正数一律视为「不限」。
+  var n = Math.floor(Number(limit));
+  return (isFinite(n) && n > 0) ? out.slice(0, n) : out;
 }
 
 // ---------- 曲目获取 ----------
@@ -1866,11 +1896,19 @@ async function runImport(albumId, name, start, end) {
     var lastIdx = 0;
     fetched.tracks.forEach(function (t) { if (t.index > lastIdx) lastIdx = t.index; });
 
+    // v0.19.4：写入失败的集必须挂到订阅的待补列表上。水位仍推到末集（避免下次同步重拉到重复集），
+    // 但失败集的集号 ≤ 水位、fetchNewTracks 永远不会再拉到它们，待补列表是唯一记录。
+    // 原来这里既不挂 pendingTracks，也不看 res.failed —— 一次批量失败就是永久丢集。
+    var pendFail = (res.failedTracks || []).slice(0, 300);
+    if (pendFail.length) {
+      songloft.log.warn('[喜马拉雅]《' + title + '》导入有 ' + pendFail.length + ' 集写入失败，已挂待补，下次同步自动重试');
+    }
+
     imported.unshift({
       albumId: String(albumId),
       name: title,
       playlistId: playlist.id,
-      count: res.added || job.done,
+      count: res.added,
       importedAt: nowStr()
     });
     upsertSub({
@@ -1878,7 +1916,8 @@ async function runImport(albumId, name, start, end) {
       name: title,
       playlistId: playlist.id,
       lastIndex: lastIdx,
-      songCount: res.added || job.done,
+      pendingTracks: pendFail,
+      songCount: res.added,
       cover: (detail && detail.cover) || '',
       author: (detail && detail.author) || '',
       updateDate: (detail && detail.updateDate) || '',
@@ -1950,9 +1989,10 @@ async function runImportMulti(items, mode, mergedName) {
         part.added = res.added;
         part.count = fetched.tracks.length;
         if (res.failedTracks && res.failedTracks.length) {
-          // 多专辑模式下失败集挂在 job 上统一重试（歌单可能不止一个，retry 只补最后一个失败歌单）
-          job.failedTracks = (job.failedTracks || []).concat(res.failedTracks).slice(0, 200);
-          job.retryPlaylistId = pl.id;
+          // v0.19.4：失败集按 part 分组存。原来统一 concat 到 job.failedTracks 而 retryPlaylistId
+          // 只记最后一张歌单，separate 模式下会把 A 专辑的失败集写进 B 专辑的歌单（真写进去，极难发现）
+          part.failedTracks = (part.failedTracks || []).concat(res.failedTracks).slice(0, 200);
+          part.retryPlaylistId = pl.id;
           // v0.18.7：写入有失败时标记到 part.error，避免待听清单把这本「划掉」却其实没导进去
           part.error = res.added
             ? (res.failedTracks.length + ' 集写入失败')
@@ -2044,7 +2084,8 @@ async function syncOne(sub, opts) {
       var pend = sub.pendingTracks.slice();
       stampAuthor(pend, sub.author, sub.name);
       var pr2 = await addTracksToPlaylist(sub.playlistId, pend);
-      out.added += pr2.added;
+      var pr2Added = Number(pr2.added) || 0;   // v0.19.4：下面算 songCount 也要用
+      out.added += pr2Added;
       sub.pendingTracks = pr2.failedTracks || [];
       if (pr2.added) songloft.log.info('[喜马拉雅] 补上上次失败的 ' + pr2.added + ' 集：《' + (sub.name || sub.albumId) + '》');
     }
@@ -2059,14 +2100,24 @@ async function syncOne(sub, opts) {
     if (r.tracks.length && opts.import && sub.playlistId) {
       stampAuthor(r.tracks, sub.author, sub.name);
       var res = await addTracksToPlaylist(sub.playlistId, r.tracks);
-      out.added = res.added;
+      // v0.19.4：这里必须是 +=。原写成 = 把上面「补上次失败集」的数量吞掉，
+      // 导致 totalAdded / 播报文本 / songCount 全部少算。
+      out.added += (Number(res.added) || 0);
       sub.lastIndex = r.lastIndex;
-      sub.songCount = (Number(sub.songCount) || 0) + res.added;
+      sub.songCount = (Number(sub.songCount) || 0) + pr2Added + (Number(res.added) || 0);
       // v0.18.7：写入失败的集挂到 sub 上，下次同步会先补这批（不能只靠 lastIndex 推进）
       // v0.19.2：这批失败就追加；这批全成功也不能清空 —— 上面重试后仍失败的 pendingTracks
       // 已经是「唯一记录」，一清就永久丢集（它们的集号 ≤ lastIndex，不会再被拉到）。
       if (res.failedTracks && res.failedTracks.length) {
-        sub.pendingTracks = (sub.pendingTracks || []).concat(res.failedTracks).slice(-300);
+        // v0.19.4：原来 slice(-300) 保留最新 300、丢掉最早的 —— 而这些集号已经 ≤ 水位，
+        // 被丢掉就是永久缺失且无任何痕迹。改成保留最早 300（用户先听到的），并留日志。
+        var pendAll = (sub.pendingTracks || []).concat(res.failedTracks);
+        pendAll.sort(function (a, b) { return (Number(a.index) || 0) - (Number(b.index) || 0); });
+        if (pendAll.length > 300) {
+          songloft.log.warn('[喜马拉雅]《' + (sub.name || sub.albumId) + '》待补集超过 300，只保留最早的 300 集，丢掉 ' + (pendAll.length - 300) + ' 集');
+          pendAll = pendAll.slice(0, 300);
+        }
+        sub.pendingTracks = pendAll;
         out.error = res.failedTracks.length + ' 集写入失败，下次同步自动补';
         songloft.log.warn('[喜马拉雅]《' + (sub.name || sub.albumId) + '》' + out.error);
       }
@@ -2317,7 +2368,7 @@ async function tick() {
   // 定时语音播报：到点先同步（内部会追加新集），再把结果读出来
   var t = config.tts || {};
   var ttsRan = false;   // v0.19.2：播报内部已全量同步过，本轮的「定时自动同步」可跳过
-  if (t.enabled && t.lastRunDate !== today && now >= String(t.time || '07:30')) {
+  if (t.enabled && t.lastRunDate !== today && hmMin(now) >= hmMin(t.time || '07:30')) {
     var dev = ttsDevice();
     if (dev.account_id && dev.device_id) {
       songloft.log.info('[喜马拉雅] 触发定时语音播报（设定 ' + t.time + '）');
@@ -2339,7 +2390,7 @@ async function tick() {
   }
 
   // 定时自动同步（播报刚同步过就不重复跑，避免一天两次全量抓取）
-  if (!ttsRan && config.auto && config.auto.enabled && config.auto.lastRunDate !== today && now >= String(config.auto.time || '08:30')) {
+  if (!ttsRan && config.auto && config.auto.enabled && config.auto.lastRunDate !== today && hmMin(now) >= hmMin(config.auto.time || '08:30')) {
     songloft.log.info('[喜马拉雅] 触发定时同步（设定 ' + config.auto.time + '）');
     await runSyncAll({ import: true, markAuto: true, trigger: '定时' });
   }
@@ -2348,7 +2399,7 @@ async function tick() {
   var wc = config.watch || {};
   if (wc.enabled && watch.items.length && wc.lastRunDate !== today) {
     var at = String(wc.time || (config.auto && config.auto.time) || '08:30');
-    if (now < at) return;
+    if (hmMin(now) < hmMin(at)) return;
     // v0.18.7：上次因任务占用没跑成时，等 1 小时再试，避免每分钟都去撞
     if (wc.lastTryAt && (Date.now() - (new Date(String(wc.lastTryAt).replace(' ', 'T')).getTime() || 0)) < 3600000) return;
     songloft.log.info('[喜马拉雅] 触发关键词追更，共 ' + watch.items.length + ' 个关键词');
@@ -3223,14 +3274,16 @@ async function handleHTTPRequest(req) {
     if (body.auto) {
       var a = body.auto;
       if (typeof a.enabled === 'boolean') config.auto.enabled = a.enabled;
-      if (a.time && /^\d{1,2}:\d{2}$/.test(a.time)) config.auto.time = a.time;
+      var aTv = normHHMM(a.time);
+      if (aTv) config.auto.time = aTv;
       if (typeof a.pushDevice === 'boolean') config.auto.pushDevice = a.pushDevice;
       if (a.lastRunDate === '') config.auto.lastRunDate = '';
     }
     if (body.tts) {
       var t = body.tts;
       if (typeof t.enabled === 'boolean') config.tts.enabled = t.enabled;
-      if (t.time && /^\d{1,2}:\d{2}$/.test(t.time)) config.tts.time = t.time;
+      var tTv = normHHMM(t.time);
+      if (tTv) config.tts.time = tTv;
       if (typeof t.account_id === 'string') config.tts.account_id = t.account_id;
       if (typeof t.device_id === 'string') config.tts.device_id = t.device_id;
       if (typeof t.device_name === 'string') config.tts.device_name = t.device_name;
@@ -3821,13 +3874,10 @@ async function handleHTTPRequest(req) {
     var lmap = await scanLocalLibrary(false);
     var lt = [];
     try {
-      // 翻页把所有集拉齐（最多 20 页，足够大多数书）
-      for (var lp = 1; lp <= 20; lp++) {
-        var lr = await fetchAlbumTracks(laid, lp);
-        var llist = (lr && lr.tracks) || [];
-        lt = lt.concat(llist);
-        if (!lr || !lr.hasMore || !llist.length) break;
-      }
+      // v0.19.4：fetchAlbumTracks(albumId, start, end, maxPages) 第二个参数是**起始集号**不是页码，
+      // 且返回值只有 {albumName, tracks}（没有 hasMore）→ 原来 `!lr.hasMore` 恒真，循环第一轮就 break，
+      // 而第一轮实际是「从第 1 集拉到全部」，等于一次请求里串行打满所有分页，很容易超 60s。
+      lt = (await fetchAlbumTracks(laid, 0, 0)).tracks || [];
     } catch (e) { /* 取不到就只报已知的 */ }
     var st = libStatFor(lt, lmap);
     var items = {};
@@ -4172,17 +4222,41 @@ async function handleHTTPRequest(req) {
   // 重试上次导入写入失败的集（v0.18.0）
   if (path === '/import/retry' && method === 'POST') {
     if (importing || (job && job.running)) return jsonResp({ success: false, error: '已有导入任务进行中' }, 409);
-    var ft = (job && (job.failedTracks || [])) || [];
-    if (!ft.length) return jsonResp({ success: true, data: { added: 0, left: 0, message: '没有需要重试的集' } });
-    var rpid = Number(job.retryPlaylistId || job.playlistId) || 0;
-    if (!rpid) return jsonResp({ success: false, error: '原歌单不存在，无法重试' }, 400);
-    var rr = await addTracksToPlaylist(rpid, ft, null);
-    job.failedTracks = rr.failedTracks || [];
-    if (job.failedTracks.length) job.error = '仍有 ' + job.failedTracks.length + ' 集写入失败';
+    // v0.19.4：按歌单分组重试，每个歌单只补自己的失败集，避免多专辑串本
+    var groups = (job && job.parts || []).filter(function (p) {
+      return p.retryPlaylistId && p.failedTracks && p.failedTracks.length;
+    });
+    var singleMode = false;
+    if (!groups.length && job && job.failedTracks && job.failedTracks.length) {
+      // 单专辑导入：job.parts 里没有 failedTracks 字段，失败集只在 job 上
+      singleMode = true;
+      groups = [{ retryPlaylistId: Number(job.retryPlaylistId || job.playlistId) || 0, failedTracks: job.failedTracks }];
+    }
+    if (!groups.length) return jsonResp({ success: true, data: { added: 0, left: 0, message: '没有需要重试的集' } });
+    var addedSum = 0, leftSum = 0, skipped = 0;
+    for (var gi = 0; gi < groups.length; gi++) {
+      var gp = groups[gi];
+      if (!gp.retryPlaylistId) { leftSum += gp.failedTracks.length; skipped += 1; continue; }
+      var rrg = await addTracksToPlaylist(gp.retryPlaylistId, gp.failedTracks, null);
+      // groups 里放的就是 job.parts 的元素引用，这里赋值等于直接更新对应 part
+      gp.failedTracks = rrg.failedTracks || [];
+      addedSum += rrg.added || 0;
+      leftSum += gp.failedTracks.length;
+    }
+    // job.failedTracks 汇总成「剩余」，供前端显示重试按钮
+    job.failedTracks = [];
+    if (singleMode) {
+      job.failedTracks = groups[0].failedTracks.slice();
+    } else {
+      (job.parts || []).forEach(function (p) {
+        if (p.failedTracks && p.failedTracks.length) job.failedTracks = job.failedTracks.concat(p.failedTracks);
+      });
+    }
+    if (job.failedTracks.length) job.error = '仍有 ' + job.failedTracks.length + ' 集写入失败' + (skipped ? '（' + skipped + ' 张歌单已不存在）' : '');
     else job.error = '';
     await persist();
-    songloft.log.info('[喜马拉雅] 重试失败集: 补上 ' + rr.added + ' 集，剩 ' + job.failedTracks.length + ' 集');
-    return jsonResp({ success: true, data: { added: rr.added, left: job.failedTracks.length } });
+    songloft.log.info('[喜马拉雅] 重试失败集: 补上 ' + addedSum + ' 集，剩 ' + job.failedTracks.length + ' 集');
+    return jsonResp({ success: true, data: { added: addedSum, left: job.failedTracks.length } });
   }
 
   if (path === '/imported' && method === 'GET') {
@@ -4332,15 +4406,25 @@ async function handleHTTPRequest(req) {
       var r1 = await syncOne(s1, { import: !!bc.import });
       return jsonResp({ success: true, data: r1, sub: s1 });
     }
-    var all = await runSyncAll({ import: !!bc.import, trigger: '手动' });
-    return jsonResp({ success: true, data: all, subs: subs });
+    // v0.19.4：全量分支同样异步化，理由见 /sync
+    if (syncing) return jsonResp({ success: false, error: '已有同步任务在跑，请稍候' }, 409);
+    var checkImport = !!bc.import;
+    runSyncAll({ import: checkImport, trigger: '手动' })
+      .catch(function (e) { songloft.log.warn('[喜马拉雅] 检查更新异常: ' + String(e)); });
+    return jsonResp({ success: true, data: { message: '检查已开始', async: true } });
   }
 
   // 立即全量同步（含自动同步关闭的订阅）
   if (path === '/sync' && method === 'POST') {
+    if (syncing) return jsonResp({ success: false, error: '已有同步任务在跑，请稍候' }, 409);
+    // v0.19.4：原来在请求里等整轮同步返回。几十张订阅 = 上百次串行请求，必然撞宿主 60s 上限，
+    // 前端拿到超时，用户重复点，后台其实已经在跑（还会被 syncing 挡掉反而报错）。
+    // 改成立即返回 + 前端轮询 /status，和 /watch/run、/tts/run 一个模式。
     var by = readBodyJson(req);
-    var rs = await runSyncAll({ import: by.import !== false, force: true, trigger: by.trigger || '手动' });
-    return jsonResp({ success: true, data: rs, subs: subs, lastSync: lastSync });
+    var wantImport = by.import !== false;
+    runSyncAll({ import: wantImport, force: true, trigger: by.trigger || '手动' })
+      .catch(function (e) { songloft.log.warn('[喜马拉雅] 同步异常: ' + String(e)); });
+    return jsonResp({ success: true, data: { message: '同步已开始', async: true } });
   }
 
   if (path === '/search' && method === 'GET') {
@@ -4884,10 +4968,14 @@ function playlistForAlbum(albumId) {
 
 // 把专辑的某一集定位成「歌单里第几首」（start_index，0 起）
 async function indexInPlaylist(playlistId, trackId, fallbackIndex) {
+  // v0.19.4：trackId 为空时 songTrackId 也返回 ''，''==='' 会命中歌单里第一首
+  // 「没有 sourceData 的歌」（用户手动加进来的本地曲/别的插件的歌），直接顶掉 fallbackIndex。
+  var tid = String(trackId || '');
+  if (!tid) return fallbackIndex > 0 ? Math.max(0, fallbackIndex - 1) : -1;
   try {
     var songs = await collectPlaylistSongs(playlistId);
     for (var i = 0; i < songs.length; i++) {
-      if (songTrackId(songs[i]) === String(trackId)) return i;
+      if (songTrackId(songs[i]) === tid) return i;
     }
     if (fallbackIndex > 0) return Math.max(0, fallbackIndex - 1);
   } catch (e) { /* 忽略 */ }
