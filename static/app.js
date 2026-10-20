@@ -3542,7 +3542,7 @@
           loadSubs();
         });
 
-        ops.appendChild(bSync); ops.appendChild(bAuto); ops.appendChild(bPlay); ops.appendChild(bDel);
+        ops.appendChild(bSync); ops.appendChild(bAuto); ops.appendChild(bDel);
         line.appendChild(img); line.appendChild(body); line.appendChild(ops);
         el.appendChild(line);
       });
@@ -3984,7 +3984,7 @@
           } catch (e) { msg('删除失败: ' + e.message, 'err'); }
           loadImported();
         });
-        ops.appendChild(bPlay); ops.appendChild(bDl); ops.appendChild(bOpen); ops.appendChild(bDel);
+        ops.appendChild(bDl); ops.appendChild(bOpen); ops.appendChild(bDel);
         line.appendChild(body); line.appendChild(ops);
         el.appendChild(line);
       });
