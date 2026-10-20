@@ -506,12 +506,12 @@
   }
   function spSpeedUI(v) {
     var sv = String(v);
-    ['spSpeed', 'psSpeed'].forEach(function (id) {
+    ['spSpeed', 'spkSpeed'].forEach(function (id) {
       var el = $(id);
       if (el && el.value !== sv) el.value = sv;
     });
   }
-  ['spSpeed', 'psSpeed'].forEach(function (id) {
+  ['spSpeed', 'spkSpeed'].forEach(function (id) {
     if ($(id)) $(id).addEventListener('change', function () {
       var v = Number(this.value) || 1;
       spSpeedUI(v);
@@ -1192,48 +1192,83 @@
 
   if ($('pDrive')) $('pDrive').addEventListener('click', function () { driveShow(true); });
 
-  // v0.19.1：播放条上的音箱遥控（复用设置页的 spCtl）
-  if ($('pSpk')) {
-    // v0.19.3：展开时把「哪台音箱 / 在不在线 / 当前音量」显示出来，调音量心里有数
-    async function loadPsInfo() {
-      var el = $('psInfo');
-      if (!el) return;
-      try {
-        var r = await api('GET', '/speaker/state');
-        var d = (r && r.data) || {};
-        var name = d.device_name || (d.device && d.device.device_name) || '未绑定';
-        var on = d.presence === 'online';
-        var vol = (typeof d.volume === 'number') ? d.volume : (d.last && d.last.volume);
-        el.textContent = name + (d.device_name || d.device ? (on ? ' · 在线' : ' · 离线') : '') +
-          (typeof vol === 'number' ? ' · 音量 ' + vol : '');
-        el.title = el.textContent;
-      } catch (e) { el.textContent = '状态读取失败'; }
-    }
-    $('pSpk').addEventListener('click', function () {
-      var p = $('pSpkPanel');
-      p.classList.toggle('hide');
-      var open = !p.classList.contains('hide');
-      this.classList.toggle('on', open);
-      if (open) loadPsInfo();
-    });
-    $('psPush').addEventListener('click', async function () {
-      var t = queue[qi];
-      if (!t) { msg('当前没有在播的集', 'err'); return; }
-      try {
-        var r = await api('POST', '/speaker/play-track', { track_id: t.trackId, title: t.title });
-        msg(r && r.success !== false ? '🔊 已推到音箱：《' + t.title + '》' : '❌ ' + (r && r.error || '推送失败'), r && r.success !== false ? 'ok' : 'err');
-      } catch (e) { msg('推送失败: ' + e.message, 'err'); }
-    });
-    $('psPause').addEventListener('click', function () { spCtl('pause'); });
-    $('psResume').addEventListener('click', function () { spCtl('resume'); });
-    $('psStop').addEventListener('click', function () { spCtl('stop'); });
-    $('psVolDown').addEventListener('click', async function () {
-      if (await spCtl('voldown', { step: 10 })) { loadSpState(); loadPsInfo(); }
-    });
-    $('psVolUp').addEventListener('click', async function () {
-      if (await spCtl('volup', { step: 10 })) { loadSpState(); loadPsInfo(); }
-    });
+  // v0.21.5：音箱控制独立成全屏播放界面（#spkPlayer）
+  var spkOpen = false, spkVolTimer = null;
+  function spkSetUI(d) {
+    var on = d.presence === 'online';
+    $('spkName').textContent = d.device_name || '音箱';
+    $('spkSub').textContent = (on ? '🟢 在线' : (d.presence === 'offline' ? '⚫ 离线' : '⚪ 状态未知')) +
+      (typeof d.volume === 'number' ? ' · 音量 ' + d.volume : '') +
+      (!(d.last && d.last.title) ? ' · 还没播过' : '');
+    if (typeof d.volume === 'number') $('spkVol').value = String(d.volume);
+    $('spkTrack').textContent = (d.last && d.last.title) ? d.last.title : '—';
   }
+  async function loadSpkState() {
+    try {
+      var r = await api('GET', '/speaker/state');
+      if (!r || r.success === false) {
+        $('spkSub').textContent = '⚠️ ' + ((r && r.error) || '读取设备失败');
+        return;
+      }
+      spkSetUI(r.data || {});
+    } catch (e) { $('spkSub').textContent = '⚠️ ' + e.message; }
+  }
+  function openSpk() {
+    spkOpen = true;
+    $('spkPlayer').classList.add('show');
+    loadSpkState();
+  }
+  function closeSpk() {
+    spkOpen = false;
+    $('spkPlayer').classList.remove('show');
+  }
+  $('pSpk').addEventListener('click', openSpk);
+  if ($('spkFull')) $('spkFull').addEventListener('click', openSpk);
+  $('spkClose').addEventListener('click', closeSpk);
+  $('spkRefresh').addEventListener('click', loadSpkState);
+  // 大按钮：暂停/继续切换（音箱侧没有可靠的「正在播」回执，按下后按结果翻面）
+  $('spkToggle').addEventListener('click', async function () {
+    var resume = this.textContent === '⏵';
+    if (await spCtl(resume ? 'resume' : 'pause')) this.textContent = resume ? '⏸' : '⏵';
+  });
+  $('spkStop').addEventListener('click', async function () {
+    if (await spCtl('stop')) $('spkToggle').textContent = '⏵';
+  });
+  $('spkInterrupt').addEventListener('click', function () { spCtl('interrupt'); });
+  $('spkVolDown').addEventListener('click', async function () {
+    if (await spCtl('voldown', { step: 10 })) loadSpkState();
+  });
+  $('spkVolUp').addEventListener('click', async function () {
+    if (await spCtl('volup', { step: 10 })) loadSpkState();
+  });
+  $('spkVol').addEventListener('input', function () { /* 拖动只改 UI，松手才下发 */ });
+  $('spkVol').addEventListener('change', function () {
+    var v = Number(this.value) || 0;
+    if (spkVolTimer) clearTimeout(spkVolTimer);
+    spkVolTimer = setTimeout(async function () {
+      spkVolTimer = null;
+      if (await spCtl('volume', { volume: v })) loadSpkState();
+    }, 260);
+  });
+  $('spkReplay').addEventListener('click', async function () {
+    try {
+      var st = await api('GET', '/speaker/state');
+      var last = (st && st.data && st.data.last) || null;
+      if (!last || !last.trackId) { msg('还没有在音箱放过东西，先从歌单点「播到音箱」试试', 'err'); return; }
+      var r = await api('POST', '/speaker/play-track', { track_id: last.trackId, title: last.title, url: last.url });
+      if (r && r.success !== false) $('spkTrack').textContent = last.title;
+      msg(r && r.success !== false ? ('🔁 ' + ((r.data && r.data.message) || '已重播')) : ('❌ ' + r.error), r && r.success !== false ? 'ok' : 'err');
+    } catch (e) { msg('重播失败: ' + e.message, 'err'); }
+  });
+  $('spkPush').addEventListener('click', async function () {
+    var t = queue[qi];
+    if (!t) { msg('当前没有在播的集', 'err'); return; }
+    try {
+      var r = await api('POST', '/speaker/play-track', { track_id: t.trackId, title: t.title });
+      if (r && r.success !== false) $('spkTrack').textContent = t.title;
+      msg(r && r.success !== false ? '🔊 已推到音箱：《' + t.title + '》' : '❌ ' + (r && r.error || '推送失败'), r && r.success !== false ? 'ok' : 'err');
+    } catch (e) { msg('推送失败: ' + e.message, 'err'); }
+  });
 
   if ($('driveExit')) $('driveExit').addEventListener('click', function () { driveShow(false); });
   if ($('drivePlay')) $('drivePlay').addEventListener('click', function () {
@@ -2278,6 +2313,7 @@
     var tag = (e.target && e.target.tagName) || '';
     if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
     if (e.key === 'Escape') {
+      if (spkOpen) { e.preventDefault(); closeSpk(); return; }
       if (fpOpen) { e.preventDefault(); closeFull(); return; }
       if (bmPanelOpenFlag) { e.preventDefault(); closeBm(); return; }
       if (qPanelOpen()) { e.preventDefault(); closeQueue(); return; }
