@@ -1162,17 +1162,56 @@
   // v0.22.0：音箱控制并入全屏播放页（#fullPlayer 内「本机 / 音箱」切换），不再单独一套浮层
   var spkVolTimer = null;
   var fpTarget = 'local';
+  var spkMedia = null;        // v0.22.2：最近一次音箱播放状态（标题/封面/进度）
+  var spkPollTimer = null;    // 面板打开期间每 5s 轮询一次进度
+  function spkPollSet(on) {
+    if (spkPollTimer) { clearInterval(spkPollTimer); spkPollTimer = null; }
+    if (on) spkPollTimer = setInterval(function () {
+      if (fpOpen && fpTarget === 'spk') loadSpkState();
+      else spkPollSet(false);
+    }, 5000);
+  }
   function spkSetUI(d) {
     var on = d.presence === 'online';
     $('spkName').textContent = d.device_name || '音箱';
     $('spkSub').textContent = (on ? '🟢 在线' : (d.presence === 'offline' ? '⚫ 离线' : '⚪ 状态未知')) +
       (typeof d.volume === 'number' ? ' · 音量 ' + d.volume : '') +
-      (!(d.last && d.last.title) ? ' · 还没播过' : '');
+      (!(d.media) && !(d.last && d.last.title) ? ' · 还没播过' : '');
     if (typeof d.volume === 'number') {
       $('spkVol').value = String(d.volume);
       if ($('spkVolNum')) $('spkVolNum').textContent = String(d.volume);
     }
-    $('spkTrack').textContent = (d.last && d.last.title) ? d.last.title : '—';
+    // v0.22.2：封面 + 进度（推送到音箱后由后端本地账本计时）
+    var m = d.media || null;
+    spkMedia = m;
+    var fp = $('fullPlayer');
+    var cov = m && m.cover;
+    if ($('spkCover') && fp) {
+      if (cov) {
+        if ($('spkCover').getAttribute('src') !== cov) $('spkCover').setAttribute('src', cov);
+        fp.classList.add('has-cover');
+      } else {
+        $('spkCover').removeAttribute('src');
+        fp.classList.remove('has-cover');
+      }
+    }
+    $('spkTrack').textContent = (m && m.title) || (d.last && d.last.title) || '—';
+    var prog = $('spkProg');
+    if (prog) {
+      if (m && m.duration > 0) {
+        prog.disabled = false;
+        prog.value = String(Math.round(1000 * Math.min(1, (m.position || 0) / m.duration)));
+        $('spkPos').textContent = fmtTime(m.position || 0);
+        $('spkDur').textContent = fmtTime(m.duration);
+      } else {
+        prog.disabled = true;
+        prog.value = '0';
+        $('spkPos').textContent = '0:00';
+        $('spkDur').textContent = '--:--';
+      }
+    }
+    // 大按钮按真实状态翻面（/mina/status 可查 playing/paused）
+    if (m && typeof m.playing === 'boolean') $('spkToggle').textContent = m.playing ? '⏸' : '⏵';
   }
   async function loadSpkState() {
     try {
@@ -1195,7 +1234,8 @@
       var bs = seg.querySelectorAll('button');
       for (var i = 0; i < bs.length; i++) bs[i].classList.toggle('on', bs[i].dataset.t === fpTarget);
     }
-    if (fpTarget === 'spk') loadSpkState();
+    if (fpTarget === 'spk') { loadSpkState(); spkPollSet(true); }
+    else spkPollSet(false);
   }
   function openSpk() { openFull(true, 'spk'); }
   $('pSpk').addEventListener('click', openSpk);
@@ -2133,6 +2173,7 @@
   function closeFull() {
     fpOpen = false;
     $('fullPlayer').classList.remove('show');
+    spkPollSet(false);
     if (document.body) document.body.style.overflow = '';
   }
 
