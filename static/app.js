@@ -57,20 +57,63 @@
   }
 
   var hasQsToken = !!qs.get('token');   // v0.21.7：URL 显式带 token 时不走宿主桥（桥在独立打开时可能没有凭据）
-  async function api(method, path, body) {
+  // v0.22.4：统一请求层——超时可中断、GET 网络错误自动重试一次、并发相同 GET 只发一次。
+  // 以前宿主桥没有超时，NAS 那边网络卡住时界面会一直转圈。
+  var API_TIMEOUT = 25000;
+  var apiInflight = {};
+  function apiTimeout(p, ms) {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var tm = setTimeout(function () {
+        if (done) return;
+        done = true;
+        reject(new Error('请求超时（网络较慢，已自动重试）'));
+      }, ms);
+      p.then(function (v) { if (done) return; done = true; clearTimeout(tm); resolve(v); },
+        function (e) { if (done) return; done = true; clearTimeout(tm); reject(e); });
+    });
+  }
+  function isNetError(e) {
+    var m = String(e && e.message || e);
+    if (/HTTP 4\d\d/.test(m)) return false;
+    return /timeout|超时|Failed to fetch|NetworkError|network error|load failed|fetch failed|不可用|ECONN/i.test(m);
+  }
+  async function apiOnce(method, path, body) {
     if (sp && !hasQsToken) {
       if (method === 'GET' && sp.apiGet) return sp.apiGet(path);
       if (method === 'POST' && sp.apiPost) return sp.apiPost(path, body === undefined ? {} : body);
       if (method === 'DELETE' && sp.apiDelete) return sp.apiDelete(path);
       if (method === 'PUT' && sp.apiPut) return sp.apiPut(path, body === undefined ? {} : body);
     }
-    var resp = await fetch(API_BASE + path, {
-      method: method, headers: headers(),
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
+    var ctl = null;
+    try { ctl = new AbortController(); } catch (e0) { ctl = null; }
+    var opt = { method: method, headers: headers() };
+    if (ctl) opt.signal = ctl.signal;
+    if (body !== undefined) opt.body = JSON.stringify(body);
+    var resp = await fetch(API_BASE + path, opt);
     var data = await resp.json().catch(function () { return {}; });
     if (!resp.ok && data.error) throw new Error(data.error);
     return data;
+  }
+  async function api(method, path, body) {
+    var key = method + ' ' + path;
+    if (method === 'GET' && apiInflight[key]) return apiInflight[key];
+    var run = (async function () {
+      try {
+        return await apiTimeout(apiOnce(method, path, body), API_TIMEOUT);
+      } catch (e) {
+        if (method === 'GET' && isNetError(e)) {
+          await new Promise(function (r) { setTimeout(r, 600); });
+          return await apiTimeout(apiOnce(method, path, body), API_TIMEOUT);
+        }
+        throw e;
+      }
+    })();
+    if (method === 'GET') {
+      apiInflight[key] = run;
+      try { return await run; } finally { delete apiInflight[key]; }
+    }
+    return run;
   }
 
   var $ = function (id) { return document.getElementById(id); };
@@ -615,6 +658,31 @@
   }
 
   $('audio').addEventListener('playing', function () { lastTickAt = Date.now(); });
+
+  // v0.22.4：音频断流/地址过期自动重连一次。喜马拉雅 CDN 地址有有效期，
+  // 以前地址一失效播放就静默停住，得手动再点一集。
+  var mediaErrN = 0;
+  $('audio').addEventListener('error', async function () {
+    var t = queue[qi];
+    if (!t) return;
+    if (mediaErrN >= 1) { msg('音频加载失败，请稍后重试或换一集', 'err'); return; }
+    mediaErrN++;
+    var pos = this.currentTime || 0;
+    var label = (t.index ? t.index + '. ' : '') + t.title;
+    $('pTitle').textContent = '重连中… ' + label;
+    try {
+      var rr = await api('GET', '/track/' + t.trackId + '/url');
+      if (!rr || rr.success === false || !rr.data || !rr.data.url) throw new Error((rr && rr.error) || '取不到地址');
+      this.src = rr.data.url;
+      if (pos > 1) this.currentTime = Math.max(0, pos - 2);
+      this.play().catch(function () { /* 需要用户手势 */ });
+      msg('网络抖动，已自动重连', 'ok');
+    } catch (e) {
+      $('pTitle').textContent = '❌ ' + label;
+      msg('重连失败：' + e.message, 'err');
+    }
+  });
+  $('audio').addEventListener('playing', function () { mediaErrN = 0; });
   // v0.18.7：切集/换源时清掉计时基准，否则新旧源的间隔会被算进收听时长
   $('audio').addEventListener('loadedmetadata', function () { lastTickAt = 0; });
   $('audio').addEventListener('timeupdate', function () {
@@ -4573,6 +4641,46 @@
       if (!confirm('清空运行日志？')) return;
       try { await api('POST', '/logs', { action: 'clear' }); loadLogs(); msg('日志已清空'); }
       catch (e) { msg('清空失败: ' + e.message, 'err'); }
+    });
+  }
+
+  // ---------- v0.22.4：网络诊断 ----------
+  if ($('btnNetDiag')) {
+    $('btnNetDiag').addEventListener('click', async function () {
+      var btn = this, out = $('netDiagOut'), stat = $('netDiagStat');
+      btn.disabled = true;
+      stat.textContent = '正在检测（最多 8 秒/项）…';
+      out.innerHTML = '';
+      try {
+        var r = await api('GET', '/net/health');
+        if (!r || r.success === false) throw new Error((r && r.error) || '检测失败');
+        var items = (r.data && r.data.items) || [];
+        var bad = 0;
+        out.innerHTML = '';
+        items.forEach(function (it) {
+          if (!it.ok) bad++;
+          var row = document.createElement('div');
+          row.className = 'diagrow';
+          var ms = it.ms
+            ? '<span class="' + (it.ms > 3000 ? 'err' : (it.ms > 1200 ? 'warn' : 'ok')) + '">' + it.ms + ' ms</span>'
+            : '';
+          row.innerHTML = '<span class="diagdot ' + (it.ok ? 'ok' : 'err') + '">' + (it.ok ? '●' : '●') + '</span>' +
+            '<span class="diagname">' + escHtml(it.name) + '</span>' + ms +
+            (it.error ? '<span class="diagerr">' + escHtml(it.error) + '</span>' : '') +
+            (!it.error && it.status ? '<span class="diagmeta">HTTP ' + it.status + '</span>' : '');
+          out.appendChild(row);
+        });
+        var d = r.data || {};
+        stat.textContent = bad === 0
+          ? '全部正常 · 在途请求 ' + (d.active || 0) + ' · 排队 ' + (d.queued || 0) + ' · 缓存 ' + (d.cache || 0) + ' 条'
+          : (bad + ' 项异常，检查 NAS 的 DNS / 代理设置后重试');
+        stat.className = 'muted small-txt' + (bad ? ' err' : '');
+      } catch (e) {
+        stat.textContent = '检测失败：' + e.message;
+        stat.className = 'muted small-txt err';
+      } finally {
+        btn.disabled = false;
+      }
     });
   }
 
