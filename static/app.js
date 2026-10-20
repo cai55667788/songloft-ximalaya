@@ -898,13 +898,13 @@
 
   // v0.22.5：地址本（内存）——命中就直接设 src，跳过 150~400ms 的取流请求。
   // 配合服务端 20 分钟地址缓存 + 列表渲染后预取，目标是「点下去就出声」。
-  var urlMemo = {}, urlFetching = {};
+  var urlMemo = {}, urlFetching = {}, urlBad = {};
   function memoUrl(id, info) {
     if (id && info && info.url) urlMemo[String(id)] = info;
   }
   function prefetchTrack(id, hot) {
     id = String(id || '');
-    if (!id || urlMemo[id] || urlFetching[id]) {
+    if (!id || urlMemo[id] || urlFetching[id] || urlBad[id]) {
       if (hot && urlMemo[id] && urlMemo[id].url) warmAudio(urlMemo[id].url);
       return;
     }
@@ -914,6 +914,8 @@
       if (r && r.data && r.data.url) {
         memoUrl(id, { url: r.data.url, local: !!r.data.local, localPath: r.data.localPath || '' });
         if (hot) warmAudio(r.data.url);   // 最可能播的那一集，连首包一起预热
+      } else if (r && r.success === false && (r.code === 'paid' || r.code === 'no_url')) {
+        urlBad[id] = r.code;   // v0.23.3：付费/下架的集记住，列表渲染不再反复请求
       }
     }).catch(function () { /* 预取失败不打扰用户 */ }).then(function () { delete urlFetching[id]; });
   }
@@ -956,8 +958,10 @@
       // 而且 curPlayingId 永远不会置上 —— 看不见、暂停不了、进度也不落盘。
       if (my !== playSeq || !queue[idx]) return;
       if (!r || r.success === false) {
+        // v0.23.3：付费/下架是确定状态，重试没有意义，直接报错
+        var knownBad = r && (r.code === 'paid' || r.code === 'no_url');
         // 拿不到地址：自动再试一次（接口抖动很常见），还不行才报错
-        if (!retry) {
+        if (!retry && !knownBad) {
           $('pTitle').textContent = '重试中… ' + label;
           await new Promise(function (res) { setTimeout(res, 800); });
           if (my !== playSeq) return;
