@@ -1147,8 +1147,9 @@
 
   if ($('pDrive')) $('pDrive').addEventListener('click', function () { driveShow(true); });
 
-  // v0.21.5：音箱控制独立成全屏播放界面（#spkPlayer）
-  var spkOpen = false, spkVolTimer = null;
+  // v0.22.0：音箱控制并入全屏播放页（#fullPlayer 内「本机 / 音箱」切换），不再单独一套浮层
+  var spkVolTimer = null;
+  var fpTarget = 'local';
   function spkSetUI(d) {
     var on = d.presence === 'online';
     $('spkName').textContent = d.device_name || '音箱';
@@ -1168,18 +1169,26 @@
       spkSetUI(r.data || {});
     } catch (e) { $('spkSub').textContent = '⚠️ ' + e.message; }
   }
-  function openSpk() {
-    spkOpen = true;
-    $('spkPlayer').classList.add('show');
-    loadSpkState();
+  // 本机 / 音箱：同一套控件，靠 #fullPlayer.spk 切换显示哪一面板
+  function fpSetTarget(t) {
+    fpTarget = t === 'spk' ? 'spk' : 'local';
+    var fp = $('fullPlayer');
+    if (!fp) return;
+    fp.classList.toggle('spk', fpTarget === 'spk');
+    var seg = $('fpSeg');
+    if (seg) {
+      var bs = seg.querySelectorAll('button');
+      for (var i = 0; i < bs.length; i++) bs[i].classList.toggle('on', bs[i].dataset.t === fpTarget);
+    }
+    if (fpTarget === 'spk') loadSpkState();
   }
-  function closeSpk() {
-    spkOpen = false;
-    $('spkPlayer').classList.remove('show');
-  }
+  function openSpk() { openFull(true, 'spk'); }
   $('pSpk').addEventListener('click', openSpk);
   if ($('spkFull')) $('spkFull').addEventListener('click', openSpk);
-  $('spkClose').addEventListener('click', closeSpk);
+  if ($('fpSeg')) $('fpSeg').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button') : null;
+    if (b && b.dataset && b.dataset.t) fpSetTarget(b.dataset.t);
+  });
   $('spkRefresh').addEventListener('click', loadSpkState);
   // 大按钮：暂停/继续切换（音箱侧没有可靠的「正在播」回执，按下后按结果翻面）
   $('spkToggle').addEventListener('click', async function () {
@@ -1190,12 +1199,6 @@
     if (await spCtl('stop')) $('spkToggle').textContent = '⏵';
   });
   $('spkInterrupt').addEventListener('click', function () { spCtl('interrupt'); });
-  $('spkVolDown').addEventListener('click', async function () {
-    if (await spCtl('voldown', { step: 10 })) loadSpkState();
-  });
-  $('spkVolUp').addEventListener('click', async function () {
-    if (await spCtl('volup', { step: 10 })) loadSpkState();
-  });
   $('spkVol').addEventListener('input', function () { /* 拖动只改 UI，松手才下发 */ });
   $('spkVol').addEventListener('change', function () {
     var v = Number(this.value) || 0;
@@ -2100,11 +2103,13 @@
   var fpOpen = false;
   var fpDragging = false;
 
-  function openFull() {
-    if (!curTrack()) { msg('先播一集', 'err'); return; }
+  function openFull(skipCheck, target) {
+    if (!skipCheck && !curTrack()) { msg('先播一集', 'err'); return; }
     fpOpen = true;
     $('fullPlayer').classList.add('show');
     if (document.body) document.body.style.overflow = 'hidden';
+    pMoreShow(false);
+    fpSetTarget(target || 'local');
     syncFull(true);
   }
   function closeFull() {
@@ -2138,7 +2143,25 @@
     if ($('fpQueue')) $('fpQueue').textContent = queue.length > 1 ? '☰ ' + (qi + 1) + '/' + queue.length : '☰';
   }
 
-  $('pFull').addEventListener('click', openFull);
+  $('pFull').addEventListener('click', function () { openFull(false, 'local'); });
+
+  // v0.22.0：播放条「⋯ 更多」抽屉（次要功能全收在这里，播放条只留最常用的几颗）
+  function pMoreOpen() { var p = $('pMorePanel'); return !!p && !p.classList.contains('hide'); }
+  function pMoreShow(on) {
+    var p = $('pMorePanel'), b = $('pMore');
+    if (!p) return;
+    p.classList.toggle('hide', !on);
+    if (b) { b.classList.toggle('on', !!on); b.setAttribute('aria-expanded', on ? 'true' : 'false'); }
+  }
+  if ($('pMore')) $('pMore').addEventListener('click', function (e) {
+    e.stopPropagation();
+    pMoreShow(!pMoreOpen());
+  });
+  document.addEventListener('click', function (e) {
+    if (!pMoreOpen()) return;
+    if (e.target && e.target.closest && e.target.closest('#pMorePanel, #pMore')) return;
+    pMoreShow(false);
+  });
   $('fpClose').addEventListener('click', closeFull);
   $('fpQueue').addEventListener('click', function () { openQueue(); });
   $('fpPlay').addEventListener('click', function () {
@@ -2268,8 +2291,8 @@
     var tag = (e.target && e.target.tagName) || '';
     if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
     if (e.key === 'Escape') {
-      if (spkOpen) { e.preventDefault(); closeSpk(); return; }
       if (fpOpen) { e.preventDefault(); closeFull(); return; }
+      if (pMoreOpen()) { e.preventDefault(); pMoreShow(false); return; }
       if (bmPanelOpenFlag) { e.preventDefault(); closeBm(); return; }
       if (qPanelOpen()) { e.preventDefault(); closeQueue(); return; }
     }
