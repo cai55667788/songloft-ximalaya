@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.22.4';
+var VERSION = '0.22.5';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -725,6 +725,48 @@ async function fetchTrackUrl(trackId) {
     throw new Error('未获取到音频地址（可能已下架）');
   }
   return link;
+}
+
+// v0.22.5：单集地址缓存 + 后台预取 —— 目标「即点即播」。
+// 地址本身有效期通常数小时，这里缓存 20 分钟：覆盖连续收听，又不会用到过期地址。
+var TURL = {}, TURL_TTL = 20 * 60 * 1000, TURL_MAX = 500, turlN = 0;
+function turlGet(id) {
+  var c = TURL[id];
+  if (!c) return '';
+  if (Date.now() - c.at > TURL_TTL) { delete TURL[id]; turlN = Math.max(0, turlN - 1); return ''; }
+  return c.url;
+}
+function turlPut(id, url) {
+  if (!url) return;
+  if (!TURL[id]) turlN++;
+  TURL[id] = { url: url, at: Date.now() };
+  if (turlN > TURL_MAX) {
+    var keys = Object.keys(TURL);
+    for (var i = 0; i < keys.length && turlN > TURL_MAX; i++) { delete TURL[keys[i]]; turlN--; }
+  }
+}
+async function trackUrlFast(id, fresh) {
+  if (!fresh) {
+    var c = turlGet(id);
+    if (c) return c;
+  }
+  var u = await fetchTrackUrl(id);
+  turlPut(id, u);
+  return u;
+}
+// 后台预取：不阻塞当前请求，失败静默（真正的报错留给用户点播时）
+function prefetchUrls(ids) {
+  var list = (ids || []).map(function (x) { return String(x || ''); }).filter(Boolean).slice(0, 12);
+  if (!list.length) return 0;
+  setTimeout(function () {
+    list.forEach(function (id) {
+      if (turlGet(id)) return;
+      trackUrlFast(id).catch(function (e) {
+        logWarn('net', '预取地址失败 ' + id + '：' + String(e && e.message || e));
+      });
+    });
+  }, 50);
+  return list.length;
 }
 
 // v0.22.3：封面统一转 https（手机 webview 拒载 http 图）
@@ -4269,6 +4311,13 @@ async function handleHTTPRequest(req) {
   }
 
   // 单集直链（前端试听）：如果这集已经下载到本地，优先给本地文件地址（宿主支持时）
+  // v0.22.5：前端预取（列表渲染完 / 手指按下时提前取地址）
+  if (path === '/prefetch' && method === 'POST') {
+    var pfb = readBodyJson(req);
+    var pids = Array.isArray(pfb.track_ids) ? pfb.track_ids : [];
+    return jsonResp({ success: true, data: { queued: prefetchUrls(pids) } });
+  }
+
   var mTrack = path.match(/^\/track\/(\d+)\/url$/);
   if (mTrack && method === 'GET') {
     try {
@@ -4283,7 +4332,7 @@ async function handleHTTPRequest(req) {
         if (localUrl) return jsonResp({ success: true, data: { url: localUrl, local: true, path: localInfo.path } });
         // 宿主没有 fileUrl 能力：只能拿到路径，前端仍走网络地址，但会提示「已有本地副本」
       }
-      var u = await fetchTrackUrl(mTrack[1]);
+      var u = await trackUrlFast(mTrack[1], q.fresh === '1' || q.fresh === 'true');
       return jsonResp({ success: true, data: { url: u, local: !!(localInfo && localInfo.path), localPath: (localInfo && localInfo.path) || '' } });
     } catch (e) {
       return jsonResp({ success: false, error: String(e) }, 404);
@@ -4297,6 +4346,8 @@ async function handleHTTPRequest(req) {
       var albumId = mAlbum[1];
       var detailP = fetchAlbumDetail(albumId).catch(function () { return null; });
       var batch = await fetchShowPage(albumId, 1);
+      // v0.22.5：打开专辑就把前 3 集地址预热，点第一集基本零等待
+      try { prefetchUrls(batch.slice(0, 3).map(function (x) { return x.trackId; })); } catch (eP0) { /* */ }
       var detail = await detailP;
       if (!batch.length) return jsonResp({ success: false, error: '专辑无曲目或已下架' }, 404);
       var albumName = batch[0].albumName || (detail && detail.name) || ('专辑' + albumId);
