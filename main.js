@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.22.2';
+var VERSION = '0.22.3';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -627,6 +627,12 @@ async function fetchTrackUrl(trackId) {
     throw new Error('未获取到音频地址（可能已下架）');
   }
   return link;
+}
+
+// v0.22.3：封面统一转 https（手机 webview 拒载 http 图）
+function httpsUrl(u) {
+  var s = String(u || '');
+  return s ? s.replace(/^http:\/\//i, 'https://') : '';
 }
 
 // v0.22.2：单集元数据（封面/时长/标题），音箱播放界面显示进度和封面用
@@ -4641,7 +4647,7 @@ async function handleHTTPRequest(req) {
       if (changed2) { try { await songloft.storage.set(SPK_KEY, JSON.stringify({ last: SPK.last || {}, play: SPK.play || null })); } catch (eP) { /* */ } }
       media2 = {
         trackId: SPK.play.trackId, title: SPK.play.title || (SPK.last && SPK.last.title) || '',
-        cover: SPK.play.cover || (SPK.last && SPK.last.cover) || '',
+        cover: httpsUrl(SPK.play.cover || (SPK.last && SPK.last.cover)),
         duration: SPK.play.duration || (SPK.last && SPK.last.duration) || 0,
         position: pos2, playing: !!SPK.play.playing
       };
@@ -4763,7 +4769,7 @@ async function handleHTTPRequest(req) {
       var spkTitle2 = String(pb.title || (meta2 && meta2.title) || '');
       SPK.last = Object.assign(SPK.last || {}, {
         trackId: tid, title: spkTitle2, at: nowStr(), url: link2,
-        cover: (meta2 && (meta2.cover_url || meta2.cover_middle || meta2.cover_small)) || '',
+        cover: httpsUrl(meta2 && (meta2.cover_url || meta2.cover_middle || meta2.cover_small)),
         duration: Number(meta2 && meta2.duration) || 0
       });
       // v0.22.2：播放账本——从 0 开始计时，暂停/继续/停止由 spkPlayCtl 维护
