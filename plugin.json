@@ -1,7 +1,7 @@
 {
   "name": "喜马拉雅",
-  "version": "0.22.5",
-  "description": "喜马拉雅有声书/评书导入 songloft：搜索与收听合并成一个「发现」页——不搜时直接看「继续听」，一搜就换成结果、清空即回；扫码登录读取「我订阅的专辑」、关键词搜专辑或搜单集、专辑详情试听；听书播放器支持断点续播、跨页连播、倍速、睡眠定时、已听标记、只看未听、最近收听聚合；订阅后只增量拉新集，可每天定时同步并推送到小爱音箱；v0.9.0 新增：跨设备收听进度（存 NAS）、每天定时用音箱语音播报新集、单集搜索与收藏、整本下载到本地音乐目录",
+  "version": "0.23.0",
+  "description": "喜马拉雅有声书/评书导入 songloft：搜索与收听合并成一个「发现」页——不搜时直接看「继续听」，一搜就换成结果、清空即回；扫码登录读取「我订阅的专辑」、关键词搜专辑或搜单集、专辑详情试听；听书播放器（纯本机播放，不再依赖音箱插件）支持断点续播、跨页连播、倍速、睡眠定时、已听标记、只看未听、最近收听聚合；订阅后只增量拉新集，可每天定时同步新集；v0.9.0 新增：跨设备收听进度（存 NAS）、单集搜索与收藏、整本下载到本地音乐目录",
   "author": "cai55667788",
   "homepage": "https://github.com/cai55667788/songloft-ximalaya",
   "license": "MIT",
@@ -18,8 +18,8 @@
     "inter-plugin"
   ],
   "icon": "static/icon.svg",
-  "entryHash": "4593c61b17852af8ef327e928aa5b43a2458268bfc7dd4560fbe96931978efa4",
-  "zipHash": "dd4f617ccf535e3cd2657ad6bf75b16c3354e51c868521b34b1fc2a29861bd5d",
+  "entryHash": "f83a40d8283831931df9d6dbdd2f5228ab5b323e8982e405fffbf49ee8bf05a1",
+  "zipHash": "19353bad1419b5c200c201858e25d35d0d3d52db82071d7d3a0dd900db87157d",
   "updateUrl": "https://raw.githubusercontent.com/cai55667788/songloft-ximalaya/main/plugin.json",
-  "download_url": "https://github.com/cai55667788/songloft-ximalaya/releases/download/v0.22.5/ximalaya.jsplugin.zip"
+  "download_url": "https://github.com/cai55667788/songloft-ximalaya/releases/download/v0.23.0/ximalaya.jsplugin.zip"
 }
