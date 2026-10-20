@@ -760,6 +760,14 @@
       border: 1px solid var(--border-soft);
     }
 
+    /* v0.22.2：音箱封面 + 播放进度 */
+    #fullPlayer .spkdisc img { display: none; width: 46%; max-width: 190px; aspect-ratio: 1 / 1; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-soft); background: var(--card); }
+    #fullPlayer.has-cover .spkdisc img { display: block; }
+    #fullPlayer.has-cover .spkdisc span { display: none; }
+    #fullPlayer .fpprog { display: flex; align-items: center; gap: 10px; padding: 4px 22px 0; }
+    #fullPlayer .fpprog input[type=range] { flex: 1; accent-color: var(--accent); }
+    #fullPlayer .fpprog .pnum { min-width: 40px; text-align: center; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
     /* 播放条：只留最常用的几颗，其余进「⋯ 更多」 */
     #player .pbar { justify-content: center; }
     #player .pbar #pProg { flex: 1; min-width: 0; text-align: center; font-variant-numeric: tabular-nums; }
@@ -816,7 +824,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.22.1</span>
+    <span class="ver" id="ver">v0.22.2</span>
   </div>
 
   <div class="tabs">
@@ -1379,9 +1387,14 @@
     <!-- 面板二：音箱 -->
     <div class="fpane" id="paneSpk">
       <div class="fpalbum" id="spkName">音箱</div>
-      <div class="spkdisc"><span id="spkIcon">🔊</span></div>
+      <div class="spkdisc"><img id="spkCover" alt="封面" /><span id="spkIcon">🔊</span></div>
       <div class="fpname" id="spkTrack">—</div>
       <div class="fpmeta" id="spkSub">正在读取音箱状态…</div>
+      <div class="fpprog">
+        <span class="pnum" id="spkPos">0:00</span>
+        <input type="range" id="spkProg" min="0" max="1000" step="1" value="0" title="音箱播放进度（推送到音箱后开始计时）" disabled />
+        <span class="pnum" id="spkDur">0:00</span>
+      </div>
       <div class="fpctrl">
         <button class="small plain" id="spkInterrupt" title="打断当前播放（比如正在说话）">✋</button>
         <button class="fpbig" id="spkToggle" title="暂停 / 继续">⏸</button>
@@ -1415,6 +1428,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.22.1"></script>
+<script src="static/app.js?v=0.22.2"></script>
 </body>
 </html>
