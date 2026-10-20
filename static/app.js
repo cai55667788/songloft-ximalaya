@@ -453,7 +453,7 @@
     return false;
   }
 
-  // v0.21.3：音箱倍速（后端转发 miot /player/speed，0.5–2.0；只在下拉处同步并记住选择）
+  // v0.21.3 起音箱倍速；v0.22.1 改多级调速：滑杆 0.50–2.00（步进 0.05，共 31 级）+ 6 个常用档快捷
   var SPK_SPEED_KEY = 'xm_spk_speed';
   async function spSpeedSet(v) {
     try {
@@ -467,21 +467,33 @@
     } catch (e) { msg('设置失败: ' + e.message, 'err'); }
     return false;
   }
+  // 把倍速值同步到「滑杆 + 数值 + 快捷档高亮」，返回夹紧后的值
   function spSpeedUI(v) {
-    var sv = String(v);
-    ['spkSpeed'].forEach(function (id) {
-      var el = $(id);
-      if (el && el.value !== sv) el.value = sv;
-    });
+    var val = Math.min(2, Math.max(0.5, Math.round((Number(v) || 1) * 100) / 100)) || 1;
+    var sv = String(Math.round(val * 100));
+    var rg = $('spkRate');
+    if (rg && rg.value !== sv) rg.value = sv;
+    var nm = $('spkRateNum');
+    if (nm) nm.textContent = val.toFixed(2) + 'x';
+    var bs = document.querySelectorAll('#paneSpk .spkpre-b');
+    for (var i = 0; i < bs.length; i++) {
+      bs[i].classList.toggle('on', Math.abs(Number(bs[i].dataset.v) - val) < 0.001);
+    }
+    return val;
   }
-  ['spkSpeed'].forEach(function (id) {
-    if ($(id)) $(id).addEventListener('change', function () {
-      var v = Number(this.value) || 1;
-      spSpeedUI(v);
-      spSpeedSet(v);
-    });
-  });
+  if ($('spkRate')) {
+    // 拖动只改界面（音箱侧每档都要发一次 miot，不能拖一路发一路）
+    $('spkRate').addEventListener('input', function () { spSpeedUI(Number(this.value) / 100); });
+    $('spkRate').addEventListener('change', function () { spSpeedSet(spSpeedUI(Number(this.value) / 100)); });
+  }
   (function () {
+    var pre = document.querySelectorAll('#paneSpk .spkpre-b');
+    for (var i = 0; i < pre.length; i++) {
+      pre[i].addEventListener('click', function () {
+        var v = spSpeedUI(Number(this.dataset.v) || 1);
+        spSpeedSet(v);
+      });
+    }
     var sv = Number(sGet(SPK_SPEED_KEY));
     if (sv) spSpeedUI(sv);
   })();
@@ -1156,7 +1168,10 @@
     $('spkSub').textContent = (on ? '🟢 在线' : (d.presence === 'offline' ? '⚫ 离线' : '⚪ 状态未知')) +
       (typeof d.volume === 'number' ? ' · 音量 ' + d.volume : '') +
       (!(d.last && d.last.title) ? ' · 还没播过' : '');
-    if (typeof d.volume === 'number') $('spkVol').value = String(d.volume);
+    if (typeof d.volume === 'number') {
+      $('spkVol').value = String(d.volume);
+      if ($('spkVolNum')) $('spkVolNum').textContent = String(d.volume);
+    }
     $('spkTrack').textContent = (d.last && d.last.title) ? d.last.title : '—';
   }
   async function loadSpkState() {
@@ -1199,9 +1214,12 @@
     if (await spCtl('stop')) $('spkToggle').textContent = '⏵';
   });
   $('spkInterrupt').addEventListener('click', function () { spCtl('interrupt'); });
-  $('spkVol').addEventListener('input', function () { /* 拖动只改 UI，松手才下发 */ });
+  $('spkVol').addEventListener('input', function () {
+    /* 拖动只改 UI，松手才下发 */ if ($('spkVolNum')) $('spkVolNum').textContent = this.value;
+  });
   $('spkVol').addEventListener('change', function () {
     var v = Number(this.value) || 0;
+    if ($('spkVolNum')) $('spkVolNum').textContent = String(v);
     if (spkVolTimer) clearTimeout(spkVolTimer);
     spkVolTimer = setTimeout(async function () {
       spkVolTimer = null;
@@ -2191,6 +2209,33 @@
     fpDragging = false;
     syncFull(true);
   });
+
+  // v0.22.1：全屏页手势——左右滑切集、双击暂停（只在「本机」面板，避开滑杆/按钮/分段）
+  (function () {
+    var fp = $('fullPlayer');
+    if (!fp) return;
+    var g = { x: 0, y: 0, skip: true };
+    function onCtl(t) { return !!(t && t.closest && t.closest('input, select, button, .fpseg')); }
+    fp.addEventListener('touchstart', function (e) {
+      if (fpTarget !== 'local' || onCtl(e.target)) { g = { x: 0, y: 0, skip: true }; return; }
+      var p = (e.touches && e.touches[0]) || {};
+      g = { x: p.clientX || 0, y: p.clientY || 0, skip: false };
+    }, { passive: true });
+    fp.addEventListener('touchend', function (e) {
+      if (g.skip || fpTarget !== 'local') return;
+      var p = (e.changedTouches && e.changedTouches[0]) || {};
+      var dx = (p.clientX || 0) - g.x, dy = (p.clientY || 0) - g.y;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.6) {
+        if (dx < 0) { if (qi + 1 < queue.length) playAt(qi + 1); else msg('已经是队列最后一集'); }
+        else { if (qi > 0) playAt(qi - 1); else msg('已经是队列第 1 集'); }
+      }
+    }, { passive: true });
+    fp.addEventListener('dblclick', function (e) {
+      if (fpTarget !== 'local' || onCtl(e.target)) return;
+      var a = $('audio');
+      if (a.paused) a.play().catch(function () { }); else a.pause();
+    });
+  })();
 
   // 全屏页里打书签：不弹面板，直接记一条带时间点的
   async function addBmNowQuick() {
