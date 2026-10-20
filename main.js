@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.22.3';
+var VERSION = '0.22.4';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -144,13 +144,30 @@ function parseQuery(req) {
   return out;
 }
 
+// v0.22.4：超时要能真正中断请求（原来 Promise.race 只让调用方放弃，底层连接还挂着，
+// 反复超时会堆积连接、拖慢后续请求）。有 AbortController 就 abort，没有就退回竞速。
 function fetchT(url, init, timeoutSec) {
-  return Promise.race([
-    fetch(url, init || {}),
-    new Promise(function (_r, reject) {
-      setTimeout(function () { reject(new Error('timeout')); }, (timeoutSec || 15) * 1000);
-    })
-  ]);
+  var ms = Math.max(1000, (Number(timeoutSec) || 15) * 1000);
+  var ctl = null;
+  try { ctl = new AbortController(); } catch (e0) { ctl = null; }
+  var opt = Object.assign({}, init || {});
+  if (ctl) opt.signal = ctl.signal;
+  return new Promise(function (resolve, reject) {
+    var done = false;
+    var tm = setTimeout(function () {
+      if (done) return;
+      done = true;
+      try { if (ctl) ctl.abort(); } catch (e1) { /* */ }
+      reject(new Error('timeout'));
+    }, ms);
+    fetch(url, opt).then(function (r) {
+      if (done) return;
+      done = true; clearTimeout(tm); resolve(r);
+    }, function (e2) {
+      if (done) return;
+      done = true; clearTimeout(tm); reject(e2);
+    });
+  });
 }
 
 // ---------- 事件日志（环形缓冲，最近 100 条） ----------
@@ -203,32 +220,81 @@ function isRetryableStatus(code) {
   return code === 429 || (code >= 500 && code <= 599);
 }
 
+// v0.22.4：并发闸门——同步/预取一次发几十个请求时，容易被 WAF 拦或把家用宽带的
+// NAT 会话打满。这里全局最多 6 个在途，其余排队。
+var NET_MAX = 6, netActive = 0, netWait = [];
+function netAcquire() {
+  if (netActive < NET_MAX) { netActive++; return Promise.resolve(); }
+  return new Promise(function (res) { netWait.push(res); });
+}
+function netRelease() {
+  netActive = Math.max(0, netActive - 1);
+  if (netWait.length) { netActive++; var nxt = netWait.shift(); nxt(); }
+}
+
+// v0.22.4：熔断——同一主机连续失败 5 次就快速失败 20 秒。
+// 以前断网时每个操作都要干等 2×15s，界面像卡死；现在 20 秒内直接报「网络暂时不可用」。
+var netBreaker = {};
+function netHost(url) {
+  var m = String(url || '').match(/^https?:\/\/([^\/?#]+)/i);
+  return m ? m[1].toLowerCase() : 'unknown';
+}
+function netBreakerCheck(host) {
+  var b = netBreaker[host];
+  if (b && b.until > Date.now()) {
+    throw new Error('网络暂时不可用，' + Math.ceil((b.until - Date.now()) / 1000) + ' 秒后自动重试');
+  }
+}
+function netBreakerFail(host) {
+  var b = netBreaker[host] || (netBreaker[host] = { fail: 0, until: 0 });
+  if (b.until > Date.now()) return;
+  b.fail++;
+  if (b.fail >= 5) {
+    b.fail = 0;
+    b.until = Date.now() + 20000;
+    logWarn('net', host + ' 连续失败 5 次，暂停请求 20 秒');
+  }
+}
+function netBreakerOk(host) {
+  var b = netBreaker[host];
+  if (b && (b.fail || b.until)) { b.fail = 0; b.until = 0; }
+}
+
 async function fetchRetry(url, init, opts) {
   var o = opts || {};
   var tries = Math.max(1, Math.min(Number(o.retries) === undefined ? 3 : Number(o.retries), 4));
   var timeoutSec = Number(o.timeout) || 15;
   var base = Number(o.backoff) || 600;
+  var host = netHost(url);
   var lastErr = null;
-  for (var i = 0; i < tries; i++) {
-    try {
-      var resp = await fetchT(url, init, timeoutSec);
-      if (resp && resp.ok) return resp;
-      if (resp && isRetryableStatus(resp.status) && i < tries - 1) {
-        lastErr = new Error('HTTP ' + resp.status);
-        logWarn('net', 'HTTP ' + resp.status + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
-      } else {
-        return resp;
+  if (!o.noGate) await netAcquire();   // 本地 miot 调用不排外网队列，避免音箱指令被大批同步挤住
+  try {
+    for (var i = 0; i < tries; i++) {
+      netBreakerCheck(host);
+      try {
+        var resp = await fetchT(url, init, timeoutSec);
+        if (resp && resp.ok) { netBreakerOk(host); return resp; }
+        if (resp && isRetryableStatus(resp.status) && i < tries - 1) {
+          lastErr = new Error('HTTP ' + resp.status);
+          logWarn('net', 'HTTP ' + resp.status + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
+        } else {
+          netBreakerOk(host);   // 4xx 是接口层面的问题，不算网络故障
+          return resp;
+        }
+      } catch (e) {
+        lastErr = e;
+        var m = String(e && e.message || e);
+        if (m.indexOf('网络暂时不可用') >= 0) throw e;
+        if (i < tries - 1) logWarn('net', m + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
+        else { netBreakerFail(host); break; }
       }
-    } catch (e) {
-      lastErr = e;
-      var m = String(e && e.message || e);
-      // timeout 与网络层错误可重试
-      if (i < tries - 1) logWarn('net', m + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
-      else break;
+      // 退避带抖动：多个请求同时重试时错开，避免又撞在一起
+      await sleepMs(Math.round(base * Math.pow(2, i) * (0.7 + Math.random() * 0.6)));
     }
-    await sleepMs(base * Math.pow(2, i));
+    throw lastErr || new Error('请求失败');
+  } finally {
+    if (!o.noGate) netRelease();
   }
-  throw lastErr || new Error('请求失败');
 }
 
 function shortUrl(u) {
@@ -241,10 +307,42 @@ function sleepMs(ms) {
   return new Promise(function (r) { setTimeout(r, Math.max(0, Number(ms) || 0)); });
 }
 
-async function getJSON(url, headers) {
-  var resp = await fetchRetry(url, { method: 'GET', headers: headers || {} }, { retries: 2, timeout: 15 });
+// v0.22.4：GET 结果短缓存（15 秒）。翻回上一页、重复点同一集、同一页面被轮询时
+// 不再重复打网络 —— 既快也更抗抖动。
+var NET_CACHE = {}, NET_CACHE_TTL = 15000, NET_CACHE_MAX = 80, netCacheN = 0;
+function netCacheKey(url, headers) {
+  return String(url) + '|' + ((headers && headers.Cookie) ? 'L' : 'A');
+}
+function netCacheGet(k) {
+  var c = NET_CACHE[k];
+  if (!c) return null;
+  if (Date.now() - c.at > NET_CACHE_TTL) { delete NET_CACHE[k]; netCacheN = Math.max(0, netCacheN - 1); return null; }
+  return c.data;
+}
+function netCachePut(k, data) {
+  if (!NET_CACHE[k]) netCacheN++;
+  NET_CACHE[k] = { at: Date.now(), data: data };
+  if (netCacheN > NET_CACHE_MAX) {
+    var keys = Object.keys(NET_CACHE);
+    for (var i = 0; i < keys.length && netCacheN > NET_CACHE_MAX; i++) {
+      if (Date.now() - NET_CACHE[keys[i]].at > 3000) { delete NET_CACHE[keys[i]]; netCacheN--; }
+    }
+  }
+}
+
+async function getJSON(url, headers, opts) {
+  var o = opts || {};
+  var key = netCacheKey(url, headers);
+  if (!o.noCache) {
+    var hit = netCacheGet(key);
+    if (hit) return hit;
+  }
+  var resp = await fetchRetry(url, { method: 'GET', headers: headers || {} },
+    { retries: o.retries === undefined ? 2 : o.retries, timeout: o.timeout || 15 });
   if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : '??') + ' ' + shortUrl(url));
-  return resp.json();
+  var data = await resp.json();
+  if (!o.noCache) netCachePut(key, data);
+  return data;
 }
 
 function stripTags(s) {
@@ -1347,8 +1445,8 @@ function upsertSub(patch) {
 async function miotGet(path) {
   var host = (await songloft.plugin.getHostUrl() || '').replace(/\/+$/, '');
   var token = await songloft.plugin.getToken();
-  var resp = await fetchT(host + '/api/v1/jsplugin/' + MIOT_ENTRY + path,
-    { method: 'GET', headers: { 'Authorization': 'Bearer ' + token } }, 15);
+  var resp = await fetchRetry(host + '/api/v1/jsplugin/' + MIOT_ENTRY + path,
+    { method: 'GET', headers: { 'Authorization': 'Bearer ' + token } }, { retries: 2, timeout: 8, noGate: true });
   var text = await resp.text();
   try { return { ok: resp.ok, data: JSON.parse(text) }; } catch (e) { return { ok: resp.ok, data: null }; }
 }
@@ -1360,7 +1458,7 @@ async function miotPost(path, payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
     body: JSON.stringify(payload || {})
-  }, 15);
+  }, 10);   // 不重试：指令类请求重复执行比失败更糟
   var text = await resp.text();
   try { return { ok: resp.ok, data: JSON.parse(text) }; } catch (e) { return { ok: resp.ok, data: null }; }
 }
@@ -4608,6 +4706,40 @@ async function handleHTTPRequest(req) {
   // ---------- 音箱播放控制（v0.18.8） ----------
   // 实测可用：/mina/volume、/mina/pause、/mina/resume、/mina/stop、/mina/play-url
   //（/mina/status 在新版 miot 上 POST 不通，不要拿来判状态）
+  // v0.22.4：网络诊断——设置页一键测「主站 / 取流接口 / 图片 CDN / 小米云」的连通性与延迟
+  if (path === '/net/health' && method === 'GET') {
+    var hxh = { 'User-Agent': UA_PC, 'Referer': 'https://www.ximalaya.com/' };
+    var probes = [
+      { name: '喜马拉雅主站', url: 'https://www.ximalaya.com/revision/time', headers: hxh },
+      { name: '单集接口（取流）', url: 'https://m.ximalaya.com/tracks/1022547850.json', headers: { 'User-Agent': UA_M, 'Referer': 'https://m.ximalaya.com/' } },
+      { name: '图片 CDN', url: 'https://imagev2.xmcdn.com/', headers: hxh }
+    ];
+    var hitems = [];
+    for (var hi = 0; hi < probes.length; hi++) {
+      var prb = probes[hi], t0 = Date.now();
+      try {
+        var hresp = await fetchT(prb.url, { method: 'GET', headers: prb.headers }, 8);
+        hitems.push({ name: prb.name, ok: hresp.status < 500, status: hresp.status, ms: Date.now() - t0 });
+      } catch (eH) {
+        hitems.push({ name: prb.name, ok: false, ms: Date.now() - t0, error: String(eH && eH.message || eH) });
+      }
+    }
+    var hdev = speakerDevice();
+    if (hdev.account_id && hdev.device_id) {
+      var t1 = Date.now();
+      try {
+        var hd = await miotGet('/mina/devices');
+        hitems.push({ name: '小米云 · 音箱列表', ok: !!(hd && hd.ok), ms: Date.now() - t1 });
+      } catch (eH2) {
+        hitems.push({ name: '小米云 · 音箱列表', ok: false, ms: Date.now() - t1, error: String(eH2 && eH2.message || eH2) });
+      }
+    }
+    return jsonResp({
+      success: true,
+      data: { at: Date.now(), items: hitems, active: netActive, queued: netWait.length, cache: netCacheN }
+    });
+  }
+
   if (path === '/speaker/state' && method === 'GET') {
     var spDev = speakerDevice(q.device_id);
     if (!spDev.account_id || !spDev.device_id) {
