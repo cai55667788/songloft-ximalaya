@@ -752,6 +752,33 @@
     #player .pbar button:hover { border-color: var(--accent); color: var(--accent); }
     #player .pbar select { min-height: 28px; border-radius: 10px; }
     #player .pbar .muted { font-size: 11px; }
+
+    /* ========== v0.21.9 层级精简：全局只保留「背景 / 内容面 / 浮层」三层 ========== */
+    /* 1) 内容面一律细边、不投影（投影只属于浮层：播放条、进度条、两个播放页） */
+    .card, .lsnBar, .dash, .stat, #fullPlayer .fpbar, #spkPlayer .fpbar { box-shadow: none; }
+    .card { border-radius: 14px; padding: 14px; }
+    .card h2 { margin: 0 0 10px; font-size: 15px; }
+    /* 卡片内的次级块：淡色底 + 无边框，不再套一层「框」 */
+    .dash, .stat { border-color: transparent; background: color-mix(in srgb, var(--accent) 6%, var(--bg)); border-radius: 12px; }
+    .lsnBar { border-color: transparent; background: var(--bg); border-radius: 999px; }
+    /* 2) 播放页工具行：同一底色微区分，不再浮起 */
+    #fullPlayer .fpbar, #spkPlayer .fpbar {
+      background: color-mix(in srgb, var(--card) 55%, var(--bg));
+      border-color: transparent; border-radius: 12px; box-shadow: none;
+    }
+    /* 3) 图片不带投影（只有两个播放页的主封面保留一层，作为唯一焦点） */
+    .dhead img, .res-item img, .chantrack img { box-shadow: none; }
+    /* 4) 控件圆角统一：输入/下拉/按钮 10px，胶囊 999px */
+    input[type=text], input[type=number], input[type=time], textarea, select { border-radius: 10px; }
+    .tabs .tab, .chip, .lsnSeg, #dSpeaker, .spkvol button { border-radius: 999px; }
+    /* 5) 主按钮只留一层柔和投影 */
+    button:not(.plain):not(.ghost):not(.tab) { box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 26%, transparent); }
+    /* 6) 音箱播放界面工具行收紧：三项排一行 */
+    #spkPlayer .fpbar { gap: 8px; padding: 8px 10px; }
+    #spkPlayer .fpbar button, #spkPlayer .fpbar select { min-height: 30px; }
+    @media (max-width: 560px) {
+      .card { padding: 12px; border-radius: 12px; }
+    }
 </style>
 </head>
 <body>
@@ -759,7 +786,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.21.8</span>
+    <span class="ver" id="ver">v0.21.9</span>
   </div>
 
   <div class="tabs">
@@ -1074,45 +1101,15 @@
       <div class="muted small-txt" style="margin-top:6px;">来自「智能音箱（miot）」插件的设备列表。</div>
     </div>
 
-    <!-- v0.18.8：音箱遥控面板 -->
+    <!-- v0.21.9：音箱遥控卡瘦身——控制全部收进「音箱播放界面」，这里只留状态与入口 -->
     <div class="card">
-      <h2>🎛 音箱遥控</h2>
+      <h2>🎛 音箱</h2>
       <div class="muted small-txt" id="spState">正在读取设备…</div>
-      <div class="spctl">
-        <button class="small plain" id="spStop" title="停止播放">■ 停止</button>
-        <button class="small plain" id="spPause" title="暂停">⏸ 暂停</button>
-        <button class="small plain" id="spResume" title="继续播放">▶ 继续</button>
-        <button class="small plain" id="spInterrupt" title="打断当前播放（比如正在说话）">✋ 打断</button>
-      </div>
-      <div class="spvol">
-        <button class="small plain" id="spVolDown" title="音量 -10">−</button>
-        <input type="range" id="spVol" min="0" max="100" step="1" value="40" />
-        <span class="spvnum" id="spVolNum">40</span>
-        <button class="small plain" id="spVolUp" title="音量 +10">＋</button>
-      </div>
-      <div class="spvol" style="margin-top:8px;">
-        <span class="muted small-txt" style="flex:none;">倍速</span>
-        <select id="spSpeed" title="音箱倍速（0.5–2.0，对走 miot 播放的队列实时生效）">
-          <option value="0.75">0.75x</option>
-          <option value="1" selected>1.0x</option>
-          <option value="1.25">1.25x</option>
-          <option value="1.5">1.5x</option>
-          <option value="1.75">1.75x</option>
-          <option value="2">2.0x</option>
-        </select>
-      </div>
-      <div class="btns" style="margin-top:8px;">
-        <button class="small plain" id="spMute">静音</button>
-        <button class="small plain" id="spVol40">音量 40</button>
-        <button class="small plain" id="spReplay">🔁 重播上次</button>
-      </div>
-      <div class="btns">
+      <div class="btns" style="margin-top:10px;">
+        <button class="small" id="spkFull" title="打开全屏音箱播放界面（暂停/音量/倍速/推当前集）">⛶ 打开音箱播放界面</button>
         <button class="small plain" id="spPlayPl">▶ 在音箱播「本次导入的歌单」</button>
-        <button class="small plain" id="spkFull" title="打开全屏音箱播放界面">⛶ 全屏遥控</button>
       </div>
-      <div class="muted small-txt" style="margin-top:6px;">
-        音量条拖动后松手才下发，避免一路拖一路发把音箱刷爆。重播上次=把最近一次在音箱放的这集再放一遍。
-      </div>
+      <div class="muted small-txt" style="margin-top:8px;">暂停、继续、停止、音量、倍速、重播都在「音箱播放界面」里，和手机播放页同一套操作。</div>
     </div>
 
     <div class="card">
@@ -1353,7 +1350,7 @@
       <button class="small plain" id="spkVolUp" title="音量 ＋10">🔊＋</button>
     </div>
     <div class="fpbar">
-      <button class="small plain" id="spkReplay" title="把最近一次在音箱放的这集再放一遍">🔁 重播上次</button>
+      <button class="small plain" id="spkReplay" title="把最近一次在音箱放的这集再放一遍">🔁 重播</button>
       <select id="spkSpeed" title="音箱倍速（0.5–2.0，对走 miot 播放的队列实时生效）">
         <option value="0.75">0.75x</option>
         <option value="1" selected>1.0x</option>
@@ -1362,11 +1359,11 @@
         <option value="1.75">1.75x</option>
         <option value="2">2.0x</option>
       </select>
-      <button class="small plain" id="spkPush" title="把当前正在听的这集推到音箱">▶ 推当前集</button>
+      <button class="small plain" id="spkPush" title="把当前正在听的这集推到音箱">▶ 推送</button>
     </div>
   </div>
 </div>
 
-<script src="static/app.js?v=0.21.8"></script>
+<script src="static/app.js?v=0.21.9"></script>
 </body>
 </html>
