@@ -217,7 +217,7 @@
       }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { poll(); }
-      if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); loadSpState(); }
+      if (btn.dataset.tab === 'set') { loadLogs(); runSelfCheck(false); loadCookieHealth(); }
     });
   });
 
@@ -392,188 +392,6 @@
 
   $('btnQr').addEventListener('click', qrStart);
   $('btnQrRefresh').addEventListener('click', qrStart);
-
-  // ---------- 设备 ----------
-  var deviceSaved = '';
-  var ttsDeviceSaved = '';
-  async function loadDevices() {
-    try {
-      var c = await api('GET', '/config');
-      var dv = (c && c.data && c.data.device) || {};
-      deviceSaved = dv.account_id && dv.device_id ? (dv.account_id + '|' + dv.device_id + '|' + (dv.device_name || '')) : '';
-      var tc = (c && c.data && c.data.tts) || {};
-      ttsDeviceSaved = tc.account_id && tc.device_id ? (tc.account_id + '|' + tc.device_id + '|' + (tc.device_name || '')) : '';
-    } catch (e) { /* */ }
-    try {
-      var d = await api('GET', '/devices');
-      var sel = $('device');
-      var tsel = $('ttsDevice');
-      var dsel = $('dSpeaker');   // v0.20.4：详情页「音箱播放」这次用哪台音箱
-      sel.innerHTML = '<option value="">（请选择音箱）</option>';
-      if (tsel) tsel.innerHTML = '<option value="">跟随设置里的设备</option>';
-      if (dsel) dsel.innerHTML = '<option value="">跟随设置里的音箱</option>';
-      var accounts = (d && d.data && d.data.data) || (d && d.data) || [];
-      if (Array.isArray(accounts)) {
-        accounts.forEach(function (acc) {
-          (acc.devices || []).forEach(function (dev) {
-            var name = dev.device_name || dev.name || dev.alias || dev.deviceID || '音箱';
-            var did = dev.deviceID || dev.device_id || dev.id || '';
-            var opt = document.createElement('option');
-            opt.value = acc.account_id + '|' + did + '|' + name;
-            opt.textContent = name + '（' + (acc.account_name || acc.account_id) + '）';
-            if (opt.value === deviceSaved) opt.selected = true;
-            sel.appendChild(opt);
-            if (tsel) {
-              var o2 = opt.cloneNode(true);
-              if (o2.value === ttsDeviceSaved) o2.selected = true;
-              tsel.appendChild(o2);
-            }
-            if (dsel) dsel.appendChild(opt.cloneNode(true));
-          });
-        });
-      }
-      if (dsel) {
-        // 上次在详情页挑的音箱记在浏览器里，刷新后仍然生效；选「跟随设置」就清掉
-        var pickSaved = '';
-        try { pickSaved = localStorage.getItem('xm_spk_pick') || ''; } catch (e) { /* */ }
-        if (pickSaved) dsel.value = pickSaved;
-      }
-    } catch (e) { /* */ }
-  }
-  if ($('dSpeaker')) {
-    $('dSpeaker').addEventListener('change', function () {
-      try {
-        if (this.value) localStorage.setItem('xm_spk_pick', this.value);
-        else localStorage.removeItem('xm_spk_pick');
-      } catch (e) { /* */ }
-      var p = this.value.split('|');
-      msg(this.value ? ('音箱播放将使用「' + (p[2] || '所选音箱') + '」') : '音箱播放恢复跟随设置', 'ok');
-    });
-  }
-  $('device').addEventListener('change', async function () {
-    var v = $('device').value;
-    if (!v) return;
-    var p = v.split('|');
-    deviceSaved = v;
-    try { await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } }); } catch (e) { /* */ }
-    loadSpState();
-  });
-
-  // ---------- 音箱（v0.21.9：控制全部收进「音箱播放界面」，这里只保留状态与通用 ctl） ----------
-  async function loadSpState() {
-    var el = $('spState');
-    if (!el) return;
-    try {
-      var r = await api('GET', '/speaker/state');
-      if (!r || r.success === false) {
-        el.textContent = '⚠️ ' + ((r && r.error) || '读取设备失败');
-        el.className = 'muted small-txt err';
-        return;
-      }
-      var d = r.data || {};
-      var on = d.presence === 'online';
-      el.className = 'muted small-txt' + (on ? '' : ' err');
-      el.textContent = (on ? '🟢 ' : (d.presence === 'offline' ? '⚫ ' : '⚪ ')) +
-        (d.device_name || '音箱') + (on ? ' 在线' : d.presence === 'offline' ? ' 离线' : ' 状态未知') +
-        (typeof d.volume === 'number' ? ' · 音量 ' + d.volume : '') +
-        (d.last && d.last.title ? ' · 上次播：' + d.last.title : '');
-    } catch (e) {
-      el.textContent = '⚠️ ' + e.message;
-      el.className = 'muted small-txt err';
-    }
-  }
-
-  async function spCtl(action, extra) {
-    var body = Object.assign({ action: action }, extra || {});
-    try {
-      var r = await api('POST', '/speaker/ctl', body);
-      if (r && r.success !== false) {
-        msg((r.data && r.data.message) || '已发送', 'ok');
-        return true;
-      }
-      msg('❌ ' + ((r && r.error) || '操作失败'), 'err');
-    } catch (e) { msg('操作失败: ' + e.message, 'err'); }
-    return false;
-  }
-
-  // v0.21.3 起音箱倍速；v0.22.1 改多级调速：滑杆 0.50–2.00（步进 0.05，共 31 级）+ 6 个常用档快捷
-  var SPK_SPEED_KEY = 'xm_spk_speed';
-  async function spSpeedSet(v) {
-    try {
-      var r = await api('POST', '/speaker/speed', { speed: v });
-      if (r && r.success !== false) {
-        try { sSet(SPK_SPEED_KEY, String(v)); } catch (e) { /* */ }
-        msg((r.data && r.data.message) || ('音箱倍速 ' + Number(v).toFixed(2) + 'x'), 'ok');
-        return true;
-      }
-      msg('❌ ' + ((r && r.error) || '设置失败'), 'err');
-    } catch (e) { msg('设置失败: ' + e.message, 'err'); }
-    return false;
-  }
-  // 把倍速值同步到「滑杆 + 数值 + 快捷档高亮」，返回夹紧后的值
-  function spSpeedUI(v) {
-    var val = Math.min(2, Math.max(0.5, Math.round((Number(v) || 1) * 100) / 100)) || 1;
-    var sv = String(Math.round(val * 100));
-    var rg = $('spkRate');
-    if (rg && rg.value !== sv) rg.value = sv;
-    var nm = $('spkRateNum');
-    if (nm) nm.textContent = val.toFixed(2) + 'x';
-    var bs = document.querySelectorAll('#paneSpk .spkpre-b');
-    for (var i = 0; i < bs.length; i++) {
-      bs[i].classList.toggle('on', Math.abs(Number(bs[i].dataset.v) - val) < 0.001);
-    }
-    return val;
-  }
-  if ($('spkRate')) {
-    // 拖动只改界面（音箱侧每档都要发一次 miot，不能拖一路发一路）
-    $('spkRate').addEventListener('input', function () { spSpeedUI(Number(this.value) / 100); });
-    $('spkRate').addEventListener('change', function () { spSpeedSet(spSpeedUI(Number(this.value) / 100)); });
-  }
-  (function () {
-    var pre = document.querySelectorAll('#paneSpk .spkpre-b');
-    for (var i = 0; i < pre.length; i++) {
-      pre[i].addEventListener('click', function () {
-        var v = spSpeedUI(Number(this.dataset.v) || 1);
-        spSpeedSet(v);
-      });
-    }
-    var sv = Number(sGet(SPK_SPEED_KEY));
-    if (sv) spSpeedUI(sv);
-  })();
-
-  // v0.21.9：重播入口只在「音箱播放界面」里（spkReplay），设置页不再重复
-
-  $('spPlayPl').addEventListener('click', async function () {
-    var plId = 0, plName = '';
-    try {
-      var r = await api('GET', '/imported');
-      var list = (r && r.data && r.data.imported) || [];
-      if (!list.length) { msg('还没有导入过歌单', 'err'); return; }
-      plId = list[0].playlistId; plName = list[0].name;
-    } catch (e) { msg('读取歌单失败: ' + e.message, 'err'); return; }
-    try {
-      var rr = await api('POST', '/speaker/play-playlist', { playlist_id: plId, mode: $('mode').value });
-      msg(rr.success !== false ? ('▶ 已在音箱播放《' + plName + '》') : ('❌ ' + rr.error), rr.success !== false ? 'ok' : 'err');
-    } catch (e) { msg('播放失败: ' + e.message, 'err'); }
-  });
-
-  async function playPlaylist(playlistId, name) {
-    // v0.20.4：详情页选了音箱就按选的播（不动设置里的默认设备）；没选则沿用原逻辑
-    var pick = ($('dSpeaker') && $('dSpeaker').value) || '';
-    var dv = pick || $('device').value || deviceSaved;
-    if (!dv) { msg('请先在「设置」里选择音箱', 'err'); return; }
-    var p = dv.split('|');
-    try {
-      if (!pick) {
-        $('device').value = dv;
-        await api('POST', '/config', { device: { account_id: p[0], device_id: p[1], device_name: p[2] } });
-      }
-      var r = await api('POST', '/play', {
-        account_id: p[0], device_id: p[1], playlist_id: playlistId, mode: $('mode').value
-      });
-      msg(r.success ? ('▶ 已在' + (pick ? '「' + (p[2] || '所选音箱') + '」' : '音箱') + '播放《' + name + '》') : '❌ ' + r.error, r.success ? 'ok' : 'err');
-    } catch (e) { msg('播放失败: ' + e.message, 'err'); }
-  }
 
   // ---------- 播放器（续播 / 连播 / 倍速 / 睡眠定时） ----------
   var queue = [];        // [{trackId, index, title, albumId, albumName}]
@@ -1268,140 +1086,6 @@
   }
 
   if ($('pDrive')) $('pDrive').addEventListener('click', function () { driveShow(true); });
-
-  // v0.22.0：音箱控制并入全屏播放页（#fullPlayer 内「本机 / 音箱」切换），不再单独一套浮层
-  var spkVolTimer = null;
-  var fpTarget = 'local';
-  var spkMedia = null;        // v0.22.2：最近一次音箱播放状态（标题/封面/进度）
-  var spkPollTimer = null;    // 面板打开期间每 5s 轮询一次进度
-  var spkCoverFail = {};      // v0.22.3：加载失败过的封面 URL，不再重试（避免每 5s 闪一次坏图）
-  if ($('spkCover')) $('spkCover').onerror = function () {
-    spkCoverFail[this.getAttribute('src') || ''] = 1;
-    this.removeAttribute('src');
-    var fp = $('fullPlayer');
-    if (fp) fp.classList.remove('has-cover');
-  };
-  function spkPollSet(on) {
-    if (spkPollTimer) { clearInterval(spkPollTimer); spkPollTimer = null; }
-    if (on) spkPollTimer = setInterval(function () {
-      if (fpOpen && fpTarget === 'spk') loadSpkState();
-      else spkPollSet(false);
-    }, 5000);
-  }
-  function spkSetUI(d) {
-    var on = d.presence === 'online';
-    $('spkName').textContent = d.device_name || '音箱';
-    $('spkSub').textContent = (on ? '🟢 在线' : (d.presence === 'offline' ? '⚫ 离线' : '⚪ 状态未知')) +
-      (typeof d.volume === 'number' ? ' · 音量 ' + d.volume : '') +
-      (!(d.media) && !(d.last && d.last.title) ? ' · 还没播过' : '');
-    if (typeof d.volume === 'number') {
-      $('spkVol').value = String(d.volume);
-      if ($('spkVolNum')) $('spkVolNum').textContent = String(d.volume);
-    }
-    // v0.22.2：封面 + 进度（推送到音箱后由后端本地账本计时）
-    var m = d.media || null;
-    spkMedia = m;
-    var fp = $('fullPlayer');
-    var cov = (m && m.cover && !spkCoverFail[m.cover]) ? m.cover : '';
-    if ($('spkCover') && fp) {
-      if (cov) {
-        if ($('spkCover').getAttribute('src') !== cov) $('spkCover').setAttribute('src', cov);
-        fp.classList.add('has-cover');
-      } else {
-        $('spkCover').removeAttribute('src');
-        fp.classList.remove('has-cover');
-      }
-    }
-    $('spkTrack').textContent = (m && m.title) || (d.last && d.last.title) || '—';
-    var prog = $('spkProg');
-    if (prog) {
-      if (m && m.duration > 0) {
-        prog.disabled = false;
-        prog.value = String(Math.round(1000 * Math.min(1, (m.position || 0) / m.duration)));
-        $('spkPos').textContent = fmtTime(m.position || 0);
-        $('spkDur').textContent = fmtTime(m.duration);
-      } else {
-        prog.disabled = true;
-        prog.value = '0';
-        $('spkPos').textContent = '0:00';
-        $('spkDur').textContent = '--:--';
-      }
-    }
-    // 大按钮按真实状态翻面（/mina/status 可查 playing/paused）
-    if (m && typeof m.playing === 'boolean') $('spkToggle').textContent = m.playing ? '⏸' : '⏵';
-  }
-  async function loadSpkState() {
-    try {
-      var r = await api('GET', '/speaker/state');
-      if (!r || r.success === false) {
-        $('spkSub').textContent = '⚠️ ' + ((r && r.error) || '读取设备失败');
-        return;
-      }
-      spkSetUI(r.data || {});
-    } catch (e) { $('spkSub').textContent = '⚠️ ' + e.message; }
-  }
-  // 本机 / 音箱：同一套控件，靠 #fullPlayer.spk 切换显示哪一面板
-  function fpSetTarget(t) {
-    fpTarget = t === 'spk' ? 'spk' : 'local';
-    var fp = $('fullPlayer');
-    if (!fp) return;
-    fp.classList.toggle('spk', fpTarget === 'spk');
-    var seg = $('fpSeg');
-    if (seg) {
-      var bs = seg.querySelectorAll('button');
-      for (var i = 0; i < bs.length; i++) bs[i].classList.toggle('on', bs[i].dataset.t === fpTarget);
-    }
-    if (fpTarget === 'spk') { loadSpkState(); spkPollSet(true); }
-    else spkPollSet(false);
-  }
-  function openSpk() { openFull(true, 'spk'); }
-  $('pSpk').addEventListener('click', openSpk);
-  if ($('spkFull')) $('spkFull').addEventListener('click', openSpk);
-  if ($('fpSeg')) $('fpSeg').addEventListener('click', function (e) {
-    var b = e.target && e.target.closest ? e.target.closest('button') : null;
-    if (b && b.dataset && b.dataset.t) fpSetTarget(b.dataset.t);
-  });
-  $('spkRefresh').addEventListener('click', loadSpkState);
-  // 大按钮：暂停/继续切换（音箱侧没有可靠的「正在播」回执，按下后按结果翻面）
-  $('spkToggle').addEventListener('click', async function () {
-    var resume = this.textContent === '⏵';
-    if (await spCtl(resume ? 'resume' : 'pause')) this.textContent = resume ? '⏸' : '⏵';
-  });
-  $('spkStop').addEventListener('click', async function () {
-    if (await spCtl('stop')) $('spkToggle').textContent = '⏵';
-  });
-  $('spkInterrupt').addEventListener('click', function () { spCtl('interrupt'); });
-  $('spkVol').addEventListener('input', function () {
-    /* 拖动只改 UI，松手才下发 */ if ($('spkVolNum')) $('spkVolNum').textContent = this.value;
-  });
-  $('spkVol').addEventListener('change', function () {
-    var v = Number(this.value) || 0;
-    if ($('spkVolNum')) $('spkVolNum').textContent = String(v);
-    if (spkVolTimer) clearTimeout(spkVolTimer);
-    spkVolTimer = setTimeout(async function () {
-      spkVolTimer = null;
-      if (await spCtl('volume', { volume: v })) loadSpkState();
-    }, 260);
-  });
-  $('spkReplay').addEventListener('click', async function () {
-    try {
-      var st = await api('GET', '/speaker/state');
-      var last = (st && st.data && st.data.last) || null;
-      if (!last || !last.trackId) { msg('还没有在音箱放过东西，先从歌单点「播到音箱」试试', 'err'); return; }
-      var r = await api('POST', '/speaker/play-track', { track_id: last.trackId, title: last.title, url: last.url });
-      if (r && r.success !== false) $('spkTrack').textContent = last.title;
-      msg(r && r.success !== false ? ('🔁 ' + ((r.data && r.data.message) || '已重播')) : ('❌ ' + r.error), r && r.success !== false ? 'ok' : 'err');
-    } catch (e) { msg('重播失败: ' + e.message, 'err'); }
-  });
-  $('spkPush').addEventListener('click', async function () {
-    var t = queue[qi];
-    if (!t) { msg('当前没有在播的集', 'err'); return; }
-    try {
-      var r = await api('POST', '/speaker/play-track', { track_id: t.trackId, title: t.title });
-      if (r && r.success !== false) $('spkTrack').textContent = t.title;
-      msg(r && r.success !== false ? '🔊 已推到音箱：《' + t.title + '》' : '❌ ' + (r && r.error || '推送失败'), r && r.success !== false ? 'ok' : 'err');
-    } catch (e) { msg('推送失败: ' + e.message, 'err'); }
-  });
 
   if ($('driveExit')) $('driveExit').addEventListener('click', function () { driveShow(false); });
   if ($('drivePlay')) $('drivePlay').addEventListener('click', function () {
@@ -2278,19 +1962,17 @@
   var fpOpen = false;
   var fpDragging = false;
 
-  function openFull(skipCheck, target) {
+  function openFull(skipCheck) {
     if (!skipCheck && !curTrack()) { msg('先播一集', 'err'); return; }
     fpOpen = true;
     $('fullPlayer').classList.add('show');
     if (document.body) document.body.style.overflow = 'hidden';
     pMoreShow(false);
-    fpSetTarget(target || 'local');
     syncFull(true);
   }
   function closeFull() {
     fpOpen = false;
     $('fullPlayer').classList.remove('show');
-    spkPollSet(false);
     if (document.body) document.body.style.overflow = '';
   }
 
@@ -2319,7 +2001,7 @@
     if ($('fpQueue')) $('fpQueue').textContent = queue.length > 1 ? '☰ ' + (qi + 1) + '/' + queue.length : '☰';
   }
 
-  $('pFull').addEventListener('click', function () { openFull(false, 'local'); });
+  $('pFull').addEventListener('click', function () { openFull(false); });
 
   // v0.22.0：播放条「⋯ 更多」抽屉（次要功能全收在这里，播放条只留最常用的几颗）
   function pMoreOpen() { var p = $('pMorePanel'); return !!p && !p.classList.contains('hide'); }
@@ -2375,12 +2057,12 @@
     var g = { x: 0, y: 0, skip: true };
     function onCtl(t) { return !!(t && t.closest && t.closest('input, select, button, .fpseg')); }
     fp.addEventListener('touchstart', function (e) {
-      if (fpTarget !== 'local' || onCtl(e.target)) { g = { x: 0, y: 0, skip: true }; return; }
+      if (onCtl(e.target)) { g = { x: 0, y: 0, skip: true }; return; }
       var p = (e.touches && e.touches[0]) || {};
       g = { x: p.clientX || 0, y: p.clientY || 0, skip: false };
     }, { passive: true });
     fp.addEventListener('touchend', function (e) {
-      if (g.skip || fpTarget !== 'local') return;
+      if (g.skip) return;
       var p = (e.changedTouches && e.changedTouches[0]) || {};
       var dx = (p.clientX || 0) - g.x, dy = (p.clientY || 0) - g.y;
       if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.6) {
@@ -2389,7 +2071,7 @@
       }
     }, { passive: true });
     fp.addEventListener('dblclick', function (e) {
-      if (fpTarget !== 'local' || onCtl(e.target)) return;
+      if (onCtl(e.target)) return;
       var a = $('audio');
       if (a.paused) a.play().catch(function () { }); else a.pause();
     });
@@ -3301,29 +2983,10 @@
       var du = document.createElement('span');
       du.className = 'du';
       du.style.display = 'none';   // 时长已并入元信息行，占位保留以免样式回退
-      // v0.18.8：一集直接推到音箱播（不打断本地播放）
-      var spb = document.createElement('button');
-      spb.className = 'small plain';
-      spb.textContent = '🔊';
-      spb.title = '在音箱播放这一集';
-      spb.style.flex = 'none';
-      spb.addEventListener('click', async function (ev) {
-        ev.stopPropagation();
-        spb.disabled = true;
-        var old = spb.textContent;
-        spb.textContent = '…';
-        try {
-          var rr = await api('POST', '/speaker/play-track', { track_id: t.trackId, title: t.title });
-          msg(rr.success !== false ? ('🔊 已在音箱播放：' + t.title) : ('❌ ' + rr.error), rr.success !== false ? 'ok' : 'err');
-        } catch (e) { msg('推送到音箱失败: ' + e.message, 'err'); }
-        spb.textContent = old;
-        spb.disabled = false;
-      });
       var pl = document.createElement('button');
       pl.className = 'small plain';
       pl.textContent = '▶';
       d.appendChild(du);
-      d.appendChild(spb);
       d.appendChild(pl);
       // v0.19.4：和「本页连播」同一个问题 —— 过滤模式下队列里不能塞进被隐藏的已听集
       d.addEventListener('click', function () {
@@ -3785,12 +3448,6 @@
     } catch (e) { msg('操作失败: ' + e.message, 'err'); }
   });
 
-  $('btnPlayAll').addEventListener('click', function () {
-    var sub = cur.detail && cur.detail.subscription;
-    if (!sub || !sub.playlistId) { msg('该专辑还没有歌单，先导入吧', 'err'); return; }
-    playPlaylist(sub.playlistId, cur.detail.name);
-  });
-
   // 整本下载到本地音乐目录
   function startDownload(payload, label) {
     return api('POST', '/download', payload).then(function (r) {
@@ -3873,14 +3530,6 @@
         bAuto.addEventListener('click', async function () {
           await api('POST', '/subs', { album_id: s.albumId, autoSync: s.autoSync === false });
           loadSubs();
-        });
-
-        var bPlay = document.createElement('button');
-        bPlay.className = 'small plain';
-        bPlay.textContent = '▶';
-        bPlay.addEventListener('click', function () {
-          if (!s.playlistId) { msg('该订阅没有歌单', 'err'); return; }
-          playPlaylist(s.playlistId, s.name);
         });
 
         var bDel = document.createElement('button');
@@ -4106,7 +3755,6 @@
       var a = (r.data && r.data.auto) || {};
       $('autoEnabled').value = a.enabled ? '1' : '0';
       $('autoTime').value = a.time || '08:30';
-      $('autoPush').value = a.pushDevice ? '1' : '0';
     } catch (e) { /* */ }
   }
 
@@ -4115,8 +3763,7 @@
       await api('POST', '/config', {
         auto: {
           enabled: $('autoEnabled').value === '1',
-          time: $('autoTime').value || '08:30',
-          pushDevice: $('autoPush').value === '1'
+          time: $('autoTime').value || '08:30'
         }
       });
       msg('✅ 自动同步设置已保存', 'ok');
@@ -4256,15 +3903,6 @@
     document.querySelectorAll('.rpBtn').forEach(function (b) {
       b.addEventListener('click', function () { loadReport(b.getAttribute('data-period')); });
     });
-    $('btnRpSpeak').addEventListener('click', async function () {
-      $('rpBody').innerHTML = '<span class="muted">正在让音箱念…</span>';
-      try {
-        var r = await api('POST', '/report/speak', { period: rpPeriod });
-        var d = r.data || {};
-        msg(r.success === false ? '❌ ' + (r.error || '播报失败') : '🔊 已念给 ' + (d.device || '音箱'), r.success === false ? 'err' : 'ok');
-      } catch (e) { msg('播报失败: ' + e.message, 'err'); }
-      loadReport(rpPeriod);
-    });
     $('btnRpReset').addEventListener('click', async function () {
       if (!confirm('清空所有收听统计？（不影响播放进度）')) return;
       await api('POST', '/report/reset', {});
@@ -4318,10 +3956,6 @@
 
         var ops = document.createElement('div');
         ops.className = 'ops';
-        var bPlay = document.createElement('button');
-        bPlay.className = 'small';
-        bPlay.textContent = '▶ 音箱';
-        bPlay.addEventListener('click', function () { playPlaylist(a.playlistId, a.name); });
         var bOpen = document.createElement('button');
         bOpen.className = 'small plain';
         bOpen.textContent = '详情';
@@ -4459,18 +4093,6 @@
       (ps.at ? ' · 最后更新 ' + ps.at : '');
   }
 
-  function renderTtsState(t) {
-    var el = $('ttsInfo');
-    if (!el || !t) return;
-    var c = t.cfg || {}, last = t.last || {}, dev = t.device || {};
-    var bits = [];
-    if (c.enabled) bits.push('已开启 · 每天 ' + (c.time || '07:30') + ' 播报');
-    else bits.push('未开启');
-    bits.push(dev.device_name ? ('音箱：' + dev.device_name) : '未选音箱（跟随设置）');
-    if (last.at) bits.push('上次：' + last.at + ' ' + (last.result || ''));
-    el.textContent = bits.join(' · ');
-  }
-
   async function loadProgCfg() {
     try {
       var r = await api('GET', '/config');
@@ -4533,39 +4155,6 @@
     } catch (e) { msg('操作失败: ' + e.message, 'err'); }
   });
 
-  // ---------- 语音 / 文字指令 ----------
-  async function runVCmd(text) {
-    var cmd = String(text || '').trim();
-    if (!cmd) return;
-    $('vCmd').value = cmd;
-    $('vInfo').innerHTML = '⏳ 正在处理…';
-    try {
-      var r = await api('POST', '/voice', { text: cmd });
-      var d = r.data || {};
-      if (r.success === false) {
-        $('vInfo').innerHTML = '<span class="err">❌ ' + esc(r.error || '执行失败') + '</span>' +
-          (d.albumName ? '<br /><span class="muted small-txt">《' + esc(d.albumName) + '》</span>' : '');
-        return;
-      }
-      var line = [];
-      if (d.text) line.push((d.played ? '✅ ' : 'ℹ️ ') + esc(d.text));
-      if (d.target && d.target !== d.text) line.push('<span class="muted small-txt">' + esc(d.target) + '</span>');
-      $('vInfo').innerHTML = line.join('<br />');
-    } catch (e) {
-      $('vInfo').innerHTML = '<span class="err">❌ ' + esc(e.message) + '</span>';
-    }
-  }
-
-  if ($('btnVCmd')) {
-    $('btnVCmd').addEventListener('click', function () { runVCmd($('vCmd').value); });
-    $('vCmd').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') runVCmd(this.value);
-    });
-    document.querySelectorAll('.vchip').forEach(function (b) {
-      b.addEventListener('click', function () { runVCmd(b.getAttribute('data-cmd')); });
-    });
-  }
-
   async function poll() {
     try {
       var r = await api('GET', '/status');
@@ -4574,7 +4163,6 @@
       if (Array.isArray(d.subs)) { subsCache = d.subs; updateSubBadge(); }
       renderDl(d.dlJob);
       renderProgStat(d.progressStat);
-      renderTtsState(d.tts);
       if (d.lastSync && d.lastSync.at) {
         $('lastSyncInfo').textContent = '最近同步：' + d.lastSync.at + '（' + d.lastSync.trigger + '）· ' + d.lastSync.result;
       }
@@ -4858,8 +4446,6 @@
 
   function boot() {
     loadLogin();
-    loadDevices();
-    loadSpState();
     loadAuto();
     loadProgCfg();
     loadSubs();
