@@ -761,7 +761,7 @@
     }
 
     /* v0.22.2：音箱封面 + 播放进度 */
-    #fullPlayer .spkdisc img { display: none; width: 46%; max-width: 190px; aspect-ratio: 1 / 1; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-soft); background: var(--card); }
+    #fullPlayer .spkdisc img { display: none; width: 46%; max-width: 190px; aspect-ratio: 1 / 1; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-soft); background: var(--card); box-shadow: 0 8px 28px color-mix(in srgb, var(--accent) 22%, transparent); }
     #fullPlayer.has-cover .spkdisc img { display: block; }
     #fullPlayer.has-cover .spkdisc span { display: none; }
     #fullPlayer .fpprog { display: flex; align-items: center; gap: 10px; padding: 4px 22px 0; }
@@ -824,7 +824,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.22.2</span>
+    <span class="ver" id="ver">v0.22.3</span>
   </div>
 
   <div class="tabs">
@@ -1387,7 +1387,7 @@
     <!-- 面板二：音箱 -->
     <div class="fpane" id="paneSpk">
       <div class="fpalbum" id="spkName">音箱</div>
-      <div class="spkdisc"><img id="spkCover" alt="封面" /><span id="spkIcon">🔊</span></div>
+      <div class="spkdisc"><img id="spkCover" alt="" referrerpolicy="no-referrer" /><span id="spkIcon">🔊</span></div>
       <div class="fpname" id="spkTrack">—</div>
       <div class="fpmeta" id="spkSub">正在读取音箱状态…</div>
       <div class="fpprog">
@@ -1428,6 +1428,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.22.2"></script>
+<script src="static/app.js?v=0.22.3"></script>
 </body>
 </html>
