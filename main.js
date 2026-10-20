@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.2';
+var VERSION = '0.23.3';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -690,8 +690,10 @@ async function fetchTrackUrl(trackId) {
   }
   var link = d.play_path_64 || d.play_path_32 || d.play_path || '';
   if (!link) {
-    if (d.is_paid) throw new Error('paid: 该集为付费/VIP内容（未登录或无权限）');
-    throw new Error('未获取到音频地址（可能已下架）');
+    // v0.23.3：业务错误带 code，路由层据此回 200 + success:false（不再 404 刷控制台），
+    // 预取层据此静默（不再刷日志）
+    if (d.is_paid) { var pe = new Error('该集为付费/VIP内容，需要登录且已购买'); pe.code = 'paid'; throw pe; }
+    var ne = new Error('未获取到音频地址（可能已下架）'); ne.code = 'no_url'; throw ne;
   }
   return link;
 }
@@ -731,6 +733,7 @@ function prefetchUrls(ids) {
     list.forEach(function (id) {
       if (turlGet(id)) return;
       trackUrlFast(id).catch(function (e) {
+        if (e && (e.code === 'paid' || e.code === 'no_url')) return;   // v0.23.3：不可播的集不打扰日志
         logWarn('net', '预取地址失败 ' + id + '：' + String(e && e.message || e));
       });
     });
@@ -4056,7 +4059,13 @@ async function handleHTTPRequest(req) {
       var u = await trackUrlFast(mTrack[1], q.fresh === '1' || q.fresh === 'true');
       return jsonResp({ success: true, data: { url: u, local: !!(localInfo && localInfo.path), localPath: (localInfo && localInfo.path) || '' } });
     } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 404);
+      // v0.23.3：付费/下架是业务状态不是服务端错误 → 200 + success:false（前端直接显示友好文案）；
+      // 其余（网络/上游异常）保留错误状态码
+      var em = String((e && e.message) || e);
+      if (e && (e.code === 'paid' || e.code === 'no_url')) {
+        return jsonResp({ success: false, code: e.code, error: em });
+      }
+      return jsonResp({ success: false, error: em }, 502);
     }
   }
 
