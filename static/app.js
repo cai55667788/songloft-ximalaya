@@ -1164,6 +1164,13 @@
   var fpTarget = 'local';
   var spkMedia = null;        // v0.22.2：最近一次音箱播放状态（标题/封面/进度）
   var spkPollTimer = null;    // 面板打开期间每 5s 轮询一次进度
+  var spkCoverFail = {};      // v0.22.3：加载失败过的封面 URL，不再重试（避免每 5s 闪一次坏图）
+  if ($('spkCover')) $('spkCover').onerror = function () {
+    spkCoverFail[this.getAttribute('src') || ''] = 1;
+    this.removeAttribute('src');
+    var fp = $('fullPlayer');
+    if (fp) fp.classList.remove('has-cover');
+  };
   function spkPollSet(on) {
     if (spkPollTimer) { clearInterval(spkPollTimer); spkPollTimer = null; }
     if (on) spkPollTimer = setInterval(function () {
@@ -1185,7 +1192,7 @@
     var m = d.media || null;
     spkMedia = m;
     var fp = $('fullPlayer');
-    var cov = m && m.cover;
+    var cov = (m && m.cover && !spkCoverFail[m.cover]) ? m.cover : '';
     if ($('spkCover') && fp) {
       if (cov) {
         if ($('spkCover').getAttribute('src') !== cov) $('spkCover').setAttribute('src', cov);
