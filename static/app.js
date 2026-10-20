@@ -131,6 +131,21 @@
   // 专辑名/集名/错误文案里带 <img onerror> 就会在 webview 里执行。统一按 HTML 转义。
   // 注意：textContent / msg() 这类纯文本出口不要过 esc，否则会看到 &amp; 之类实体。
   function esc(s) { return escHtml(s); }
+  // v0.23.2：点「展开」看完整错误（事件委托，动态插入的节点也能点）
+  document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('.errclip') : null;
+    if (!t) return;
+    t.innerHTML = escHtml(t.getAttribute('data-full') || '');
+    t.classList.remove('errclip');
+  });
+  // v0.23.2：长错误信息默认截断，点击展开全文（下载失败整条路径又长又刺眼）
+  function errClip(err, cap) {
+    var one = String(err || '').replace(/\s+/g, ' ').trim();
+    var n = cap || 90;
+    if (one.length <= n) return '<span class="err">' + escHtml(one) + '</span>';
+    return '<span class="err errclip" data-full="' + escHtml(one) + '">' +
+      escHtml(one.slice(0, n)) + '… <span class="link">展开</span></span>';
+  }
   function escHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -3872,13 +3887,16 @@
         var max = 1;
         daily.forEach(function (x) { if (x.sec > max) max = x.sec; });
         html += '<div class="bars">';
-        daily.slice(-30).forEach(function (x) {
+        var shown = daily.slice(-30);
+        shown.forEach(function (x) {
           var h = Math.max(2, Math.round(x.sec * 100 / max));
           html += '<div class="bar" title="' + esc(x.day + ' · ' + fmtHM(x.sec)) + '">' +
             '<div class="bfill" style="height:' + h + '%"></div></div>';
         });
         html += '</div>';
-        html += '<div class="muted small-txt" style="margin-top:4px;">最近 ' + Math.min(30, daily.length) + ' 天（柱高 = 当天时长）</div>';
+        html += '<div class="bardates"><span>' + esc(shown[0].day) + '</span>' +
+          '<span>最近 ' + shown.length + ' 天 · 柱高 = 当天时长</span>' +
+          '<span>' + esc(shown[shown.length - 1].day) + '</span></div>';
       }
 
       // 专辑排行
@@ -3944,6 +3962,23 @@
       list.forEach(function (a) {
         var line = document.createElement('div');
         line.className = 'line';
+        // v0.23.2：已导入行加封面（订阅缓存里能匹配到就用真封面，否则用图标占位）
+        var cover = '';
+        for (var si = 0; si < subsCache.length; si++) {
+          if (String(subsCache[si].albumId) === String(a.albumId)) { cover = subsCache[si].cover || ''; break; }
+        }
+        var icon = document.createElement('div');
+        icon.className = 'impicon';
+        icon.textContent = '📚';
+        if (cover) {
+          var ic = document.createElement('img');
+          ic.referrerPolicy = 'no-referrer';
+          ic.src = String(cover).replace(/^http:\/\//i, 'https://');
+          ic.onerror = function () { ic.remove(); icon.textContent = '📚'; };
+          icon.textContent = '';
+          icon.appendChild(ic);
+        }
+        line.appendChild(icon);
         var body = document.createElement('div');
         body.className = 'body';
         var n = document.createElement('div');
@@ -4026,8 +4061,9 @@
       // 这里原来无条件清掉，会把同时在进行的下载进度也停更。
       $('jobFill').style.width = '100%';
       $('jobText').className = 'txt ' + (j && j.error ? 'err' : 'ok');
-      $('jobText').textContent = (j && j.error ? '❌ ' : '✅ ') +
-        ((j && (j.title || j.current)) || '任务') + (j && j.error ? '：' + j.error : ' 完成') +
+      $('jobText').innerHTML = (j && j.error ? '❌ ' : '✅ ') +
+        escHtml(((j && (j.title || j.current)) || '任务')) +
+        (j && j.error ? '：' + errClip(j.error, 110) : ' 完成') +
         (j && j.total ? '（' + j.done + '/' + j.total + ' 集）' : '');
       // v0.18.0：有写入失败时直接给个重试按钮，不用重导整本
       var oldRetry = $('jobRetry'); if (oldRetry) oldRetry.remove();
@@ -4082,7 +4118,7 @@
     el.innerHTML = (okAll ? '<span class="ok">✅</span> ' : '<span class="err">⚠️</span> ') +
       '《' + escHtml(j.title || '') + '》下载结束：成功 ' + j.ok + '/' + (j.total || 0) +
       (j.fail ? '，失败 ' + j.fail : '') + (j.finishedAt ? '（' + escHtml(j.finishedAt) + '）' : '') +
-      (j.error ? '<br><span class="err">' + escHtml(j.error) + '</span>' : '') +
+      (j.error ? '<br>' + errClip(j.error, 100) : '') +
       (j.lastPath ? '<br><span class="muted">示例路径：' + escHtml(j.lastPath) + '</span>' : '');
   }
 
