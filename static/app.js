@@ -416,37 +416,27 @@
     loadSpState();
   });
 
-  // ---------- v0.18.8：音箱遥控 ----------
-  var spVolTimer = null;
-  var spLastVol = 40;
-
-  function spSetVolUI(v) {
-    v = Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
-    spLastVol = v;
-    var r = $('spVol'), n = $('spVolNum');
-    if (r) r.value = String(v);
-    if (n) n.textContent = String(v);
-  }
-
+  // ---------- 音箱（v0.21.9：控制全部收进「音箱播放界面」，这里只保留状态与通用 ctl） ----------
   async function loadSpState() {
+    var el = $('spState');
+    if (!el) return;
     try {
       var r = await api('GET', '/speaker/state');
       if (!r || r.success === false) {
-        $('spState').textContent = '⚠️ ' + ((r && r.error) || '读取设备失败');
-        $('spState').className = 'muted small-txt err';
+        el.textContent = '⚠️ ' + ((r && r.error) || '读取设备失败');
+        el.className = 'muted small-txt err';
         return;
       }
       var d = r.data || {};
       var on = d.presence === 'online';
-      $('spState').className = 'muted small-txt' + (on ? '' : ' err');
-      $('spState').textContent = (on ? '🟢 ' : (d.presence === 'offline' ? '⚫ ' : '⚪ ')) +
+      el.className = 'muted small-txt' + (on ? '' : ' err');
+      el.textContent = (on ? '🟢 ' : (d.presence === 'offline' ? '⚫ ' : '⚪ ')) +
         (d.device_name || '音箱') + (on ? ' 在线' : d.presence === 'offline' ? ' 离线' : ' 状态未知') +
+        (typeof d.volume === 'number' ? ' · 音量 ' + d.volume : '') +
         (d.last && d.last.title ? ' · 上次播：' + d.last.title : '');
-      if (typeof d.volume === 'number') spSetVolUI(d.volume);
-      else if (d.last && typeof d.last.volume === 'number') spSetVolUI(d.last.volume);
     } catch (e) {
-      $('spState').textContent = '⚠️ ' + e.message;
-      $('spState').className = 'muted small-txt err';
+      el.textContent = '⚠️ ' + e.message;
+      el.className = 'muted small-txt err';
     }
   }
 
@@ -463,35 +453,7 @@
     return false;
   }
 
-  $('spStop').addEventListener('click', function () { spCtl('stop'); });
-  $('spPause').addEventListener('click', function () { spCtl('pause'); });
-  $('spResume').addEventListener('click', function () { spCtl('resume'); });
-  $('spInterrupt').addEventListener('click', function () { spCtl('interrupt'); });
-  $('spVolUp').addEventListener('click', async function () {
-    if (await spCtl('volup', { step: 10 })) loadSpState();
-  });
-  $('spVolDown').addEventListener('click', async function () {
-    if (await spCtl('voldown', { step: 10 })) loadSpState();
-  });
-  $('spMute').addEventListener('click', async function () {
-    if (await spCtl('volume', { volume: 0 })) spSetVolUI(0);
-  });
-  $('spVol40').addEventListener('click', async function () {
-    if (await spCtl('volume', { volume: 40 })) spSetVolUI(40);
-  });
-
-  // 拖动时只改 UI，松手（change）才下发，避免一路拖一路发
-  $('spVol').addEventListener('input', function () { spSetVolUI(this.value); });
-  $('spVol').addEventListener('change', function () {
-    var v = Number(this.value) || 0;
-    if (spVolTimer) clearTimeout(spVolTimer);
-    spVolTimer = setTimeout(async function () {
-      spVolTimer = null;
-      await spCtl('volume', { volume: v });
-    }, 260);
-  });
-
-  // v0.21.3：音箱倍速（后端转发 miot /player/speed，0.5–2.0；两处下拉互相同步并记住选择）
+  // v0.21.3：音箱倍速（后端转发 miot /player/speed，0.5–2.0；只在下拉处同步并记住选择）
   var SPK_SPEED_KEY = 'xm_spk_speed';
   async function spSpeedSet(v) {
     try {
@@ -507,12 +469,12 @@
   }
   function spSpeedUI(v) {
     var sv = String(v);
-    ['spSpeed', 'spkSpeed'].forEach(function (id) {
+    ['spkSpeed'].forEach(function (id) {
       var el = $(id);
       if (el && el.value !== sv) el.value = sv;
     });
   }
-  ['spSpeed', 'spkSpeed'].forEach(function (id) {
+  ['spkSpeed'].forEach(function (id) {
     if ($(id)) $(id).addEventListener('change', function () {
       var v = Number(this.value) || 1;
       spSpeedUI(v);
@@ -524,15 +486,7 @@
     if (sv) spSpeedUI(sv);
   })();
 
-  $('spReplay').addEventListener('click', async function () {
-    try {
-      var st = await api('GET', '/speaker/state');
-      var last = (st && st.data && st.data.last) || null;
-      if (!last || !last.trackId) { msg('还没有在音箱放过东西，先从歌单点「播到音箱」试试', 'err'); return; }
-      var r = await api('POST', '/speaker/play-track', { track_id: last.trackId, title: last.title, url: last.url });
-      msg(r.success !== false ? ('🔁 ' + ((r.data && r.data.message) || '已重播')) : ('❌ ' + r.error), r.success !== false ? 'ok' : 'err');
-    } catch (e) { msg('重播失败: ' + e.message, 'err'); }
-  });
+  // v0.21.9：重播入口只在「音箱播放界面」里（spkReplay），设置页不再重复
 
   $('spPlayPl').addEventListener('click', async function () {
     var plId = 0, plName = '';
