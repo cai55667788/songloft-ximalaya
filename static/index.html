@@ -677,6 +677,81 @@
     #spkPlayer .fpbar button, #spkPlayer .fpbar select { min-height: 32px; }
     /* 设置页「音箱遥控」卡里的全屏入口 */
     #spkFull { min-height: 32px; }
+
+    /* ========== v0.21.8 播放界面统一（全屏页 / 音箱页 / 车载 / 播放条） ========== */
+    /* 1) 统一的浮层底与顶栏 */
+    #fullPlayer, #spkPlayer {
+      background:
+        radial-gradient(560px 300px at 50% -80px, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+        var(--bg);
+    }
+    #fullPlayer .fphead, #spkPlayer .fphead { min-height: 40px; gap: 10px; }
+    #fullPlayer .fphead button, #spkPlayer .fphead button {
+      min-height: 32px; padding: 0 14px; border-radius: 999px; font-size: 13px;
+      background: color-mix(in srgb, var(--card) 85%, transparent);
+      border: 1px solid var(--border-soft); color: var(--text);
+    }
+    #fullPlayer .fphead button:hover, #spkPlayer .fphead button:hover {
+      border-color: var(--accent); color: var(--accent);
+    }
+    #fullPlayer .fphead .fptitle, #spkPlayer .fphead .fptitle {
+      font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: 0;
+    }
+
+    /* 2) 统一的主控按钮：72px 主按钮 + 46px 圆钮 */
+    #fullPlayer .fpctrl .fpbig, #spkPlayer .fpctrl .fpbig {
+      width: 72px; height: 72px; border-radius: 50%; font-size: 28px; padding: 0;
+      color: #fff; background: linear-gradient(180deg, var(--accent), var(--accent-deep));
+      box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 38%, transparent);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    #fullPlayer .fpctrl .fpbig:active, #spkPlayer .fpctrl .fpbig:active { transform: scale(.93); }
+    #fullPlayer .fpctrl button:not(.fpbig), #spkPlayer .fpctrl button:not(.fpbig) {
+      width: 46px; height: 46px; padding: 0; border-radius: 50%; font-size: 16px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--card); border: 1px solid var(--border-soft);
+    }
+    #fullPlayer .fpctrl button:not(.fpbig):hover, #spkPlayer .fpctrl button:not(.fpbig):hover {
+      border-color: var(--accent); color: var(--accent);
+    }
+
+    /* 3) 统一的底部工具行卡片 */
+    #fullPlayer .fpbar, #spkPlayer .fpbar {
+      display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+      gap: 10px; padding: 10px 12px; margin-top: 8px;
+      background: var(--card); border: 1px solid var(--border-soft);
+      border-radius: 14px; box-shadow: var(--shadow-card);
+    }
+    #fullPlayer .fpbar button, #spkPlayer .fpbar button,
+    #fullPlayer .fpbar select, #spkPlayer .fpbar select { min-height: 32px; border-radius: 10px; font-size: 12px; }
+    #fullPlayer input[type=range], #spkPlayer input[type=range] { accent-color: var(--accent); }
+    /* 主标题 / 副标题统一字号体系 */
+    #fullPlayer .fpname, #spkPlayer .fpname { font-size: 19px; font-weight: 600; line-height: 1.45; }
+    #fullPlayer .fpmeta, #spkPlayer .fpmeta { font-size: 12px; }
+
+    /* 4) 车载模式：同一套视觉语言，只放大尺寸（保留高对比） */
+    #drive {
+      background:
+        radial-gradient(760px 420px at 50% -100px, rgba(255,107,136,.16), transparent 70%),
+        #0b0b0d;
+    }
+    #driveExit {
+      left: 14px; right: auto; border-radius: 999px; padding: 8px 16px;
+      border: 1px solid #3a3d45; background: rgba(255,255,255,.05); color: #d6dae2;
+    }
+    #driveExit:hover { border-color: #ff6b88; color: #ff9fb2; }
+    #driveCover { border-radius: 20px; box-shadow: 0 14px 40px rgba(0,0,0,.5), 0 0 0 8px rgba(255,107,136,.07); }
+    #driveBtns button { background: #23252b; border: 1px solid #34373f; }
+    #driveBtns button.big {
+      background: linear-gradient(180deg, #ff6b88, #c8143c); color: #fff;
+      border-color: transparent; box-shadow: 0 10px 26px rgba(200,20,60,.38);
+    }
+
+    /* 5) 底部播放条：与浮层同一套按钮语言 */
+    #player .pbar button { min-height: 28px; border-radius: 10px; padding: 3px 9px; }
+    #player .pbar button:hover { border-color: var(--accent); color: var(--accent); }
+    #player .pbar select { min-height: 28px; border-radius: 10px; }
+    #player .pbar .muted { font-size: 11px; }
 </style>
 </head>
 <body>
@@ -684,7 +759,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.21.7</span>
+    <span class="ver" id="ver">v0.21.8</span>
   </div>
 
   <div class="tabs">
@@ -1175,7 +1250,7 @@
 
 <!-- 车载模式：大按钮 + 高对比，几乎不用看屏幕 -->
 <div id="drive">
-  <button id="driveExit">退出</button>
+  <button id="driveExit">⌄ 退出</button>
   <img id="driveCover" alt="" />
   <div id="driveTitle">—</div>
   <div id="driveMeta"></div>
@@ -1292,6 +1367,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.21.7"></script>
+<script src="static/app.js?v=0.21.8"></script>
 </body>
 </html>
