@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.22.1';
+var VERSION = '0.22.2';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -69,7 +69,24 @@ var lastSync = { at: '', result: '', trigger: '' };
 var lastTts = { at: '', text: '', result: '' };
 // v0.18.8：音箱最近一次操作（音量、在播的集），用来支持「音量 +10」这类相对指令
 // 注意别叫 speak：/tts/run 分支里有同名局部变量，var 提升会把全局遮蔽掉（踩过）
-var SPK = { last: {} };
+var SPK = { last: {}, play: null };  // play: v0.22.2 音箱播放账本（play-url 端侧查不到进度，用本地时钟推算）
+
+// 音箱进度推算：basePos 是冻结点，playing 时加时钟差
+function spkPosNow() {
+  var p = SPK.play;
+  if (!p) return 0;
+  var pos = (p.basePos || 0) + (p.playing ? (Date.now() - (p.baseAt || Date.now())) / 1000 : 0);
+  if (p.duration) pos = Math.min(pos, p.duration);
+  return Math.max(0, Math.round(pos));
+}
+// 暂停/继续/停止时同步账本
+function spkPlayCtl(act) {
+  var p = SPK.play;
+  if (!p) return;
+  if (act === 'pause' && p.playing) { p.basePos = spkPosNow(); p.playing = false; }
+  else if (act === 'resume' && !p.playing) { p.baseAt = Date.now(); p.playing = true; }
+  else if (act === 'stop') { p.playing = false; p.basePos = 0; }
+}
 
 var syncing = false;
 var importing = false;
@@ -612,6 +629,20 @@ async function fetchTrackUrl(trackId) {
   return link;
 }
 
+// v0.22.2：单集元数据（封面/时长/标题），音箱播放界面显示进度和封面用
+async function fetchTrackMeta(trackId) {
+  var url = 'https://m.ximalaya.com/tracks/' + trackId + '.json';
+  var h = { 'User-Agent': UA_M, 'Referer': 'https://m.ximalaya.com/' };
+  if (login.cookie) h['Cookie'] = login.cookie;
+  var d = null;
+  try {
+    d = await getJSON(url, h);
+  } catch (e1) {
+    d = await getJSON(url, { 'User-Agent': UA_PC, 'Referer': 'https://www.ximalaya.com/' });
+  }
+  return d || {};
+}
+
 // ---------- 登录态私有接口：当前用户 / 我的订阅 ----------
 
 var signCache = { at: 0, v: '' };
@@ -1120,7 +1151,11 @@ async function loadAll() {
   try {
     var spk = await songloft.storage.get(SPK_KEY);
     var sobj = typeof spk === 'string' ? JSON.parse(spk) : spk;
-    if (sobj && typeof sobj === 'object') SPK.last = sobj;
+    // v0.22.2：新格式 { last, play }；旧格式是裸 last 对象
+    if (sobj && typeof sobj === 'object' && sobj.last && typeof sobj.last === 'object') {
+      SPK.last = sobj.last;
+      if (sobj.play && typeof sobj.play === 'object') SPK.play = sobj.play;
+    } else if (sobj && typeof sobj === 'object') SPK.last = sobj;
   } catch (e) { /* */ }
   // v0.17.0 起移除 AI 功能，旧版本留下的 AI 缓存顺手清掉，别占着存储
   try { await songloft.storage.delete('ai_cache:v1'); } catch (e) { /* */ }
@@ -1263,7 +1298,7 @@ async function persist() {
   await songloft.storage.set(LOGIN_KEY, JSON.stringify(login));
   await songloft.storage.set(SUB_KEY, JSON.stringify(subs));
   // v0.19.2：SPK 单独存，别污染 config
-  try { await songloft.storage.set(SPK_KEY, JSON.stringify(SPK.last || {})); } catch (e) { /* */ }
+  try { await songloft.storage.set(SPK_KEY, JSON.stringify({ last: SPK.last || {}, play: SPK.play || null })); } catch (e) { /* */ }
 }
 
 async function persistProg() {
@@ -4586,6 +4621,31 @@ async function handleHTTPRequest(req) {
         });
       });
     } catch (e) { /* 拿不到设备列表就用缓存 */ }
+    // v0.22.2：合并音箱实时播放状态；play-url 的 position 端侧恒为 0，进度用本地账本推算
+    var media2 = null;
+    if (SPK.play && SPK.play.trackId) {
+      var st2 = null, changed2 = false;
+      try {
+        var ms2 = await miotGet('/mina/status?account_id=' + encodeURIComponent(spDev.account_id) + '&device_id=' + encodeURIComponent(spDev.device_id));
+        if (ms2.ok && ms2.data && ms2.data.success !== false) st2 = ms2.data.data || ms2.data;
+      } catch (eS) { /* 状态拿不到就维持账本原样 */ }
+      if (st2) {
+        var devPlaying2 = st2.state === 'playing' || st2.is_playing === true;
+        if (devPlaying2 && !SPK.play.playing) { SPK.play.baseAt = Date.now(); SPK.play.playing = true; changed2 = true; }
+        else if (!devPlaying2 && SPK.play.playing) { SPK.play.basePos = spkPosNow(); SPK.play.playing = false; changed2 = true; }
+      }
+      var pos2 = spkPosNow();
+      if (SPK.play.duration && pos2 >= SPK.play.duration - 1 && SPK.play.playing) {
+        SPK.play.playing = false; SPK.play.basePos = SPK.play.duration; pos2 = SPK.play.duration; changed2 = true;
+      }
+      if (changed2) { try { await songloft.storage.set(SPK_KEY, JSON.stringify({ last: SPK.last || {}, play: SPK.play || null })); } catch (eP) { /* */ } }
+      media2 = {
+        trackId: SPK.play.trackId, title: SPK.play.title || (SPK.last && SPK.last.title) || '',
+        cover: SPK.play.cover || (SPK.last && SPK.last.cover) || '',
+        duration: SPK.play.duration || (SPK.last && SPK.last.duration) || 0,
+        position: pos2, playing: !!SPK.play.playing
+      };
+    }
     return jsonResp({
       success: true,
       data: {
@@ -4594,7 +4654,8 @@ async function handleHTTPRequest(req) {
         device_name: spName,
         presence: spDev.presence || 'unknown',
         volume: spVol,
-        last: (SPK.last || null)
+        last: (SPK.last || null),
+        media: media2
       }
     });
   }
@@ -4641,6 +4702,8 @@ async function handleHTTPRequest(req) {
       if (actMap[act]) {
         var rr3 = await miotPost(actMap[act][0], actMap[act][1]);
         if (!miotOk(rr3)) return jsonResp({ success: false, error: miotErr(rr3) }, 500);
+        spkPlayCtl(act);   // v0.22.2：暂停/继续/停止同步本地进度账本
+        await persist();
         return jsonResp({ success: true, data: { message: actMap[act][2] } });
       }
       return jsonResp({ success: false, error: '不认识的动作: ' + act }, 400);
@@ -4680,7 +4743,10 @@ async function handleHTTPRequest(req) {
       return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
     }
     try {
+      var meta2 = null;
+      try { meta2 = await fetchTrackMeta(tid); } catch (eM) { /* 元数据失败不挡播放 */ }
       var link2 = (pb.url || '').trim();
+      if (!link2) link2 = (meta2 && (meta2.play_path_64 || meta2.play_path_32 || meta2.play_path)) || '';
       if (!link2) link2 = await fetchTrackUrl(tid);
       if (!link2) return jsonResp({ success: false, error: '取不到这一集的播放地址（可能需要登录）' }, 502);
       if (pb.volume !== undefined && pb.volume !== null && pb.volume !== '') {
@@ -4694,9 +4760,18 @@ async function handleHTTPRequest(req) {
         account_id: pdev2.account_id, device_id: pdev2.device_id, url: link2
       });
       if (!miotOk(rp)) return jsonResp({ success: false, error: miotErr(rp) }, 500);
+      var spkTitle2 = String(pb.title || (meta2 && meta2.title) || '');
       SPK.last = Object.assign(SPK.last || {}, {
-        trackId: tid, title: String(pb.title || ''), at: nowStr(), url: link2
+        trackId: tid, title: spkTitle2, at: nowStr(), url: link2,
+        cover: (meta2 && (meta2.cover_url || meta2.cover_middle || meta2.cover_small)) || '',
+        duration: Number(meta2 && meta2.duration) || 0
       });
+      // v0.22.2：播放账本——从 0 开始计时，暂停/继续/停止由 spkPlayCtl 维护
+      SPK.play = {
+        trackId: tid, title: spkTitle2,
+        cover: SPK.last.cover, duration: SPK.last.duration,
+        basePos: 0, baseAt: Date.now(), playing: true
+      };
       await persist();
       return jsonResp({ success: true, data: { message: '已在音箱播放' + (pb.title ? '：' + pb.title : '') } });
     } catch (e) {
