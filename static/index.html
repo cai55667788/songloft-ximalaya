@@ -783,6 +783,32 @@
       #fullPlayer .fpseg button { padding: 5px 12px; }
     }
 
+    /* ========== v0.22.1 播放页收尾 + 音箱倍速多级调速 ========== */
+    /* 1) 浮层进出有过渡，不再硬闪 */
+    @keyframes fpIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    #fullPlayer.show .fpwrap { animation: fpIn .2s ease both; }
+    @media (prefers-reduced-motion: reduce) { #fullPlayer.show .fpwrap { animation: none; } }
+    /* 2) 顶栏右侧：本机给队列，音箱给刷新 */
+    #fullPlayer #spkRefresh { display: none; }
+    #fullPlayer.spk #spkRefresh { display: inline-flex; align-items: center; }
+    #fullPlayer.spk #fpQueue { display: none; }
+    /* 3) 音箱快捷倍速档 */
+    #fullPlayer .spkpre .spkpre-b {
+      min-height: 26px; padding: 2px 10px; font-size: 11px; border-radius: 999px;
+      border: 1px solid var(--border-soft); background: var(--card); color: var(--muted);
+      box-shadow: none; cursor: pointer;
+    }
+    #fullPlayer .spkpre .spkpre-b:hover { border-color: var(--accent); color: var(--accent); }
+    #fullPlayer .spkpre .spkpre-b.on {
+      border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600;
+    }
+    /* 4) 音箱滑杆加高一点好拖 + 数值列 */
+    #fullPlayer #spkRate, #fullPlayer .spkvol input[type=range] { height: 26px; }
+    #fullPlayer .fpbar .pnum.sm { min-width: 34px; font-size: 11px; }
+    @media (max-width: 380px) {
+      #fullPlayer .spkpre .spkpre-b { padding: 2px 8px; font-size: 10px; }
+    }
+
 </style>
 </head>
 <body>
@@ -790,7 +816,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.22.0</span>
+    <span class="ver" id="ver">v0.22.1</span>
   </div>
 
   <div class="tabs">
@@ -1316,6 +1342,7 @@
         <button data-t="spk" title="控制小爱音箱">🔊 音箱</button>
       </div>
       <button class="small plain" id="fpQueue" title="播放队列">☰</button>
+      <button class="small plain" id="spkRefresh" title="刷新音箱状态">↻ 刷新</button>
     </div>
 
     <!-- 面板一：本机 -->
@@ -1361,28 +1388,33 @@
         <button class="small plain" id="spkStop" title="停止播放">⏹</button>
       </div>
       <div class="fpbar">
+        <div class="fprow">
+          <span class="muted">倍速</span>
+          <input type="range" id="spkRate" min="50" max="200" step="5" value="100" title="音箱倍速：0.50x – 2.00x，步进 0.05（松手才下发）" />
+          <span class="pnum" id="spkRateNum">1.00x</span>
+        </div>
+        <div class="fprow spkpre">
+          <button class="spkpre-b" data-v="0.75" title="0.75x">0.75x</button>
+          <button class="spkpre-b on" data-v="1" title="原速">1x</button>
+          <button class="spkpre-b" data-v="1.25" title="1.25x">1.25x</button>
+          <button class="spkpre-b" data-v="1.5" title="1.5x">1.5x</button>
+          <button class="spkpre-b" data-v="1.75" title="1.75x">1.75x</button>
+          <button class="spkpre-b" data-v="2" title="2 倍速">2x</button>
+        </div>
         <div class="fprow spkvol">
           <span class="muted">音量</span>
           <input type="range" id="spkVol" min="0" max="100" step="1" value="40" title="音箱音量（松手才下发）" />
+          <span class="pnum sm" id="spkVolNum">40</span>
         </div>
         <div class="fprow">
-          <select id="spkSpeed" title="音箱倍速（0.5–2.0，对走 miot 播放的队列实时生效）">
-            <option value="0.75">0.75x</option>
-            <option value="1" selected>1.0x</option>
-            <option value="1.25">1.25x</option>
-            <option value="1.5">1.5x</option>
-            <option value="1.75">1.75x</option>
-            <option value="2">2.0x</option>
-          </select>
           <button class="small plain" id="spkReplay" title="把最近一次在音箱放的这集再放一遍">🔁 重播</button>
           <button class="small plain" id="spkPush" title="把当前正在听的这集推到音箱">▶ 推当前集</button>
-          <button class="small plain" id="spkRefresh" title="刷新音箱状态">↻ 刷新</button>
         </div>
       </div>
     </div>
   </div>
 </div>
 
-<script src="static/app.js?v=0.22.0"></script>
+<script src="static/app.js?v=0.22.1"></script>
 </body>
 </html>
