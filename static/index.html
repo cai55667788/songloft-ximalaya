@@ -57,12 +57,6 @@
     button.small { padding: 5px 11px; font-size: 13px; margin: 0; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-    /* v0.18.8：音箱遥控面板 */
-    .spctl { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-    .spctl button { flex: 1 1 auto; min-width: 72px; }
-    .spvol { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
-    .spvol input[type=range] { flex: 1; min-width: 80px; accent-color: var(--ok); }
-    .spvnum { font-variant-numeric: tabular-nums; min-width: 28px; text-align: right; font-size: 13px; }
     .muted { color: var(--muted); }
     .small-txt { font-size: 12px; }
     .ok { color: var(--ok); } .err { color: var(--err); }
@@ -122,7 +116,6 @@
     .pager2 { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
     .pager2 input { width: 68px; flex: 0 0 auto; text-align: center; padding: 6px 8px; }
     .pager2 input#dFilter { width: 96px; text-align: left; }
-    #dSpeaker { width: auto; max-width: 200px; padding: 5px 8px; font-size: 13px; }
     /* v0.19.3：跳转模式切换（页 / 集） */
     #dJumpMode.on { border-color: var(--accent); color: var(--accent); }
     /* 跳集后短暂高亮目标集，一眼看到落在哪 */
@@ -165,13 +158,6 @@
     #player .pbar button { padding: 2px 8px; }
     #player .pbar select { padding: 2px 4px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
     #player .pbar .psep { width: 1px; height: 14px; background: var(--border); }
-    /* v0.19.1：播放条音箱遥控 —— 展开时按钮高亮，面板按钮贴在一起 */
-    #player .pbar #pSpk.on { border-color: var(--accent); color: var(--accent); }
-    #player .pbar #pSpkPanel { display: inline-flex; align-items: center; gap: 6px; }
-    #player .pbar #pSpkPanel.hide { display: none; }
-    /* v0.19.3：面板里显示设备名 / 在线状态 / 当前音量 */
-    #player .pbar .sp-info { font-size: 11px; white-space: nowrap; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
-
     /* 播放队列面板 */
     #qPanel { position: fixed; left: 0; right: 0; bottom: 0; top: 0; background: rgba(0,0,0,.32); z-index: 60; display: none; }
     #qPanel.show { display: block; }
@@ -573,7 +559,6 @@
     @media (prefers-color-scheme: dark) {
       select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239aa1ad' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
     }
-    #dSpeaker { min-height: 34px; }
     /* 详情头更醒目 */
     .dhead img { border-radius: 14px; box-shadow: 0 6px 18px rgba(0,0,0,.14); }
     .dhead .name { font-size: 17px; }
@@ -647,7 +632,7 @@
       #fullPlayer .fpctrl { gap: 26px; }
     }
 
-    /* ========== v0.21.8 播放界面统一（全屏页 / 音箱页 / 车载 / 播放条） ========== */
+    /* ========== v0.21.8 播放界面统一（全屏页 / 车载 / 播放条） ========== */
     /* 1) 统一的浮层底与顶栏 */
     #fullPlayer {
       background:
@@ -739,27 +724,15 @@
     .dhead img, .res-item img, .chantrack img { box-shadow: none; }
     /* 4) 控件圆角统一：输入/下拉/按钮 10px，胶囊 999px */
     input[type=text], input[type=number], input[type=time], textarea, select { border-radius: 10px; }
-    .tabs .tab, .chip, .lsnSeg, #dSpeaker, .spkvol button { border-radius: 999px; }
+    .tabs .tab, .chip, .lsnSeg { border-radius: 999px; }
     /* 5) 主按钮只留一层柔和投影 */
     button:not(.plain):not(.ghost):not(.tab) { box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 26%, transparent); }
     @media (max-width: 560px) {
       .card { padding: 12px; border-radius: 12px; }
     }
-    /* ========== v0.22.0 播放界面整合：本机/音箱二合一 + 播放条「更多」抽屉 ========== */
-    /* 顶栏：收起 / 本机·音箱分段 / 队列 */
-    #fullPlayer .fpseg {
-      flex: 1; display: flex; justify-content: center; gap: 4px; padding: 3px;
-      background: color-mix(in srgb, var(--accent) 7%, var(--bg)); border-radius: 999px;
-    }
-    #fullPlayer .fpseg button {
-      border: 0; background: transparent; color: var(--muted); border-radius: 999px;
-      padding: 5px 16px; font-size: 12px; min-height: 28px; cursor: pointer; box-shadow: none;
-    }
-    #fullPlayer .fpseg button.on { background: var(--card); color: var(--accent); font-weight: 600; }
+    /* ========== v0.22.0 播放条「更多」抽屉 ========== */
     /* 两个面板同一套骨架，只切换显示 */
     #fullPlayer .fpane { display: flex; flex-direction: column; gap: 10px; }
-    #fullPlayer.spk #paneLocal { display: none; }
-    #fullPlayer:not(.spk) #paneSpk { display: none; }
     #fullPlayer .fpalbum {
       font-size: 12px; color: var(--muted); text-align: center; letter-spacing: .02em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -768,26 +741,6 @@
     #fullPlayer .fpbar { flex-direction: column; gap: 8px; }
     #fullPlayer .fpbar .fprow { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
     #fullPlayer .fpbar .pnum { min-width: 46px; text-align: right; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-    #fullPlayer .fpbar .spkvol { width: 100%; }
-    #fullPlayer .fpbar .spkvol input[type=range] { flex: 1; }
-    #fullPlayer .spkdisc { display: flex; align-items: center; justify-content: center; padding: 12px 0 4px; }
-    #fullPlayer .spkdisc span {
-      width: 46%; max-width: 190px; aspect-ratio: 1 / 1; border-radius: 50%;
-      display: flex; align-items: center; justify-content: center; font-size: 66px;
-      background: radial-gradient(circle at 30% 30%,
-        color-mix(in srgb, var(--accent) 16%, var(--card)),
-        color-mix(in srgb, var(--accent) 5%, var(--bg)));
-      border: 1px solid var(--border-soft);
-    }
-
-    /* v0.22.2：音箱封面 + 播放进度 */
-    #fullPlayer .spkdisc img { display: none; width: 46%; max-width: 190px; aspect-ratio: 1 / 1; border-radius: 50%; object-fit: cover; border: 1px solid var(--border-soft); background: var(--card); box-shadow: 0 8px 28px color-mix(in srgb, var(--accent) 22%, transparent); }
-    #fullPlayer.has-cover .spkdisc img { display: block; }
-    #fullPlayer.has-cover .spkdisc span { display: none; }
-    #fullPlayer .fpprog { display: flex; align-items: center; gap: 10px; padding: 4px 22px 0; }
-    #fullPlayer .fpprog input[type=range] { flex: 1; accent-color: var(--accent); }
-    #fullPlayer .fpprog .pnum { min-width: 40px; text-align: center; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-
     /* 播放条：只留最常用的几颗，其余进「⋯ 更多」 */
     #player .pbar { justify-content: center; }
     #player .pbar #pProg { flex: 1; min-width: 0; text-align: center; font-variant-numeric: tabular-nums; }
@@ -808,34 +761,13 @@
       #player .pbar { gap: 6px; }
       #player .pbar #pProg { flex: 1 1 100%; order: -1; text-align: left; }
       #player .pmore input[type=range] { width: 96px; }
-      #fullPlayer .fpseg button { padding: 5px 12px; }
     }
 
-    /* ========== v0.22.1 播放页收尾 + 音箱倍速多级调速 ========== */
+    /* ========== v0.22.1 播放页收尾 ========== */
     /* 1) 浮层进出有过渡，不再硬闪 */
     @keyframes fpIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
     #fullPlayer.show .fpwrap { animation: fpIn .2s ease both; }
     @media (prefers-reduced-motion: reduce) { #fullPlayer.show .fpwrap { animation: none; } }
-    /* 2) 顶栏右侧：本机给队列，音箱给刷新 */
-    #fullPlayer #spkRefresh { display: none; }
-    #fullPlayer.spk #spkRefresh { display: inline-flex; align-items: center; }
-    #fullPlayer.spk #fpQueue { display: none; }
-    /* 3) 音箱快捷倍速档 */
-    #fullPlayer .spkpre .spkpre-b {
-      min-height: 26px; padding: 2px 10px; font-size: 11px; border-radius: 999px;
-      border: 1px solid var(--border-soft); background: var(--card); color: var(--muted);
-      box-shadow: none; cursor: pointer;
-    }
-    #fullPlayer .spkpre .spkpre-b:hover { border-color: var(--accent); color: var(--accent); }
-    #fullPlayer .spkpre .spkpre-b.on {
-      border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600;
-    }
-    /* 4) 音箱滑杆加高一点好拖 + 数值列 */
-    #fullPlayer #spkRate, #fullPlayer .spkvol input[type=range] { height: 26px; }
-    #fullPlayer .fpbar .pnum.sm { min-width: 34px; font-size: 11px; }
-    @media (max-width: 380px) {
-      #fullPlayer .spkpre .spkpre-b { padding: 2px 8px; font-size: 10px; }
-    }
 
 </style>
 </head>
@@ -844,7 +776,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.22.5</span>
+    <span class="ver" id="ver">v0.23.0</span>
   </div>
 
   <div class="tabs">
@@ -942,7 +874,6 @@
         <button class="small plain rpBtn" data-period="week">本周</button>
         <button class="small plain rpBtn" data-period="month">本月</button>
         <button class="small plain rpBtn" data-period="all">累计</button>
-        <button class="small" id="btnRpSpeak" title="用音箱把报告念出来">🔊 念给我听</button>
         <button class="small plain" id="btnRpExport" title="把当前报告存成 Markdown 文件">⬇ 导出 MD</button>
       </div>
       <div id="rpBody" style="margin-top:12px;">
@@ -987,8 +918,6 @@
       <div class="btns">
         <button class="small" id="btnImportDetail">导入全部</button>
         <button class="small ghost" id="btnSub">订阅并跟进更新</button>
-        <select id="dSpeaker" title="这次「音箱播放」用哪台音箱；「跟随设置」= 设置页里选的那台"></select>
-        <button class="small plain" id="btnPlayAll">▶ 音箱播放</button>
         <button class="small plain" id="btnDownload">⬇ 下载到本地</button>
               </div>
       <div id="dHl" class="hide" style="margin-top:10px;"></div>
@@ -1077,9 +1006,6 @@
         <div><label>开关</label>
           <select id="autoEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
         </div>
-        <div><label>有更新时</label>
-          <select id="autoPush"><option value="0">只追加进歌单</option><option value="1">追加并推送到音箱</option></select>
-        </div>
       </div>
       <div class="btns">
         <button class="small" id="btnSaveAuto">保存设置</button>
@@ -1121,55 +1047,10 @@
       <div class="muted small-txt" style="margin-top:6px;">下载后这些歌会变成本地文件，断网也能听；默认按「主播/专辑/集名」自动分目录。</div>
     </div>
 
-    <div class="card">
-      <h2>🗣️ 一句话让音箱播</h2>
-      <div class="row">
-        <div style="flex:3"><label>说一句（回车执行）</label>
-          <input type="text" id="vCmd" placeholder="播郭德纲第 5 集 / 继续听德云社 / 有什么更新" /></div>
-        <div style="flex:none"><button class="small" id="btnVCmd">执行</button></div>
-      </div>
-      <div class="btns" style="margin-top:8px;">
-        <button class="small plain vchip" data-cmd="播郭德纲第 5 集">播郭德纲第 5 集</button>
-        <button class="small plain vchip" data-cmd="最新一集">最新一集</button>
-        <button class="small plain vchip" data-cmd="快进两分钟">快进两分钟</button>
-        <button class="small plain vchip" data-cmd="倒退三十秒">倒退三十秒</button>
-        <button class="small plain vchip" data-cmd="跳到第 20 集">跳到第 20 集</button>
-        <button class="small plain vchip" data-cmd="收藏这一段">收藏这一段</button>
-        <button class="small plain vchip" data-cmd="音量调到 30">音量调到 30</button>
-        <button class="small plain vchip" data-cmd="30分钟后停止">30 分钟后停止</button>
-        <button class="small plain vchip" data-cmd="有什么更新">有什么更新</button>
-      </div>
-      <div class="muted small-txt" id="vInfo" style="margin-top:8px;">
-        <b>播放</b>：播《专辑名》第N集 / 最新一集 / 继续听专辑 / 暂停 / 继续 / 停止 / 下一集 / 上一集 / 随便放点<br />
-        <b>跳转</b>：快进两分钟 / 倒退三十秒 / 跳到第 20 集<br />
-        <b>音量</b>：声音大（小）一点 / 音量调到 30<br />
-        <b>其他</b>：收藏这一段 / 把三体加入待听 / 30 分钟后停止 / 有什么更新<br />
-        播放类指令要求该专辑已导入成歌单。</div>
-    </div>
   </section>
 
   <!-- ===== 设置 ===== -->
   <section id="tab-set" class="hide">
-    <div class="card">
-      <h2>🔊 播放音箱</h2>
-      <div class="row">
-        <div><label>设备</label><select id="device"><option value="">加载中…</option></select></div>
-        <div><label>播放方式</label><select id="mode"><option value="order">顺序</option><option value="random">随机</option></select></div>
-      </div>
-      <div class="muted small-txt" style="margin-top:6px;">来自「智能音箱（miot）」插件的设备列表。</div>
-    </div>
-
-    <!-- v0.22.0：音箱控制已并入全屏播放页，这里只留状态与入口 -->
-    <div class="card">
-      <h2>🎛 音箱</h2>
-      <div class="muted small-txt" id="spState">正在读取设备…</div>
-      <div class="btns" style="margin-top:10px;">
-        <button class="small" id="spkFull" title="打开全屏播放页并切到「音箱」（暂停/音量/倍速/推当前集）">🔊 打开音箱控制</button>
-        <button class="small plain" id="spPlayPl">▶ 在音箱播「本次导入的歌单」</button>
-      </div>
-      <div class="muted small-txt" style="margin-top:8px;">音箱的暂停、停止、音量、倍速、重播都在全屏播放页顶部切到「🔊 音箱」用，和「📱 本机」同一套按钮。</div>
-    </div>
-
     <div class="card">
       <h2>🩺 自检</h2>
       <div class="muted small-txt" id="scSummary">检查中…</div>
@@ -1182,7 +1063,7 @@
 
     <div class="card">
       <h2>📶 网络诊断</h2>
-      <div class="muted small-txt" id="netDiagStat">测一下到喜马拉雅主站、取流接口、图片 CDN 和小米云的连通性与延迟。</div>
+      <div class="muted small-txt" id="netDiagStat">测一下到喜马拉雅主站、取流接口、图片 CDN 的连通性与延迟。</div>
       <div class="btns" style="margin-top:8px;">
         <button class="small" id="btnNetDiag">开始检测</button>
       </div>
@@ -1280,7 +1161,7 @@
     <button class="small plain" id="pPrev" title="上一集">⏮</button>
     <button class="small plain" id="pNext" title="下一集">⏭</button>
     <span class="muted" id="pProg">—</span>
-    <button class="small plain" id="pFull" title="全屏播放页：本机 / 音箱 都在里面切换">⛶ 全屏</button>
+    <button class="small plain" id="pFull" title="全屏播放页：大封面 + 进度 + 倍速">⛶ 全屏</button>
     <button class="small plain" id="pMore" title="更多：队列、书签、复读、单集、定时、音量、倍速、车载" aria-expanded="false" aria-controls="pMorePanel">⋯ 更多</button>
   </div>
   <!-- v0.22.0：「更多」抽屉——播放条只留最常用的几颗，其余全收在这里 -->
@@ -1314,7 +1195,6 @@
         <option value="custom">自定义…</option>
       </select>
       <span class="muted" id="pSleepTip"></span>
-      <button class="small plain" id="pSpk" title="打开音箱播放页：暂停/继续/停止、音量、倍速、推当前集">🔊 音箱</button>
       <button class="small plain" id="pDrive" title="车载模式：大按钮，开车时不开屏幕也能操作">🚗 车载</button>
     </div>
   </div>
@@ -1371,17 +1251,12 @@
   </div>
 </div>
 
-<!-- 全屏播放页（v0.22.0：本机 / 音箱 二合一，一套控件两种目标） -->
+<!-- 全屏播放页 -->
 <div id="fullPlayer">
   <div class="fpwrap">
     <div class="fphead">
       <button class="small plain" id="fpClose" title="退出全屏（Esc）">⌄ 收起</button>
-      <div class="fpseg" id="fpSeg">
-        <button class="on" data-t="local" title="播放这台设备上的声音">📱 本机</button>
-        <button data-t="spk" title="控制小爱音箱">🔊 音箱</button>
-      </div>
       <button class="small plain" id="fpQueue" title="播放队列">☰</button>
-      <button class="small plain" id="spkRefresh" title="刷新音箱状态">↻ 刷新</button>
     </div>
 
     <!-- 面板一：本机 -->
@@ -1415,50 +1290,9 @@
       </div>
     </div>
 
-    <!-- 面板二：音箱 -->
-    <div class="fpane" id="paneSpk">
-      <div class="fpalbum" id="spkName">音箱</div>
-      <div class="spkdisc"><img id="spkCover" alt="" referrerpolicy="no-referrer" /><span id="spkIcon">🔊</span></div>
-      <div class="fpname" id="spkTrack">—</div>
-      <div class="fpmeta" id="spkSub">正在读取音箱状态…</div>
-      <div class="fpprog">
-        <span class="pnum" id="spkPos">0:00</span>
-        <input type="range" id="spkProg" min="0" max="1000" step="1" value="0" title="音箱播放进度（推送到音箱后开始计时）" disabled />
-        <span class="pnum" id="spkDur">0:00</span>
-      </div>
-      <div class="fpctrl">
-        <button class="small plain" id="spkInterrupt" title="打断当前播放（比如正在说话）">✋</button>
-        <button class="fpbig" id="spkToggle" title="暂停 / 继续">⏸</button>
-        <button class="small plain" id="spkStop" title="停止播放">⏹</button>
-      </div>
-      <div class="fpbar">
-        <div class="fprow">
-          <span class="muted">倍速</span>
-          <input type="range" id="spkRate" min="50" max="200" step="5" value="100" title="音箱倍速：0.50x – 2.00x，步进 0.05（松手才下发）" />
-          <span class="pnum" id="spkRateNum">1.00x</span>
-        </div>
-        <div class="fprow spkpre">
-          <button class="spkpre-b" data-v="0.75" title="0.75x">0.75x</button>
-          <button class="spkpre-b on" data-v="1" title="原速">1x</button>
-          <button class="spkpre-b" data-v="1.25" title="1.25x">1.25x</button>
-          <button class="spkpre-b" data-v="1.5" title="1.5x">1.5x</button>
-          <button class="spkpre-b" data-v="1.75" title="1.75x">1.75x</button>
-          <button class="spkpre-b" data-v="2" title="2 倍速">2x</button>
-        </div>
-        <div class="fprow spkvol">
-          <span class="muted">音量</span>
-          <input type="range" id="spkVol" min="0" max="100" step="1" value="40" title="音箱音量（松手才下发）" />
-          <span class="pnum sm" id="spkVolNum">40</span>
-        </div>
-        <div class="fprow">
-          <button class="small plain" id="spkReplay" title="把最近一次在音箱放的这集再放一遍">🔁 重播</button>
-          <button class="small plain" id="spkPush" title="把当前正在听的这集推到音箱">▶ 推当前集</button>
-        </div>
-      </div>
-    </div>
   </div>
 </div>
 
-<script src="static/app.js?v=0.22.5"></script>
+<script src="static/app.js?v=0.23.0"></script>
 </body>
 </html>
