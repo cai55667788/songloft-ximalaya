@@ -196,6 +196,19 @@
     .seekview { position: fixed; z-index: 9600; transform: translate(-50%, -100%); background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 3px 9px; font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: 0 4px 14px rgba(0,0,0,.18); pointer-events: none; white-space: nowrap; }
     .seekview.hide { display: none; }
     #pVol, #pRate, #fpRate { accent-color: var(--accent, #3b82f6); }
+    /* v0.22.4：网络诊断结果行 */
+    .diagrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px dashed var(--border-soft); font-size: 12px; }
+    .diagrow:last-child { border-bottom: none; }
+    .diagdot { font-size: 10px; line-height: 1; }
+    .diagdot.ok { color: #35c07a; }
+    .diagdot.err { color: #e05b5b; }
+    .diagname { flex: 1; min-width: 110px; }
+    .diagrow .ok { color: #35c07a; }
+    .diagrow .warn { color: #d19a2a; }
+    .diagrow .err { color: #e05b5b; }
+    .diagmeta { color: var(--muted); }
+    .diagerr { color: #e05b5b; }
+
     /* 日志 / 自检 */
     .logrow { display: flex; gap: 8px; align-items: flex-start; padding: 6px 2px; border-bottom: 1px dashed var(--border); font-size: 12px; }
     .logrow:last-child { border-bottom: none; }
@@ -824,7 +837,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.22.3</span>
+    <span class="ver" id="ver">v0.22.4</span>
   </div>
 
   <div class="tabs">
@@ -1161,6 +1174,15 @@
     </div>
 
     <div class="card">
+      <h2>📶 网络诊断</h2>
+      <div class="muted small-txt" id="netDiagStat">测一下到喜马拉雅主站、取流接口、图片 CDN 和小米云的连通性与延迟。</div>
+      <div class="btns" style="margin-top:8px;">
+        <button class="small" id="btnNetDiag">开始检测</button>
+      </div>
+      <div id="netDiagOut" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
       <h2>📝 运行日志</h2>
       <div class="muted small-txt" id="logStat">—</div>
       <div class="btns">
@@ -1428,6 +1450,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.22.3"></script>
+<script src="static/app.js?v=0.22.4"></script>
 </body>
 </html>
