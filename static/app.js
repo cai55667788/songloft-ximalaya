@@ -671,8 +671,10 @@
     var label = (t.index ? t.index + '. ' : '') + t.title;
     $('pTitle').textContent = '重连中… ' + label;
     try {
-      var rr = await api('GET', '/track/' + t.trackId + '/url');
+      // v0.22.5：必须 fresh=1 —— 服务端地址缓存 20 分钟，用旧地址会再失败一次
+      var rr = await api('GET', '/track/' + t.trackId + '/url?fresh=1');
       if (!rr || rr.success === false || !rr.data || !rr.data.url) throw new Error((rr && rr.error) || '取不到地址');
+      memoUrl(t.trackId, { url: rr.data.url, local: !!rr.data.local, localPath: rr.data.localPath || '' });
       this.src = rr.data.url;
       if (pos > 1) this.currentTime = Math.max(0, pos - 2);
       this.play().catch(function () { /* 需要用户手势 */ });
@@ -1061,6 +1063,40 @@
   // 但 qi 已经被最后一次点击改掉 → 音频和 qi 错位，进度会写进别的集。
   var playSeq = 0;
 
+  // v0.22.5：地址本（内存）——命中就直接设 src，跳过 150~400ms 的取流请求。
+  // 配合服务端 20 分钟地址缓存 + 列表渲染后预取，目标是「点下去就出声」。
+  var urlMemo = {}, urlFetching = {};
+  function memoUrl(id, info) {
+    if (id && info && info.url) urlMemo[String(id)] = info;
+  }
+  function prefetchTrack(id, hot) {
+    id = String(id || '');
+    if (!id || urlMemo[id] || urlFetching[id]) {
+      if (hot && urlMemo[id] && urlMemo[id].url) warmAudio(urlMemo[id].url);
+      return;
+    }
+    if (queue.length > 60) urlMemo = {};   // 地址本别无限长
+    urlFetching[id] = 1;
+    api('GET', '/track/' + id + '/url').then(function (r) {
+      if (r && r.data && r.data.url) {
+        memoUrl(id, { url: r.data.url, local: !!r.data.local, localPath: r.data.localPath || '' });
+        if (hot) warmAudio(r.data.url);   // 最可能播的那一集，连首包一起预热
+      }
+    }).catch(function () { /* 预取失败不打扰用户 */ }).then(function () { delete urlFetching[id]; });
+  }
+  // 用隐藏的 audio 预缓冲首包：浏览器把开头几十 KB 拉下来，点下去立刻有声音
+  var preBuf = $('preBuf');
+  function warmAudio(url) {
+    if (!preBuf || !url) return;
+    if (preBuf.getAttribute('src') === url) return;
+    try { preBuf.src = url; preBuf.load(); } catch (e) { /* 预缓冲失败无所谓 */ }
+  }
+  // 手指/鼠标按下就取地址：比 click 早约 100ms，弱网下差别很明显
+  document.addEventListener('pointerdown', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-tid]') : null;
+    if (el) prefetchTrack(el.getAttribute('data-tid'));
+  }, true);
+
   async function playAt(idx, retry, seekT) {
     if (idx < 0 || idx >= queue.length) return;
     var my = ++playSeq;
@@ -1080,7 +1116,9 @@
     if (document.body) document.body.classList.add('has-player');
     $('pTitle').textContent = '载入中… ' + label;
     try {
-      var r = await api('GET', '/track/' + t.trackId + '/url');
+      // v0.22.5：地址本命中就直接用，不再等网络（预取一般在手指按下时就已回来）
+      var memo = urlMemo[String(t.trackId)];
+      var r = (memo && memo.url) ? { success: true, data: memo } : await api('GET', '/track/' + t.trackId + '/url');
       // v0.19.4：队列被清空（关播放器 / 清空队列）时也要作废，否则音频会在后台自己响起来，
       // 而且 curPlayingId 永远不会置上 —— 看不见、暂停不了、进度也不落盘。
       if (my !== playSeq || !queue[idx]) return;
@@ -1099,6 +1137,10 @@
       var a = $('audio');
       skipDone = {};
       a.src = r.data.url;
+      memoUrl(t.trackId, { url: r.data.url, local: !!r.data.local, localPath: r.data.localPath || '' });
+      // v0.22.5：顺手把队列后面两集的地址备好，连播几乎零等待
+      if (queue[idx + 1]) prefetchTrack(queue[idx + 1].trackId, true);   // 下一集连首包一起预热
+      if (queue[idx + 2]) prefetchTrack(queue[idx + 2].trackId);
       $('pTitle').textContent = label + (r.data.local ? ' · 📁 本地' : '');
       a.playbackRate = Number(sGet(RATE_KEY) || 1) || 1;
       // v0.19.2：书签/时间线点「从这里听」时必须用指定的时间点。
@@ -2838,6 +2880,7 @@
     list.forEach(function (t) {
       var item = document.createElement('div');
       item.className = 'res-item';
+      item.setAttribute('data-tid', String(t.trackId || ''));   // v0.22.5：按下即预取地址
 
       var img = document.createElement('img');
       img.src = t.cover || '';
@@ -3293,6 +3336,8 @@
     if (!shown) {
       el.innerHTML = '<span class="muted">本页都听完了。取消勾选「只看未听」可以看到全部。</span>';
     }
+    // v0.22.5：本页出来后就把最可能被点的前 3 集地址备好（打开专辑第一集基本即点即播）
+    curVisible.slice(0, 3).forEach(function (t, i) { prefetchTrack(t.trackId, i === 0); });
   }
 
   // 单集收听状态：none 未听 / part 听了没听完 / done 已听完
