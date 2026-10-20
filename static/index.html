@@ -3,6 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <!-- v0.22.5：预连接喜马拉雅与音频 CDN，省掉每次首包的 DNS/TLS 往返 -->
+  <link rel="preconnect" href="https://www.ximalaya.com" crossorigin />
+  <link rel="preconnect" href="https://m.ximalaya.com" crossorigin />
+  <link rel="preconnect" href="https://aod.cos.tx.xmcdn.com" crossorigin />
+  <link rel="preconnect" href="https://imagev2.xmcdn.com" crossorigin />
+  <link rel="dns-prefetch" href="//aod.cos.tx.xmcdn.com" />
+  <link rel="dns-prefetch" href="//imagev2.xmcdn.com" />
   <title>喜马拉雅</title>
   <style>
     :root {
@@ -837,7 +844,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.22.4</span>
+    <span class="ver" id="ver">v0.22.5</span>
   </div>
 
   <div class="tabs">
@@ -1263,7 +1270,9 @@
       <span class="ptitle" id="pTitle">—</span>
       <span class="palbum" id="pAlbum"></span>
     </div>
-    <audio id="audio" controls preload="none"></audio>
+    <audio id="audio" controls preload="auto"></audio>
+    <!-- v0.22.5：预热下一集的首包，点下去连 CDN 首包延迟都省掉 -->
+    <audio id="preBuf" preload="auto" muted style="display:none"></audio>
     <div class="seekview hide" id="seekView"></div>
     <span class="x" id="pClose">×</span>
   </div>
@@ -1450,6 +1459,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.22.4"></script>
+<script src="static/app.js?v=0.22.5"></script>
 </body>
 </html>
