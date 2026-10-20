@@ -56,8 +56,9 @@
     return h;
   }
 
+  var hasQsToken = !!qs.get('token');   // v0.21.7：URL 显式带 token 时不走宿主桥（桥在独立打开时可能没有凭据）
   async function api(method, path, body) {
-    if (sp) {
+    if (sp && !hasQsToken) {
       if (method === 'GET' && sp.apiGet) return sp.apiGet(path);
       if (method === 'POST' && sp.apiPost) return sp.apiPost(path, body === undefined ? {} : body);
       if (method === 'DELETE' && sp.apiDelete) return sp.apiDelete(path);
