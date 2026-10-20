@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.22.5';
+var VERSION = '0.23.0';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -36,9 +36,6 @@ var PROG_KEY = 'progress:v1';
 var STAT_KEY = 'stats:v1';
 var DL_KEY = 'download_job:v1';
 var COOKIE_CHK_KEY = 'cookie_check:v1';
-// v0.19.2：音箱最近状态（音量/上次播的集）要落盘，否则插件重载后「音量 +10」从默认 40 起算
-var SPK_KEY = 'speaker:v1';
-
 var UA_PC = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 var UA_M = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
 var PAGE_SIZE = 30;
@@ -47,12 +44,7 @@ var BATCH = 200;           // 单批建歌上限
 var SYNC_MAX_PAGES = 25;   // 增量同步最多回溯 25 页
 
 var config = {
-  device: { account_id: '', device_id: '', device_name: '' },
-  auto: { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' },
-  tts: {
-    enabled: false, time: '07:30', account_id: '', device_id: '', device_name: '',
-    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, playAfter: false, lastRunDate: ''
-  },
+  auto: { enabled: false, time: '08:30', lastRunDate: '' },
   sync: { progress: true },
   dl: { targetDir: '喜马拉雅', format: 'mp3' },
   // 每天检查一次登录态是否还有效，失效时界面上直接提醒
@@ -66,32 +58,9 @@ var watch = { items: [], job: { running: false, at: '', added: 0, msg: '' } };
 var progress = { tracks: {}, albums: {}, at: '' };
 var login = { cookie: '', savedAt: '' };
 var lastSync = { at: '', result: '', trigger: '' };
-var lastTts = { at: '', text: '', result: '' };
-// v0.18.8：音箱最近一次操作（音量、在播的集），用来支持「音量 +10」这类相对指令
-// 注意别叫 speak：/tts/run 分支里有同名局部变量，var 提升会把全局遮蔽掉（踩过）
-var SPK = { last: {}, play: null };  // play: v0.22.2 音箱播放账本（play-url 端侧查不到进度，用本地时钟推算）
-
-// 音箱进度推算：basePos 是冻结点，playing 时加时钟差
-function spkPosNow() {
-  var p = SPK.play;
-  if (!p) return 0;
-  var pos = (p.basePos || 0) + (p.playing ? (Date.now() - (p.baseAt || Date.now())) / 1000 : 0);
-  if (p.duration) pos = Math.min(pos, p.duration);
-  return Math.max(0, Math.round(pos));
-}
-// 暂停/继续/停止时同步账本
-function spkPlayCtl(act) {
-  var p = SPK.play;
-  if (!p) return;
-  if (act === 'pause' && p.playing) { p.basePos = spkPosNow(); p.playing = false; }
-  else if (act === 'resume' && !p.playing) { p.baseAt = Date.now(); p.playing = true; }
-  else if (act === 'stop') { p.playing = false; p.basePos = 0; }
-}
-
 var syncing = false;
 var importing = false;
 var downloading = false;
-var ttsRunning = false;
 var tickTimer = null;
 
 // ---------- 基础工具 ----------
@@ -267,7 +236,7 @@ async function fetchRetry(url, init, opts) {
   var base = Number(o.backoff) || 600;
   var host = netHost(url);
   var lastErr = null;
-  if (!o.noGate) await netAcquire();   // 本地 miot 调用不排外网队列，避免音箱指令被大批同步挤住
+  if (!o.noGate) await netAcquire();   // noGate：本机回环调用可豁免闸门
   try {
     for (var i = 0; i < tries; i++) {
       netBreakerCheck(host);
@@ -1293,16 +1262,6 @@ async function loadAll() {
   try { var w = await songloft.storage.get(WATCH_KEY); if (w) watch = typeof w === 'string' ? JSON.parse(w) : w; } catch (e) { /* */ }
   try { var bmk = await songloft.storage.get(BM_KEY); if (bmk) bookmarks = typeof bmk === 'string' ? JSON.parse(bmk) : bmk; } catch (e) { /* */ }
   try { var hst = await songloft.storage.get(HIST_KEY); if (hst) history = typeof hst === 'string' ? JSON.parse(hst) : hst; } catch (e) { /* */ }
-  // v0.19.2：恢复音箱上次的音量，相对指令（音量 +10）才有正确基准
-  try {
-    var spk = await songloft.storage.get(SPK_KEY);
-    var sobj = typeof spk === 'string' ? JSON.parse(spk) : spk;
-    // v0.22.2：新格式 { last, play }；旧格式是裸 last 对象
-    if (sobj && typeof sobj === 'object' && sobj.last && typeof sobj.last === 'object') {
-      SPK.last = sobj.last;
-      if (sobj.play && typeof sobj.play === 'object') SPK.play = sobj.play;
-    } else if (sobj && typeof sobj === 'object') SPK.last = sobj;
-  } catch (e) { /* */ }
   // v0.17.0 起移除 AI 功能，旧版本留下的 AI 缓存顺手清掉，别占着存储
   try { await songloft.storage.delete('ai_cache:v1'); } catch (e) { /* */ }
   try {
@@ -1327,7 +1286,6 @@ async function loadAll() {
   // v0.19.4：老配置里可能存着 "8:30" 这种没补零的时间，加载时统一归一化
   try {
     if (config && config.auto) config.auto.time = normHHMM(config.auto.time) || '08:30';
-    if (config && config.tts) config.tts.time = normHHMM(config.tts.time) || '07:30';
     if (config && config.watch && config.watch.time) config.watch.time = normHHMM(config.watch.time) || '';
   } catch (e) { /* */ }
   if (!Array.isArray(bookmarks)) bookmarks = [];
@@ -1340,16 +1298,7 @@ async function loadAll() {
   if (!Array.isArray(todoItems)) todoItems = [];
 
   if (!config || typeof config !== 'object') config = {};
-  if (!config.device) config.device = { account_id: '', device_id: '', device_name: '' };
-  if (!config.auto) config.auto = { enabled: false, time: '08:30', pushDevice: false, lastRunDate: '' };
-  var dftTts = {
-    enabled: false, time: '07:30', account_id: '', device_id: '', device_name: '',
-    prefix: '喜马拉雅更新提醒', maxItems: 3, speakEmpty: false, playAfter: false, lastRunDate: ''
-  };
-  if (!config.tts) config.tts = dftTts;
-  for (var tk in dftTts) {
-    if (Object.prototype.hasOwnProperty.call(dftTts, tk) && config.tts[tk] === undefined) config.tts[tk] = dftTts[tk];
-  }
+  if (!config.auto) config.auto = { enabled: false, time: '08:30', lastRunDate: '' };
   if (!config.sync || typeof config.sync !== 'object') config.sync = { progress: true };
   if (typeof config.sync.progress !== 'boolean') config.sync.progress = true;
   if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
@@ -1363,10 +1312,6 @@ async function loadAll() {
   // 留着的话后台仍会到点自动导入、往音箱推声音，而用户已经找不到开关——
   // 等于「悄悄替你做事」。这里一次性强制关掉，并写一条日志说明。
   var mutedJobs = [];
-  if (config.tts && config.tts.enabled) {
-    config.tts.enabled = false;
-    mutedJobs.push('定时语音播报');
-  }
   if (config.watch && config.watch.enabled) {
     config.watch.enabled = false;
     mutedJobs.push('关键词追更');
@@ -1389,7 +1334,7 @@ async function loadAll() {
   if (!Array.isArray(watch.items)) watch.items = [];
   if (!watch.job || typeof watch.job !== 'object') watch.job = { running: false, at: '', added: 0, msg: '' };
   if (watch.job.running) watch.job.running = false;
-  if (!config.watch || typeof config.watch !== 'object') config.watch = { enabled: false, maxNew: 10, maxAlbums: 3, pushDevice: false };
+  if (!config.watch || typeof config.watch !== 'object') config.watch = { enabled: false, maxNew: 10, maxAlbums: 3 };
   if (config.watch.maxNew === undefined) config.watch.maxNew = 10;
   if (config.watch.maxAlbums === undefined) config.watch.maxAlbums = 3;
 
@@ -1443,8 +1388,6 @@ async function persist() {
   await songloft.storage.set(JOB_KEY, JSON.stringify(job));
   await songloft.storage.set(LOGIN_KEY, JSON.stringify(login));
   await songloft.storage.set(SUB_KEY, JSON.stringify(subs));
-  // v0.19.2：SPK 单独存，别污染 config
-  try { await songloft.storage.set(SPK_KEY, JSON.stringify({ last: SPK.last || {}, play: SPK.play || null })); } catch (e) { /* */ }
 }
 
 async function persistProg() {
@@ -1480,29 +1423,6 @@ function upsertSub(patch) {
   }
   for (var k in patch) if (Object.prototype.hasOwnProperty.call(patch, k)) s[k] = patch[k];
   return s;
-}
-
-// ---------- miot 调用 ----------
-
-async function miotGet(path) {
-  var host = (await songloft.plugin.getHostUrl() || '').replace(/\/+$/, '');
-  var token = await songloft.plugin.getToken();
-  var resp = await fetchRetry(host + '/api/v1/jsplugin/' + MIOT_ENTRY + path,
-    { method: 'GET', headers: { 'Authorization': 'Bearer ' + token } }, { retries: 2, timeout: 8, noGate: true });
-  var text = await resp.text();
-  try { return { ok: resp.ok, data: JSON.parse(text) }; } catch (e) { return { ok: resp.ok, data: null }; }
-}
-
-async function miotPost(path, payload) {
-  var host = (await songloft.plugin.getHostUrl() || '').replace(/\/+$/, '');
-  var token = await songloft.plugin.getToken();
-  var resp = await fetchT(host + '/api/v1/jsplugin/' + MIOT_ENTRY + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-    body: JSON.stringify(payload || {})
-  }, 10);   // 不重试：指令类请求重复执行比失败更糟
-  var text = await resp.text();
-  try { return { ok: resp.ok, data: JSON.parse(text) }; } catch (e) { return { ok: resp.ok, data: null }; }
 }
 
 // ---------- 跨设备收听进度 ----------
@@ -1597,13 +1517,6 @@ function secToHM(sec) {
   return s2 + ' 秒';
 }
 
-// 秒 → 3:20 / 1:05:33，给语音播报用（比「200 秒」自然）
-function fmtClock(sec) {
-  var n = Math.max(0, Math.round(Number(sec) || 0));
-  var h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), s = n % 60;
-  var mm = (h && m < 10 ? '0' : '') + m;
-  return (h ? h + ' 小时 ' : '') + mm + ' 分' + (s ? ' ' + s + ' 秒' : '');
-}
 
 function statRange(fromTs, toTs) {
   var keys = Object.keys(stats.days).sort();
@@ -2367,16 +2280,6 @@ async function runSyncAll(opts) {
     if (opts.markAuto) { config.auto.lastRunDate = todayStr(); }
     await persist();
 
-    if (pushed && config.auto.pushDevice && config.device && config.device.device_id) {
-      try {
-        await miotPost('/player/play', {
-          account_id: config.device.account_id,
-          device_id: config.device.device_id,
-          playlist_id: pushed.playlistId
-        });
-        songloft.log.info('[喜马拉雅] 已把《' + pushed.name + '》推送到音箱');
-      } catch (e) { /* ignore */ }
-    }
     songloft.log.info('[喜马拉雅] 同步完成：' + lastSync.result);
   } finally {
     syncing = false;
@@ -2395,6 +2298,16 @@ function findWatch(id) {
 }
 
 function watchId() { return 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+// 找到某专辑已经导入过的歌单（追更时复用，避免每次追更都建新歌单）
+function playlistForAlbum(albumId) {
+  var sub = findSub(albumId);
+  if (sub && sub.playlistId) return sub.playlistId;
+  for (var i = 0; i < imported.length; i++) {
+    if (String(imported[i].albumId) === String(albumId)) return imported[i].playlistId;
+  }
+  return 0;
+}
 
 async function createOrReusePlaylist(name, cover, desc) {
   try {
@@ -2536,15 +2449,6 @@ async function runWatchAll(opts) {
     watch.job.at = nowStr();
     await persistWatch();
   }
-  // 有新内容时用音箱报告一声
-  if (opts.speak && total > 0) {
-    var dev = ttsDevice();
-    var names = [];
-    results.forEach(function (r) {
-      r.newAlbums.forEach(function (a) { if (a.added) names.push('《' + a.name + '》' + a.added + '集'); });
-    });
-    if (names.length) await speakOnDevice(dev, '关注更新：' + names.slice(0, 3).join('，') + '，已加入歌单');
-  }
   return { ok: true, added: total, checked: watch.items.length, results: results };
 }
 
@@ -2553,16 +2457,6 @@ async function tick() {
   var now = hhmmNow();
   var today = todayStr();
 
-  // 语音设的定时停止：到点就停音箱，只停一次
-  if (sleepArmed && Date.now() >= sleepArmed.until) {
-    var sdv = ttsDevice();
-    if (sdv.account_id && sdv.device_id) {
-      try { await miotPost('/mina/pause', { account_id: sdv.account_id, device_id: sdv.device_id }); } catch (e) { /* */ }
-    }
-    logInfo('voice', '定时停止已执行（' + sleepArmed.minutes + ' 分钟）');
-    sleepArmed = null;
-  }
-
   // ⓪ 登录态巡检：每天一次（登录失效会让同步与播放静默失败，早点发现早点提醒）
   if (login.cookie && config.cookieCheck !== false &&
     (!cookieCheck.lastCheckDay || cookieCheck.lastCheckDay !== today)) {
@@ -2570,32 +2464,8 @@ async function tick() {
     try { await checkCookieHealth(true); } catch (e) { /* 巡检失败不影响主流程 */ }
   }
 
-  // 定时语音播报：到点先同步（内部会追加新集），再把结果读出来
-  var t = config.tts || {};
-  var ttsRan = false;   // v0.19.2：播报内部已全量同步过，本轮的「定时自动同步」可跳过
-  if (t.enabled && t.lastRunDate !== today && hmMin(now) >= hmMin(t.time || '07:30')) {
-    var dev = ttsDevice();
-    if (dev.account_id && dev.device_id) {
-      songloft.log.info('[喜马拉雅] 触发定时语音播报（设定 ' + t.time + '）');
-      var res = await runTtsReport({ speak: true, trigger: '定时播报' });
-      if (!res.spoken) songloft.log.warn('[喜马拉雅] 播报未发出: ' + res.error);
-      ttsRan = true;
-      // v0.19.2：无论播报成功与否都标记今天已跑。
-      // 原来只有真正下发 TTS 才写 lastRunDate，而「没有新集，不播报」是常态，
-      // 于是条件永远成立 → tick 每 60 秒跑一次全量同步，风控 + 日志刷屏。
-      t.lastRunDate = today;
-      await persist();
-    } else {
-      // v0.18.7：没选音箱也要标记「今天已提醒」，否则 tick 每 60 秒刷一条警告，
-      // 几分钟就把 100 条日志缓冲刷满，真正有用的错误全被挤掉。
-      songloft.log.warn('[喜马拉雅] 定时播报已开启但没有选音箱，今天跳过（次日再提醒）');
-      t.lastRunDate = today;
-      await persist();
-    }
-  }
-
   // 定时自动同步（播报刚同步过就不重复跑，避免一天两次全量抓取）
-  if (!ttsRan && config.auto && config.auto.enabled && config.auto.lastRunDate !== today && hmMin(now) >= hmMin(config.auto.time || '08:30')) {
+  if (config.auto && config.auto.enabled && config.auto.lastRunDate !== today && hmMin(now) >= hmMin(config.auto.time || '08:30')) {
     songloft.log.info('[喜马拉雅] 触发定时同步（设定 ' + config.auto.time + '）');
     await runSyncAll({ import: true, markAuto: true, trigger: '定时' });
   }
@@ -2608,7 +2478,7 @@ async function tick() {
     // v0.18.7：上次因任务占用没跑成时，等 1 小时再试，避免每分钟都去撞
     if (wc.lastTryAt && (Date.now() - (new Date(String(wc.lastTryAt).replace(' ', 'T')).getTime() || 0)) < 3600000) return;
     songloft.log.info('[喜马拉雅] 触发关键词追更，共 ' + watch.items.length + ' 个关键词');
-    var wr = await runWatchAll({ speak: !!wc.pushDevice });
+    var wr = await runWatchAll({});
     // v0.18.7：任务被并发占用（返回 ok:false）时不能标记今天已跑，
     // 否则当天定时追更被吞掉，用户以为追过了其实一集没拉。
     if (wr && wr.ok === false) {
@@ -2624,145 +2494,6 @@ async function tick() {
     await persist();
     songloft.log.info('[喜马拉雅] 关键词追更：' + wc.lastMessage);
   }
-}
-
-// ---------- 定时语音播报（TTS） ----------
-
-function ttsDevice() {
-  var t = config.tts || {};
-  var d = config.device || {};
-  var acc = t.account_id || d.account_id || '';
-  var dev = t.device_id || d.device_id || '';
-  var name = t.device_name || d.device_name || '';
-  return { account_id: acc, device_id: dev, device_name: name };
-}
-
-// v0.18.8：音箱播放控制用的设备解析——显式传入优先，否则用设置页绑定的那台
-function speakerDevice(deviceId) {
-  var d = config.device || {};
-  var acc = d.account_id || '';
-  var dev = String(deviceId || d.device_id || '');
-  var name = d.device_name || '';
-  return { account_id: acc, device_id: dev, device_name: name };
-}
-
-// miot 的返回有两种失败形态：HTTP 非 2xx，或 200 但体内 success:false
-function miotOk(r) {
-  if (!r || !r.ok) return false;
-  if (r.data && r.data.success === false) return false;
-  return true;
-}
-
-function miotErr(r) {
-  if (r && r.data && r.data.error) return String(r.data.error);
-  if (r && r.data && r.data.message) return String(r.data.message);
-  return '音箱没有响应，可在自检页确认设备是否在线';
-}
-
-// 把「本次同步的新增」拼成一段适合 TTS 朗读的话
-function buildTtsText(updates, totalAdded) {
-  var prefix = String((config.tts && config.tts.prefix) || '喜马拉雅更新提醒').trim();
-  var list = (updates || []).filter(function (u) { return u && u.added > 0; });
-  var body;
-  if (!list.length) {
-    body = '今天的订阅没有新的集数。';
-  } else {
-    var maxItems = Math.max(1, Number(config.tts && config.tts.maxItems) || 3);
-    var shown = list.slice(0, maxItems);
-    var parts = shown.map(function (u) {
-      return '《' + String(u.name || '').replace(/[《》]/g, '') + '》更新' + u.added + '集';
-    });
-    body = parts.join('，');
-    if (list.length > shown.length) body += '，等' + list.length + '张专辑';
-    body += '，一共' + totalAdded + '集已经加入歌单。';
-    // 带最新一集的名字，听起来更有信息量
-    var first = shown[0];
-    if (first && first.titles && first.titles.length) {
-      var last = String(first.titles[first.titles.length - 1] || '');
-      if (last) body += '《' + String(first.name || '').replace(/[《》]/g, '') + '》最新一集是' + last.replace(/^\d+\.\s*/, '') + '。';
-    }
-  }
-  var text = prefix ? (prefix.replace(/[。，,.\s]+$/, '') + '。' + body) : body;
-  if (text.length > 480) text = text.slice(0, 478) + '。';
-  return text;
-}
-
-// 同步订阅并生成播报稿；opts.speak=true 时下发到音箱
-async function runTtsReport(opts) {
-  opts = opts || {};
-  var sync = { newCount: 0, checked: 0, errors: [], updates: [] };
-  try {
-    sync = await runSyncAll({ import: true, trigger: opts.trigger || '语音播报' });
-  } catch (e) {
-    songloft.log.warn('[喜马拉雅] 播报前同步失败: ' + String(e));
-  }
-  var updates = sync.updates || [];
-  var totalAdded = Number(sync.newCount) || 0;
-  var text = opts.text || buildTtsText(updates, totalAdded);
-  var out = { text: text, spoken: false, device: null, error: '', newCount: totalAdded, checked: sync.checked || 0 };
-
-  if (!opts.speak) return out;
-  if (!updates.length && !(config.tts && config.tts.speakEmpty)) {
-    out.error = '没有新集，不播报';
-    return out;
-  }
-  var dev = ttsDevice();
-  if (!dev.account_id || !dev.device_id) {
-    out.error = '没有配置播报音箱（请先在设置里选设备）';
-    return out;
-  }
-  try {
-    var r = await miotPost('/mina/tts', { account_id: dev.account_id, device_id: dev.device_id, text: text });
-    if (!r.ok || (r.data && r.data.success === false)) {
-      out.error = 'TTS 下发失败: ' + ((r.data && r.data.error) || 'HTTP');
-    } else {
-      out.spoken = true;
-      out.device = dev.device_name || dev.device_id;
-    }
-  } catch (e) {
-    out.error = 'TTS 下发异常: ' + String(e);
-  }
-  lastTts = { at: nowStr(), text: text, result: out.spoken ? ('已播报到 ' + (out.device || '音箱')) : (out.error || '未播报') };
-  if (config.tts) { config.tts.lastRunDate = todayStr(); await persist(); }
-
-  // 播完自动接着放「最近在听的那本书」，通勤/睡前不用再摸手机
-  if (out.spoken && config.tts && config.tts.playAfter) {
-    try {
-      var cont = await continueListeningOnDevice(dev);
-      if (cont && cont.ok) out.resumed = cont.text;
-    } catch (e2) { out.resumed = ''; }
-  }
-  songloft.log.info('[喜马拉雅] 语音播报：' + lastTts.result + (out.resumed ? '；续播：' + out.resumed : ''));
-  return out;
-}
-
-// 找「最近在听、还没听完」的那本书，在音箱上接着放
-async function continueListeningOnDevice(dev) {
-  var best = null;
-  Object.keys(progress.albums || {}).forEach(function (aid) {
-    var a = progress.albums[aid];
-    if (!a || !a.trackId) return;
-    if (!(Number(a.t) > 20)) return;              // 太靠前说明刚点开
-    if (a.finished) return;
-    var at = Number(a.at) || 0;
-    if (!best || at > best.at) {
-      best = {
-        albumId: aid, trackId: a.trackId, index: a.index, title: a.title,
-        t: a.t, d: a.d, at: at, albumName: a.albumName, cover: a.cover
-      };
-    }
-  });
-  if (!best) return { ok: false, text: '' };
-  // 这本书必须已经导入成歌单，否则音箱放不了
-  var pl = null;
-  for (var i = 0; i < imported.length; i++) if (String(imported[i].albumId) === String(best.albumId)) { pl = imported[i]; break; }
-  if (!pl) return { ok: false, text: '' };
-  var r = await miotPost('/mina/play', {
-    account_id: dev.account_id, device_id: dev.device_id,
-    playlist_id: pl.playlistId, mode: 'order'
-  });
-  if (!r.ok) return { ok: false, text: '' };
-  return { ok: true, text: '《' + (pl.name || best.albumName || '') + '》' };
 }
 
 // ---------- 整本下载到本地音乐目录 ----------
@@ -3400,40 +3131,11 @@ async function runSelfCheck(deep) {
     }
   }
 
-  // 6 音箱
-  // v0.18.3：改用 /mina/devices 探测——miot 插件 2026.10.17 版之后
-  // POST /mina/status 会 404，导致自检误报「设备无响应」，其实音箱一直在线。
-  var dev = config.device || {};
-  if (!dev.account_id || !dev.device_id) add('miot', '小爱音箱', 'warn', '未绑定设备，语音播报与语音控制不可用');
-  else {
-    var found = null;
-    try {
-      var dl = await miotGet('/mina/devices');
-      var arr = (dl.data && dl.data.data) || [];
-      arr.forEach(function (a) {
-        (a.devices || []).forEach(function (x) { if (x.deviceID === dev.device_id) found = x; });
-      });
-    } catch (e) { /* 走下面的兜底探测 */ }
-    if (found) {
-      add('miot', '小爱音箱', found.presence === 'offline' ? 'warn' : 'ok',
-        (found.name || dev.device_name || '设备') + (found.presence === 'online' ? ' 在线' : ' 离线（可稍后重试）'));
-    } else {
-      try {
-        var st0 = await miotPost('/mina/status', { account_id: dev.account_id, device_id: dev.device_id });
-        add('miot', '小爱音箱', st0.ok ? 'ok' : 'warn', st0.ok ? ((dev.device_name || '设备') + ' 可访问') : '设备列表里找不到已绑定的设备（可到设置页重新绑定）');
-      } catch (e) {
-        add('miot', '小爱音箱', 'warn', '调用失败：' + String(e && e.message || e));
-      }
-    }
-  }
-
   // 7 定时任务状态
   var autoOk = !config.auto.enabled || (config.auto.time && /^\d{1,2}:\d{2}$/.test(config.auto.time));
   add('auto', '定时同步', config.auto.enabled ? (autoOk ? 'ok' : 'warn') : 'ok',
     config.auto.enabled ? '每天 ' + config.auto.time + '，上次 ' + (config.auto.lastRunDate || '未执行')
       : '未启用');
-  add('tts', '定时播报', config.tts && config.tts.enabled ? (dev.account_id ? 'ok' : 'warn') : 'ok',
-    config.tts && config.tts.enabled ? ('每天 ' + config.tts.time + '，上次 ' + (config.tts.lastRunDate || '未执行')) : '未启用');
 
   // 8 数据量
   add('data', '本地数据', 'ok',
@@ -3460,6 +3162,58 @@ async function runSelfCheck(deep) {
 }
 
 
+// ---------- 待听清单（想听但先存着，不占歌单） ----------
+var TODO_KEY = 'todo:v1';
+var todoItems = [];
+
+function todoList() { return todoItems; }
+
+function todoAdd(it) {
+  if (!it || !it.albumId) return false;
+  for (var i = 0; i < todoItems.length; i++) {
+    if (String(todoItems[i].albumId) === String(it.albumId)) {
+      todoItems[i].at = Date.now();
+      if (!todoItems[i].cover && it.cover) todoItems[i].cover = it.cover;
+      if (it.note) todoItems[i].note = it.note;
+      persistTodo();
+      return true;
+    }
+  }
+  todoItems.unshift({
+    albumId: String(it.albumId), name: it.name || '', author: it.author || '',
+    cover: it.cover || '', note: it.note || '', at: Date.now()
+  });
+  if (todoItems.length > 200) todoItems.length = 200;
+  persistTodo();
+  return true;
+}
+
+// 待听 → 导入成功后自动出清单（免得同一本反复出现）
+function todoDrop(albumIds) {
+  var set = {};
+  (albumIds || []).forEach(function (x) { set[String(x)] = 1; });
+  var before = todoItems.length;
+  todoItems = todoItems.filter(function (x) { return !set[String(x.albumId)]; });
+  if (todoItems.length !== before) persistTodo();
+  return before - todoItems.length;
+}
+
+function todoRemove(albumId) {
+  var n = todoItems.length;
+  todoItems = todoItems.filter(function (x) { return String(x.albumId) !== String(albumId); });
+  persistTodo();
+  return todoItems.length < n;
+}
+
+var todoSaveTimer = null;
+function persistTodo() {
+  if (todoSaveTimer) clearTimeout(todoSaveTimer);
+  todoSaveTimer = setTimeout(function () {
+    todoSaveTimer = null;
+    try { songloft.storage.set(TODO_KEY, JSON.stringify(todoItems)); } catch (e) { /* */ }
+  }, 300);
+}
+
 async function handleHTTPRequest(req) {
   var path = normPath(req.path || '');
   var method = (req.method || 'GET').toUpperCase();
@@ -3469,34 +3223,12 @@ async function handleHTTPRequest(req) {
 
   if (path === '/config' && method === 'POST') {
     var body = readBodyJson(req);
-    if (body.device) {
-      config.device = {
-        account_id: body.device.account_id || '',
-        device_id: body.device.device_id || '',
-        device_name: body.device.device_name || ''
-      };
-    }
     if (body.auto) {
       var a = body.auto;
       if (typeof a.enabled === 'boolean') config.auto.enabled = a.enabled;
       var aTv = normHHMM(a.time);
       if (aTv) config.auto.time = aTv;
-      if (typeof a.pushDevice === 'boolean') config.auto.pushDevice = a.pushDevice;
       if (a.lastRunDate === '') config.auto.lastRunDate = '';
-    }
-    if (body.tts) {
-      var t = body.tts;
-      if (typeof t.enabled === 'boolean') config.tts.enabled = t.enabled;
-      var tTv = normHHMM(t.time);
-      if (tTv) config.tts.time = tTv;
-      if (typeof t.account_id === 'string') config.tts.account_id = t.account_id;
-      if (typeof t.device_id === 'string') config.tts.device_id = t.device_id;
-      if (typeof t.device_name === 'string') config.tts.device_name = t.device_name;
-      if (typeof t.prefix === 'string') config.tts.prefix = t.prefix.slice(0, 40);
-      if (t.maxItems !== undefined) config.tts.maxItems = Math.max(1, Math.min(8, Number(t.maxItems) || 3));
-      if (typeof t.speakEmpty === 'boolean') config.tts.speakEmpty = t.speakEmpty;
-      if (typeof t.playAfter === 'boolean') config.tts.playAfter = t.playAfter;
-      if (t.lastRunDate === '') config.tts.lastRunDate = '';
     }
     if (body.sync) {
       if (typeof body.sync.progress === 'boolean') config.sync.progress = body.sync.progress;
@@ -3520,7 +3252,6 @@ async function handleHTTPRequest(req) {
         lastSync: lastSync, syncing: syncing, version: VERSION,
         loggedIn: !!login.cookie,
         dlJob: dlJob,
-        tts: { cfg: config.tts, last: lastTts, device: ttsDevice() },
         progressStat: { tracks: Object.keys(progress.tracks).length, albums: Object.keys(progress.albums).length, at: progress.at || '' },
         syncCfg: config.sync, dlCfg: config.dl,
         watch: { cfg: config.watch, items: watch.items, job: watch.job }
@@ -3573,16 +3304,6 @@ async function handleHTTPRequest(req) {
         avgText: secToHM(dayN ? totalSec / dayN : 0)
       }
     });
-  }
-
-  if (path === '/report/speak' && method === 'POST') {
-    var rb = readBodyJson(req) || {};
-    var rp2 = buildReport(String(rb.period || 'week'));
-    if (rp2.period === 'month') rp2.text = rp2.text;
-    var dev2 = ttsDevice();
-    var spoke = await speakOnDevice(dev2, rp2.text);
-    return jsonResp({ success: spoke, data: { text: rp2.text, spoken: spoke, device: dev2.device_name || dev2.device_id },
-      error: spoke ? undefined : '播报失败，请检查音箱设置' });
   }
 
   if (path === '/report/reset' && method === 'POST') {
@@ -4717,47 +4438,7 @@ async function handleHTTPRequest(req) {
     return jsonResp({ success: true, data: { message: '已请求停止，当前这一集下载完就停' } });
   }
 
-  // ---------- 定时语音播报 ----------
-  // 预览：只用「已检查到的更新」拼稿，不做同步，秒回
-  if (path === '/tts/preview' && (method === 'POST' || method === 'GET')) {
-    var ups = [];
-    for (var ui = 0; ui < subs.length; ui++) {
-      var su = subs[ui];
-      if (Number(su.newCount) > 0) ups.push({ name: su.name, added: Number(su.newCount), titles: su.newTitles || [] });
-    }
-    var tot = 0;
-    for (var uj = 0; uj < ups.length; uj++) tot += ups[uj].added;
-    return jsonResp({
-      success: true,
-      data: {
-        text: buildTtsText(ups, tot), newCount: tot, albums: ups.length,
-        device: ttsDevice(),
-        hint: ups.length ? '' : '暂时没有已知的新集（可先「立即全部同步」再预览）'
-      }
-    });
-  }
-
-  // 播报：同步 + TTS 耗时远超宿主 60s 限制，必须异步立即返回
-  if (path === '/tts/run' && method === 'POST') {
-    if (ttsRunning) return jsonResp({ success: false, error: '播报任务已在运行' }, 409);
-    var tb2 = readBodyJson(req);
-    var ttsSpeak = tb2.speak !== false;
-    var custom = String(tb2.text || '').trim();
-    var dev2 = ttsDevice();
-    if (ttsSpeak && (!dev2.account_id || !dev2.device_id)) {
-      return jsonResp({ success: false, error: '没有配置播报音箱，请先在「设置」里选择设备' }, 400);
-    }
-    ttsRunning = true;
-    runTtsReport({ speak: ttsSpeak, text: custom, trigger: '手动' })
-      .catch(function (e) { songloft.log.warn('[喜马拉雅] 播报异常: ' + String(e)); })
-      .then(function () { ttsRunning = false; });
-    return jsonResp({ success: true, data: { message: '已开始同步并播报，稍后留意音箱' } });
-  }
-
-  // ---------- 音箱播放控制（v0.18.8） ----------
-  // 实测可用：/mina/volume、/mina/pause、/mina/resume、/mina/stop、/mina/play-url
-  //（/mina/status 在新版 miot 上 POST 不通，不要拿来判状态）
-  // v0.22.4：网络诊断——设置页一键测「主站 / 取流接口 / 图片 CDN / 小米云」的连通性与延迟
+  // v0.22.4：网络诊断——设置页一键测「主站 / 取流接口 / 图片 CDN」的连通性与延迟
   if (path === '/net/health' && method === 'GET') {
     var hxh = { 'User-Agent': UA_PC, 'Referer': 'https://www.ximalaya.com/' };
     var probes = [
@@ -4775,785 +4456,14 @@ async function handleHTTPRequest(req) {
         hitems.push({ name: prb.name, ok: false, ms: Date.now() - t0, error: String(eH && eH.message || eH) });
       }
     }
-    var hdev = speakerDevice();
-    if (hdev.account_id && hdev.device_id) {
-      var t1 = Date.now();
-      try {
-        var hd = await miotGet('/mina/devices');
-        hitems.push({ name: '小米云 · 音箱列表', ok: !!(hd && hd.ok), ms: Date.now() - t1 });
-      } catch (eH2) {
-        hitems.push({ name: '小米云 · 音箱列表', ok: false, ms: Date.now() - t1, error: String(eH2 && eH2.message || eH2) });
-      }
-    }
     return jsonResp({
       success: true,
       data: { at: Date.now(), items: hitems, active: netActive, queued: netWait.length, cache: netCacheN }
     });
   }
 
-  if (path === '/speaker/state' && method === 'GET') {
-    var spDev = speakerDevice(q.device_id);
-    if (!spDev.account_id || !spDev.device_id) {
-      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
-    }
-    var spVol = null, spName = spDev.device_name || '';
-    try {
-      var dl2 = await miotGet('/mina/devices');
-      var arr2 = (dl2.data && dl2.data.data) || [];
-      arr2.forEach(function (a) {
-        (a.devices || []).forEach(function (x) {
-          if (x.deviceID === spDev.device_id) {
-            spName = x.name || spName;
-            if (x.presence) spDev.presence = x.presence;
-            if (typeof x.volume === 'number') spVol = x.volume;
-          }
-        });
-      });
-    } catch (e) { /* 拿不到设备列表就用缓存 */ }
-    // v0.22.2：合并音箱实时播放状态；play-url 的 position 端侧恒为 0，进度用本地账本推算
-    var media2 = null;
-    if (SPK.play && SPK.play.trackId) {
-      var st2 = null, changed2 = false;
-      try {
-        var ms2 = await miotGet('/mina/status?account_id=' + encodeURIComponent(spDev.account_id) + '&device_id=' + encodeURIComponent(spDev.device_id));
-        if (ms2.ok && ms2.data && ms2.data.success !== false) st2 = ms2.data.data || ms2.data;
-      } catch (eS) { /* 状态拿不到就维持账本原样 */ }
-      if (st2) {
-        var devPlaying2 = st2.state === 'playing' || st2.is_playing === true;
-        if (devPlaying2 && !SPK.play.playing) { SPK.play.baseAt = Date.now(); SPK.play.playing = true; changed2 = true; }
-        else if (!devPlaying2 && SPK.play.playing) { SPK.play.basePos = spkPosNow(); SPK.play.playing = false; changed2 = true; }
-      }
-      var pos2 = spkPosNow();
-      if (SPK.play.duration && pos2 >= SPK.play.duration - 1 && SPK.play.playing) {
-        SPK.play.playing = false; SPK.play.basePos = SPK.play.duration; pos2 = SPK.play.duration; changed2 = true;
-      }
-      if (changed2) { try { await songloft.storage.set(SPK_KEY, JSON.stringify({ last: SPK.last || {}, play: SPK.play || null })); } catch (eP) { /* */ } }
-      media2 = {
-        trackId: SPK.play.trackId, title: SPK.play.title || (SPK.last && SPK.last.title) || '',
-        cover: httpsUrl(SPK.play.cover || (SPK.last && SPK.last.cover)),
-        duration: SPK.play.duration || (SPK.last && SPK.last.duration) || 0,
-        position: pos2, playing: !!SPK.play.playing
-      };
-    }
-    return jsonResp({
-      success: true,
-      data: {
-        account_id: spDev.account_id,
-        device_id: spDev.device_id,
-        device_name: spName,
-        presence: spDev.presence || 'unknown',
-        volume: spVol,
-        last: (SPK.last || null),
-        media: media2
-      }
-    });
-  }
-
-  // 统一的「一条指令打到音箱」入口
-  if (path === '/speaker/ctl' && method === 'POST') {
-    var cb = readBodyJson(req);
-    var act = String(cb.action || '').trim();
-    var sdev = speakerDevice(cb.device_id);
-    if (!sdev.account_id || !sdev.device_id) {
-      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
-    }
-    var base = { account_id: sdev.account_id, device_id: sdev.device_id };
-    var actMap = {
-      pause: ['/mina/pause', base, '已暂停'],
-      resume: ['/mina/resume', base, '已继续'],
-      stop: ['/mina/stop', base, '已停止'],
-      interrupt: ['/mina/interrupt', base, '已打断当前播放']
-    };
-    try {
-      if (act === 'volume') {
-        var vol = Number(cb.volume);
-        if (!isFinite(vol)) return jsonResp({ success: false, error: '音量需要 0-100 的数字' }, 400);
-        vol = Math.max(0, Math.min(100, Math.round(vol)));
-        var rv = await miotPost('/mina/volume', Object.assign({}, base, { volume: vol }));
-        if (!miotOk(rv)) return jsonResp({ success: false, error: miotErr(rv) }, 500);
-        SPK.last = SPK.last || {};
-        SPK.last.volume = vol;
-        await persist();
-        return jsonResp({ success: true, data: { message: '音量已调到 ' + vol, volume: vol } });
-      }
-      if (act === 'volup' || act === 'voldown') {
-        var cur = Number(SPK.last && SPK.last.volume);
-        if (!isFinite(cur)) cur = 40;
-        var step = Math.max(1, Math.min(30, Number(cb.step) || 10));
-        var nv = Math.max(0, Math.min(100, act === 'volup' ? cur + step : cur - step));
-        var rv2 = await miotPost('/mina/volume', Object.assign({}, base, { volume: nv }));
-        if (!miotOk(rv2)) return jsonResp({ success: false, error: miotErr(rv2) }, 500);
-        SPK.last = SPK.last || {};
-        SPK.last.volume = nv;
-        await persist();
-        return jsonResp({ success: true, data: { message: '音量 ' + nv, volume: nv } });
-      }
-      if (actMap[act]) {
-        var rr3 = await miotPost(actMap[act][0], actMap[act][1]);
-        if (!miotOk(rr3)) return jsonResp({ success: false, error: miotErr(rr3) }, 500);
-        spkPlayCtl(act);   // v0.22.2：暂停/继续/停止同步本地进度账本
-        await persist();
-        return jsonResp({ success: true, data: { message: actMap[act][2] } });
-      }
-      return jsonResp({ success: false, error: '不认识的动作: ' + act }, 400);
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 500);
-    }
-  }
-
-  // v0.21.3：音箱倍速（转发 miot /player/speed，范围 0.5–2.0；
-  // 仅对 miot 播放队列生效，电台/无时长曲目 miot 只记住不实时生效）
-  if (path === '/speaker/speed' && method === 'POST') {
-    var sb1 = readBodyJson(req);
-    var spd1 = Number(sb1.speed);
-    if (!isFinite(spd1)) return jsonResp({ success: false, error: '缺少 speed（0.5–2.0）' }, 400);
-    spd1 = Math.max(0.5, Math.min(2, Math.round(spd1 * 100) / 100));
-    var sdev1 = speakerDevice(sb1.device_id);
-    if (!sdev1.account_id || !sdev1.device_id) {
-      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
-    }
-    try {
-      var rs1 = await miotPost('/player/speed', { account_id: sdev1.account_id, device_id: sdev1.device_id, speed: spd1 });
-      if (!miotOk(rs1)) return jsonResp({ success: false, error: miotErr(rs1) }, 500);
-      var spdMsg1 = (rs1.data && rs1.data.data && rs1.data.data.message) || '';
-      return jsonResp({ success: true, data: { message: '音箱倍速 ' + spd1.toFixed(2) + 'x' + (spdMsg1 ? '（' + spdMsg1 + '）' : ''), speed: spd1 } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 500);
-    }
-  }
-
-  // 让音箱播「这一集」：取直链 → /mina/play-url
-  if (path === '/speaker/play-track' && method === 'POST') {
-    var pb = readBodyJson(req);
-    var tid = String(pb.track_id || pb.trackId || '').trim();
-    if (!tid) return jsonResp({ success: false, error: '缺少 track_id' }, 400);
-    var pdev2 = speakerDevice(pb.device_id);
-    if (!pdev2.account_id || !pdev2.device_id) {
-      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
-    }
-    try {
-      var meta2 = null;
-      try { meta2 = await fetchTrackMeta(tid); } catch (eM) { /* 元数据失败不挡播放 */ }
-      var link2 = (pb.url || '').trim();
-      if (!link2) link2 = (meta2 && (meta2.play_path_64 || meta2.play_path_32 || meta2.play_path)) || '';
-      if (!link2) link2 = await fetchTrackUrl(tid);
-      if (!link2) return jsonResp({ success: false, error: '取不到这一集的播放地址（可能需要登录）' }, 502);
-      if (pb.volume !== undefined && pb.volume !== null && pb.volume !== '') {
-        var pv = Math.max(0, Math.min(100, Number(pb.volume) || 0));
-        await miotPost('/mina/volume', { account_id: pdev2.account_id, device_id: pdev2.device_id, volume: pv });
-        SPK.last = SPK.last || {};
-        // v0.19.2：原写成 speak.last（未声明，'use strict' 下必抛 ReferenceError → 整个请求 500）
-        SPK.last.volume = pv;
-      }
-      var rp = await miotPost('/mina/play-url', {
-        account_id: pdev2.account_id, device_id: pdev2.device_id, url: link2
-      });
-      if (!miotOk(rp)) return jsonResp({ success: false, error: miotErr(rp) }, 500);
-      var spkTitle2 = String(pb.title || (meta2 && meta2.title) || '');
-      SPK.last = Object.assign(SPK.last || {}, {
-        trackId: tid, title: spkTitle2, at: nowStr(), url: link2,
-        cover: httpsUrl(meta2 && (meta2.cover_url || meta2.cover_middle || meta2.cover_small)),
-        duration: Number(meta2 && meta2.duration) || 0
-      });
-      // v0.22.2：播放账本——从 0 开始计时，暂停/继续/停止由 spkPlayCtl 维护
-      SPK.play = {
-        trackId: tid, title: spkTitle2,
-        cover: SPK.last.cover, duration: SPK.last.duration,
-        basePos: 0, baseAt: Date.now(), playing: true
-      };
-      await persist();
-      return jsonResp({ success: true, data: { message: '已在音箱播放' + (pb.title ? '：' + pb.title : '') } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 500);
-    }
-  }
-
-  // 让音箱播整个歌单（走 miot 的 /player/play）
-  if (path === '/speaker/play-playlist' && method === 'POST') {
-    var qb = readBodyJson(req);
-    var qpl = Number(qb.playlist_id) || 0;
-    var qdev = speakerDevice(qb.device_id);
-    if (!qdev.account_id || !qdev.device_id) {
-      return jsonResp({ success: false, error: '还没有绑定音箱，请到设置页选择设备' }, 400);
-    }
-    if (!qpl) return jsonResp({ success: false, error: '缺少 playlist_id' }, 400);
-    try {
-      var body2 = { account_id: qdev.account_id, device_id: qdev.device_id, playlist_id: qpl };
-      if (qb.mode === 'random') { body2.play_mode = 'random'; body2.start_position = 'random'; }
-      var rr4 = await miotPost('/player/play', body2);
-      if (!miotOk(rr4)) return jsonResp({ success: false, error: miotErr(rr4) }, 500);
-      return jsonResp({ success: true, data: { message: '已在音箱播放歌单' } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 500);
-    }
-  }
-
-  if (path === '/devices' && method === 'GET') {
-    var devs = await miotGet('/mina/devices');
-    return jsonResp({ success: devs.ok, data: devs.data });
-  }
-
-  if (path === '/play' && method === 'POST') {
-    try {
-      var b6 = readBodyJson(req);
-      var acc = (b6.account_id || (config.device && config.device.account_id) || '');
-      var dev = (b6.device_id || (config.device && config.device.device_id) || '');
-      var pl = Number(b6.playlist_id) || 0;
-      if (!acc || !dev || !pl) return jsonResp({ success: false, error: '缺少 account/device/playlist 参数' }, 400);
-      var playBody = { account_id: acc, device_id: dev, playlist_id: pl };
-      if (b6.mode === 'random') { playBody.play_mode = 'random'; playBody.start_position = 'random'; }
-      var r = await miotPost('/player/play', playBody);
-      if (!r.ok || (r.data && r.data.success === false)) {
-        return jsonResp({ success: false, error: (r.data && r.data.error) || 'HTTP ' + r.status }, 500);
-      }
-      return jsonResp({ success: true, data: { message: '已在音箱开始播放' } });
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 500);
-    }
-  }
-
-  // 文字 / 语音指令 → 在音箱上播（确定性解析）
-  if (path === '/voice' && method === 'POST') {
-    try {
-      var vb = readBodyJson(req);
-      var say = String(vb.text || vb.cmd || '').trim();
-      if (!say) return jsonResp({ success: false, error: '请说一句指令，比如「播郭德纲第 5 集」' }, 400);
-      var vr = await runVoiceCommand(say, {
-        account_id: vb.account_id,
-        device_id: vb.device_id,
-        speak: vb.speak !== false
-      });
-      return jsonResp({ success: !vr.error, data: vr, error: vr.error || undefined }, vr.error ? 400 : 200);
-    } catch (e) {
-      return jsonResp({ success: false, error: String(e) }, 500);
-    }
-  }
-
   return jsonResp({ success: false, error: 'not found: ' + path }, 404);
 }
-
-// ---------- 语音 / 文字指令 ----------
-// 支持的句式（尽量宽松，按顺序匹配）：
-//   播/放/听 + <专辑名> [+第N集|第N回|最后一集|最新一集]
-//   继续听 <专辑名>            从上次位置续播
-//   来点/随便放 + <专辑名>      随机起播
-//   暂停 / 继续 / 停止 / 下一集 / 上一集 / 声音大点 / 声音小点
-//   有什么更新                  播报订阅里未听的新集（TTS）
-
-var CN_DIGITS = { '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
-
-function cnToNum(s) {
-  s = String(s || '').trim();
-  if (/^\d+$/.test(s)) return Number(s);
-  // 支持到 9999：一千二百三十四 / 一百零八 / 二十
-  var total = 0, section = 0, num = 0;
-  for (var i = 0; i < s.length; i++) {
-    var ch = s[i];
-    if (ch in CN_DIGITS) { num = CN_DIGITS[ch]; }
-    else if (ch === '十') { section += (num || 1) * 10; num = 0; }
-    else if (ch === '百') { section += (num || 1) * 100; num = 0; }
-    else if (ch === '千') { section += (num || 1) * 1000; num = 0; }
-    else if (ch === '万') { total += (section + num) * 10000; section = 0; num = 0; }
-    else return 0;
-  }
-  return total + section + num;
-}
-
-// 从指令里拆出「集号」与「专辑名」
-// 语音里的「一分钟 / 三十秒 / 两分」→ 秒。没给单位时按秒算，说了「分」就乘 60。
-function voiceSec(numTxt, unitTxt) {
-  var n = cnToNum(numTxt);
-  if (!n || n <= 0) n = 30;                       // 只说「快进一点」就给 30 秒
-  var u = String(unitTxt || '');
-  var sec = (u === '分钟' || u === '分') ? n * 60 : n;
-  return Math.max(5, Math.min(3600, Math.round(sec)));
-}
-
-// 语音里的时长 → 分钟（定时停止用）。「半小时」特判。
-function voiceMinute(numTxt, unitTxt) {
-  var s = normCnNum(numTxt);
-  // 「个钟头」「个小时」——口语里的量词要剥掉，否则判断不到「小时」
-  var u = String(unitTxt || '').replace(/^个/, '');
-  // 「半小时」「半钟头」都是 30 分钟
-  if (/半/.test(s)) return 30;
-  var n = cnToNum(s) || 0;
-  if (!n) n = 30;
-  var min = (u === '小时' || u === '钟头') ? n * 60 : n;
-  return Math.max(1, Math.min(600, Math.round(min)));
-}
-function parseVoiceIntent(text) {
-  var raw = String(text || '').trim();
-  var t = raw
-    .replace(/^[请帮我去]+/, '')
-    .replace(/[，。！？、,.!?]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  var intent = { action: 'play', kw: '', index: 0, which: 'first', raw: raw };
-
-  // 播放控制类（注意「继续听 XX」是续播专辑，不能被单字「继续」截胡）
-  if (/^(暂停|停一下|别放了)/.test(t)) { intent.action = 'pause'; return intent; }
-  if (/^(继续听|接着听|恢复听)/.test(t)) {
-    t = t.replace(/^(继续听|接着听|恢复听)/, '').trim();
-    if (!t) { intent.action = 'resume'; return intent; }
-    intent.action = 'resume_album';
-    intent.kw = t.replace(/^[《「『]|[》」』]$/g, '').trim();
-    return intent;
-  }
-  if (/^(继续|接着播|恢复播放)/.test(t)) { intent.action = 'resume'; return intent; }
-  if (/^(停止|停下|关掉)/.test(t)) { intent.action = 'stop'; return intent; }
-  if (/^(下一集|下一个|跳下一集)/.test(t)) { intent.action = 'next'; return intent; }
-  if (/^(上一集|上一个|跳上一集)/.test(t)) { intent.action = 'prev'; return intent; }
-  // 定时停止要先判：「听半小时后关」去掉「听」就成了「半小时后关」，
-  // 会被后面的播放兜底规则当成书名，所以放在播放类之前。
-  // 注意两点：①「后」不能写成 \s*(后)?\s*，会回溯失败；②长词要放前面，
-  // 否则「关闭」里的「关」先被「关」匹配掉，剩下的「闭」对不上就整条失败。
-  var mSleep = /^(.{0,8}?)(半|[0-9零〇一二两三四五六七八九十百]{1,6})\s*个?\s*(分钟|小时|钟头)[后之]?\s*(关闭|关掉|停止|结束|停|关)/.exec(t);
-  if (mSleep) {
-    intent.action = 'sleep';
-    intent.minutes = voiceMinute(mSleep[2], mSleep[3]);
-    return intent;
-  }
-  // 快进 / 快退：「快进一分钟」「倒退 30 秒」「往后跳两分钟」
-  var mSkip = /(快进|前进|往后|向后|跳到后面)\s*([0-9零〇一二两三四五六七八九十百]{1,6})?\s*(秒|分钟|分)?/.exec(t);
-  if (mSkip) {
-    intent.action = 'seek_forward';
-    intent.seconds = voiceSec(mSkip[2], mSkip[3]);
-    return intent;
-  }
-  var mBack = /(快退|倒退|后退|往回|往前倒|回到前面)\s*([0-9零〇一二两三四五六七八九十百]{1,6})?\s*(秒|分钟|分)?/.exec(t);
-  if (mBack) {
-    intent.action = 'seek_back';
-    intent.seconds = voiceSec(mBack[2], mBack[3]);
-    return intent;
-  }
-  // 直接跳到第 N 集（不带书名，指当前播的这本）
-  var mJump = /^(跳到|放到|切到|去)\s*第\s*([0-9零〇一二两三四五六七八九十百千]{1,8})\s*[集回期话讲节]/.exec(t);
-  if (mJump) {
-    intent.action = 'jump';
-    intent.index = cnToNum(mJump[2]) || 0;
-    return intent;
-  }
-  // 收藏 / 打书签（记下当前时间点）
-  if (/^(收藏|标记|记一下|打个?书签|加书签)/.test(t)) { intent.action = 'bookmark'; return intent; }
-  // 加入待听（收藏专辑，不立刻播）
-  var mTodo = /^(把)?(.+?)(加入|加到|放进|收进)(待听|待播|稍后再听|回头听)/.exec(t);
-  if (mTodo) {
-    intent.action = 'todo';
-    intent.kw = String(mTodo[2] || '').replace(/^[《「『]|[》」』]$/g, '').trim();
-    return intent;
-  }
-  // 定时停止：「30 分钟后停止」「听半小时后关」「一小时后停」（真正的判定挪到前面了，这里不再处理）
-  if (/(声音|音量).*(大|响)/.test(t)) { intent.action = 'volume_up'; return intent; }
-  if (/(声音|音量).*(小|轻)/.test(t)) { intent.action = 'volume_down'; return intent; }
-  // 音量给具体数值：「音量调到 60」——这里必须用惰性匹配，否则 .* 会把数字一起吃掉
-  var mVol = /(声音|音量)[^0-9]{0,8}?([0-9]{1,3})/.exec(t);
-  if (mVol) {
-    intent.action = 'volume_set';
-    intent.volume = Math.max(0, Math.min(100, Number(mVol[2]) || 0));
-    return intent;
-  }
-  if (/有什么(更新|新)/.test(t) || /^(更新|新集)/.test(t)) { intent.action = 'updates'; return intent; }
-  // 「我听到哪了 / 上次听到哪 / 现在在听什么」——查最近收听位置
-  if (/(听到|播到|讲到|念到)哪/.test(t) || /(在听|听到).*(什么|哪本)/.test(t) || /^上次听/.test(t) || /^(我)?(听|看)到哪了?$/.test(t)) {
-    intent.action = 'where';
-    return intent;
-  }
-
-  if (/^来点|随便放|随机播/.test(t)) { intent.action = 'play_random'; t = t.replace(/^(来点|随便放|随机播)/, ''); }
-  else {
-    // 口语冗余：「帮我把 X 放一下」「给我放 X」「播一播 X」
-    t = t.replace(/^(给我|帮我|麻烦)?(把)?/,'');
-    t = t.replace(/^(播放|播一播|播|放|听|想听|我要听)/, '');
-    t = t.replace(/[播放听]+一下$/,'').replace(/[播放]$/,'');
-  }
-
-  // 去掉语气垫词：「播一下 X」「听个 X」「放点 X」「播一播 X」
-  t = t.replace(/^(一下|一下子|一哈|一遍|一个|一首|一段|个|点|些|一|集)/, '').trim();
-
-  // 集号：「第 5 集 / 第五回 / 第100集」；「最后一集」「最新一集」
-  var mLast = /(最后一集|最新一集|最后一期|最新一期|最新的?一?集?)(.*)$/.exec(t);
-  if (mLast) {
-    intent.which = 'last';
-    t = t.slice(0, mLast.index) + mLast[2];
-  } else {
-    var mNum = /第\s*([0-9零〇一二两三四五六七八九十百千万]{1,8})\s*[集回期话讲节]/.exec(t);
-    if (mNum) {
-      intent.index = cnToNum(mNum[1]) || 0;
-      t = t.replace(mNum[0], '');
-    }
-  }
-  intent.kw = t.replace(/[的了吗呢吧啊呀～~]+$/g, '').replace(/^[《「『]|[》」』]$/g, '').trim();
-  return intent;
-}
-
-// 最近在听的那本（按 progress.albums 里的时间取最新）
-function latestProgressAlbum() {
-  var best = null;
-  var albs = (progress && progress.albums) || {};
-  Object.keys(albs).forEach(function (aid) {
-    var a = albs[aid];
-    if (!a || !a.trackId) return;
-    var at = Number(a.at) || 0;
-    if (!best || at > best.at) {
-      best = { albumId: aid, trackId: a.trackId, index: a.index, title: a.title,
-        t: a.t, d: a.d, at: at, albumName: a.albumName };
-    }
-  });
-  return best;
-}
-
-// ---------- 待听清单（想听但先存着，不占歌单） ----------
-var TODO_KEY = 'todo:v1';
-var todoItems = [];
-
-// 「两」「俩」在口语里就是 2，但 cnToNum 对它们的处理要看上下文，数字解析前先统一成阿拉伯数字
-function normCnNum(s) {
-  return String(s || '').replace(/两/g, '2').replace(/俩/g, '2');
-}
-
-function todoList() { return todoItems; }
-
-function todoAdd(it) {
-  if (!it || !it.albumId) return false;
-  for (var i = 0; i < todoItems.length; i++) {
-    if (String(todoItems[i].albumId) === String(it.albumId)) {
-      todoItems[i].at = Date.now();
-      if (!todoItems[i].cover && it.cover) todoItems[i].cover = it.cover;
-      if (it.note) todoItems[i].note = it.note;
-      persistTodo();
-      return true;
-    }
-  }
-  todoItems.unshift({
-    albumId: String(it.albumId), name: it.name || '', author: it.author || '',
-    cover: it.cover || '', note: it.note || '', at: Date.now()
-  });
-  if (todoItems.length > 200) todoItems.length = 200;
-  persistTodo();
-  return true;
-}
-
-// 待听 → 导入成功后自动出清单（免得同一本反复出现）
-function todoDrop(albumIds) {
-  var set = {};
-  (albumIds || []).forEach(function (x) { set[String(x)] = 1; });
-  var before = todoItems.length;
-  todoItems = todoItems.filter(function (x) { return !set[String(x.albumId)]; });
-  if (todoItems.length !== before) persistTodo();
-  return before - todoItems.length;
-}
-
-function todoRemove(albumId) {
-  var n = todoItems.length;
-  todoItems = todoItems.filter(function (x) { return String(x.albumId) !== String(albumId); });
-  persistTodo();
-  return todoItems.length < n;
-}
-
-var todoSaveTimer = null;
-function persistTodo() {
-  if (todoSaveTimer) clearTimeout(todoSaveTimer);
-  todoSaveTimer = setTimeout(function () {
-    todoSaveTimer = null;
-    try { songloft.storage.set(TODO_KEY, JSON.stringify(todoItems)); } catch (e) { /* */ }
-  }, 300);
-}
-
-// 定时停止（语音设的），由 60s tick 检查
-var sleepArmed = null;
-
-function pickDevice(opts) {
-  var d = config.device || {};
-  var t = config.tts || {};
-  var acc = (opts && opts.account_id) || t.account_id || d.account_id || '';
-  var dev = (opts && opts.device_id) || t.device_id || d.device_id || '';
-  return { account_id: acc, device_id: dev };
-}
-
-async function speakOnDevice(dev, text) {
-  if (!dev.account_id || !dev.device_id || !text) return false;
-  try {
-    var r = await miotPost('/mina/tts', { account_id: dev.account_id, device_id: dev.device_id, text: String(text).slice(0, 480) });
-    return !!(r.ok && (!r.data || r.data.success !== false));
-  } catch (e) { return false; }
-}
-
-// 找到（或建立）某专辑对应的歌单；没有歌单就不能让音箱续播
-function playlistForAlbum(albumId) {
-  var sub = findSub(albumId);
-  if (sub && sub.playlistId) return sub.playlistId;
-  for (var i = 0; i < imported.length; i++) {
-    if (String(imported[i].albumId) === String(albumId)) return imported[i].playlistId;
-  }
-  return 0;
-}
-
-// 把专辑的某一集定位成「歌单里第几首」（start_index，0 起）
-async function indexInPlaylist(playlistId, trackId, fallbackIndex) {
-  // v0.19.4：trackId 为空时 songTrackId 也返回 ''，''==='' 会命中歌单里第一首
-  // 「没有 sourceData 的歌」（用户手动加进来的本地曲/别的插件的歌），直接顶掉 fallbackIndex。
-  var tid = String(trackId || '');
-  if (!tid) return fallbackIndex > 0 ? Math.max(0, fallbackIndex - 1) : -1;
-  try {
-    var songs = await collectPlaylistSongs(playlistId);
-    for (var i = 0; i < songs.length; i++) {
-      if (songTrackId(songs[i]) === tid) return i;
-    }
-    if (fallbackIndex > 0) return Math.max(0, fallbackIndex - 1);
-  } catch (e) { /* 忽略 */ }
-  return -1;
-}
-
-async function runVoiceCommand(text, opts) {
-  opts = opts || {};
-  var it = parseVoiceIntent(text);
-  var dev = pickDevice(opts);
-  var out = { intent: it, played: false, text: '', target: '', playlistId: 0, trackId: '', episode: 0, device: dev.device_id };
-
-  if (!dev.account_id || !dev.device_id) {
-    out.error = '还没有选择音箱，请先到「设置」里选一台';
-    return out;
-  }
-  var acc = dev.account_id, dv = dev.device_id;
-
-  // --- 播放控制 ---
-  if (it.action === 'pause' || it.action === 'stop' || it.action === 'resume' ||
-      it.action === 'next' || it.action === 'prev') {
-    var map = { pause: '/mina/pause', stop: '/mina/stop', resume: '/mina/resume', next: '/player/next', prev: '/player/previous' };
-    var r0 = await miotPost(map[it.action], { account_id: acc, device_id: dv });
-    if (!r0.ok || (r0.data && r0.data.success === false)) {
-      out.error = '音箱没有响应：' + ((r0.data && r0.data.error) || 'HTTP ' + r0.status);
-      return out;
-    }
-    out.text = { pause: '已暂停', stop: '已停止', resume: '继续播放', next: '下一集', prev: '上一集' }[it.action];
-    out.played = true;
-    return out;
-  }
-
-  if (it.action === 'volume_up' || it.action === 'volume_down' || it.action === 'volume_set') {
-    var nv;
-    if (it.action === 'volume_set') {
-      nv = Math.max(0, Math.min(100, Number(it.volume) || 30));
-    } else {
-      var st = await miotGet('/player/status');
-      var cur = (st.data && (st.data.volume || (st.data.data && st.data.data.volume))) || 40;
-      nv = Math.max(0, Math.min(100, Number(cur) + (it.action === 'volume_up' ? 15 : -15)));
-    }
-    var rv = await miotPost('/mina/volume', { account_id: acc, device_id: dv, volume: nv });
-    out.text = '音量调到 ' + nv;
-    out.played = !!(rv.ok && (!rv.data || rv.data.success !== false));
-    if (!out.played) out.error = '调节音量失败';
-    return out;
-  }
-
-  // --- 快进 / 快退：取当前进度 ± N 秒再 seek ---
-  if (it.action === 'seek_forward' || it.action === 'seek_back') {
-    var st2 = await miotGet('/player/status');
-    var sd = (st2.data && st2.data.data) || st2.data || {};
-    var pos = Number(sd.position || sd.current_position || sd.progress) || 0;
-    var dur = Number(sd.duration) || 0;
-    var delta = Number(it.seconds) || 30;
-    var target = it.action === 'seek_forward' ? pos + delta : Math.max(0, pos - delta);
-    if (dur && target > dur - 3) target = Math.max(0, dur - 3);
-    var rs = await miotPost('/mina/seek', { account_id: acc, device_id: dv, position: Math.round(target) });
-    out.played = !!(rs.ok && (!rs.data || rs.data.success !== false));
-    if (!out.played) {
-      out.error = '音箱不支持跳转，这条指令暂时只能用页面播放器';
-      return out;
-    }
-    out.text = (it.action === 'seek_forward' ? '快进到 ' : '退回 ') + fmtClock(Math.round(target));
-    return out;
-  }
-
-  // --- 跳到第 N 集（当前正在播的那本） ---
-  if (it.action === 'jump') {
-    var last = latestProgressAlbum();
-    if (!last) { out.error = '还没有收听记录，先随便播一本'; return out; }
-    var pl2 = playlistForAlbum(last.albumId);
-    if (!pl2) { out.error = '《' + (last.albumName || '') + '》还没导入成歌单'; return out; }
-    var idx2 = await indexInPlaylist(pl2, '', it.index);
-    var rj = await miotPost('/player/play', {
-      account_id: acc, device_id: dv, playlist_id: pl2,
-      start_index: idx2 >= 0 ? idx2 : Math.max(0, it.index - 1)
-    });
-    if (!rj.ok || (rj.data && rj.data.success === false)) {
-      out.error = '跳转失败：' + ((rj.data && rj.data.error) || 'HTTP ' + rj.status);
-      return out;
-    }
-    out.played = true;
-    out.episode = it.index;
-    out.text = '跳到第 ' + it.index + ' 集';
-    return out;
-  }
-
-  // --- 收藏 / 打书签：在当前时间点记一笔 ---
-  if (it.action === 'bookmark') {
-    var lp = latestProgressAlbum();
-    if (!lp) { out.error = '还没有收听记录，先听一段再收藏'; return out; }
-    var rb = bmAdd({
-      albumId: lp.albumId, albumName: lp.albumName || '', trackId: lp.trackId,
-      title: lp.title || '', index: lp.index || 0, t: Number(lp.t) || 0,
-      note: '语音收藏', source: 'voice'
-    });
-    if (!rb.ok) { out.error = rb.error || '记录失败'; return out; }
-    logInfo('voice', '语音收藏 ' + (lp.albumName || '') + ' 第' + (lp.index || '?') + '集 ' + fmtClock(lp.t || 0));
-    out.text = '已在《' + String(lp.albumName || '').replace(/[《》]/g, '') + '》' +
-      (lp.index ? '第 ' + lp.index + ' 集' : '') + ' ' + fmtClock(lp.t || 0) + ' 打了书签';
-    out.played = false;
-    if (opts.speak) await speakOnDevice(dev, '好的，已经记下来了');
-    out.spoken = true;
-    return out;
-  }
-
-  // --- 加入待听：只收藏专辑，不立刻播 ---
-  if (it.action === 'todo') {
-    if (!it.kw) { out.error = '没听清要收藏哪一本'; return out; }
-    var hit = await searchAlbumsSmart(it.kw);
-    var ca = (hit.albums || [])[0];
-    if (!ca) { out.error = '没找到《' + it.kw + '》'; return out; }
-    todoAdd({ albumId: String(ca.id), name: ca.title, author: ca.author || '', cover: ca.cover || '' });
-    out.text = '已把《' + ca.title + '》加入待听（共 ' + todoList().length + ' 本）';
-    if (opts.speak) await speakOnDevice(dev, '已经加入待听');
-    out.spoken = true;
-    return out;
-  }
-
-  // --- 定时停止 ---
-  if (it.action === 'sleep') {
-    var mins = Number(it.minutes) || 30;
-    sleepArmed = { until: Date.now() + mins * 60000, minutes: mins };
-    out.text = mins + ' 分钟后自动停止';
-    if (opts.speak) await speakOnDevice(dev, mins + '分钟后我会停下');
-    out.spoken = true;
-    return out;
-  }
-
-  if (it.action === 'where') {
-    var best2 = null;
-    Object.keys(progress.albums || {}).forEach(function (aid) {
-      var a = progress.albums[aid];
-      if (!a || !a.trackId) return;
-      var at = Number(a.at) || 0;
-      if (!best2 || at > best2.at) {
-        best2 = { albumId: aid, trackId: a.trackId, index: a.index, title: a.title, t: a.t, d: a.d, at: at, albumName: a.albumName };
-      }
-    });
-    if (!best2) {
-      out.text = '还没有收听记录，先听一本试试';
-      return out;
-    }
-    var ago = Math.round((Date.now() - best2.at) / 60000);
-    var agoTxt = ago < 60 ? (ago <= 1 ? '刚刚' : ago + ' 分钟前') : (ago < 1440 ? Math.round(ago / 60) + ' 小时前' : Math.round(ago / 1440) + ' 天前');
-    var txt = '上次听《' + String(best2.albumName || '').replace(/[《》]/g, '') + '》';
-    if (best2.index) txt += '第 ' + best2.index + ' 集';
-    txt += '，听到 ' + fmtClock(best2.t || 0);
-    if (best2.d) txt += '，这一集一共 ' + fmtClock(best2.d);
-    txt += '，' + agoTxt + '听的。';
-    out.text = txt;
-    if (opts.speak) {
-      var dv = ttsDevice();
-      if (dv.account_id && dv.device_id) {
-        try {
-          var tr = await miotPost('/mina/tts', { account_id: dv.account_id, device_id: dv.device_id, text: txt });
-          out.played = !!(tr.ok && !(tr.data && tr.data.success === false));
-        } catch (e3) { out.error = '念出来失败: ' + String(e3); }
-      }
-    }
-    return out;
-  }
-
-  if (it.action === 'updates') {
-    var rep = await runTtsReport({ speak: !!opts.speak, trigger: '语音指令' });
-    out.text = rep.text;
-    out.played = !!rep.spoken;
-    if (rep.error) out.error = rep.error;
-    return out;
-  }
-
-  // --- 播放类：需要关键词 ---
-  var kw = it.kw || '';
-  if (!kw) { out.error = '没听清要播什么，试着说「播郭德纲第 5 集」'; return out; }
-
-  // 先看已导入的（省一次网络），再搜
-  var albumId = '', albumName = '', trackTitle = '';
-  var lower = kw.toLowerCase();
-  for (var i = 0; i < imported.length; i++) {
-    if (String(imported[i].name || '').toLowerCase().indexOf(lower) >= 0) {
-      albumId = String(imported[i].albumId);
-      albumName = imported[i].name;
-      break;
-    }
-  }
-  if (!albumId) {
-    var sr = await searchAlbumsSmart(kw);
-    var cand = (sr.albums || [])[0];
-    if (!cand) {
-      // 专辑搜不到时退回单集搜索：直接播那一集（走 songloft 播放，不经歌单）
-      var ts = await searchTracks(kw, 1, 5);
-      var tr = (ts.tracks || [])[0];
-      if (!tr) { out.error = '没找到「' + kw + '」，换个说法试试'; return out; }
-      out.text = '找到单集《' + tr.title + '》，请在页面里点播放（音箱需要先导入成歌单）';
-      out.target = tr.title;
-      out.trackId = String(tr.trackId);
-      if (opts.speak) await speakOnDevice(dev, '找到' + tr.title + '，请先在页面上导入');
-      return out;
-    }
-    albumId = String(cand.id);
-    albumName = cand.title;
-  }
-
-  var pl = playlistForAlbum(albumId);
-  if (!pl) {
-    out.albumId = albumId;
-    out.albumName = albumName;
-    out.error = '《' + albumName + '》还没导入成歌单，先到页面里点「导入」';
-    if (opts.speak) await speakOnDevice(dev, albumName + '还没有导入，请先在页面上导入');
-    return out;
-  }
-
-  // 定起点
-  var startIndex = 0;
-  if (it.which === 'last') {
-    var o = await fetchAlbumOutline(albumId);
-    // 歌单按导入顺序排列，最后一集的序号 ≈ 索引（导入的是全本时正好是 lastIndex-1）
-    startIndex = Math.max(0, (Number(o.lastIndex) || 1) - 1);
-    out.episode = o.lastIndex || 0;
-  } else if (it.index > 0) {
-    var idx = await indexInPlaylist(pl, '', it.index);
-    startIndex = idx >= 0 ? idx : it.index - 1;
-    out.episode = it.index;
-  } else if (it.action === 'resume_album') {
-    // 续播由 miot 按「该歌单上次播到哪」处理
-    startIndex = -1;
-  }
-
-  var body = { account_id: acc, device_id: dv, playlist_id: pl };
-  if (it.action === 'play_random') { body.play_mode = 'random'; body.start_position = 'random'; }
-  else if (startIndex < 0) { body.start_position = 'resume'; }
-  else if (startIndex > 0) { body.start_index = startIndex; }
-
-  var rp = await miotPost('/player/play', body);
-  if (!rp.ok || (rp.data && rp.data.success === false)) {
-    out.error = '音箱起播失败：' + ((rp.data && rp.data.error) || 'HTTP ' + rp.status);
-    return out;
-  }
-
-  out.played = true;
-  out.playlistId = pl;
-  out.albumId = albumId;
-  out.albumName = albumName;
-  out.target = albumName + (out.episode ? ' 第' + out.episode + '集' : (it.action === 'resume_album' ? '（续播）' : ''));
-  out.text = '正在播放《' + albumName + '》' + (out.episode ? '第 ' + out.episode + ' 集' : '');
-  if (opts.speak) {
-    var said = it.action === 'resume_album'
-      ? '继续播放' + albumName
-      : ('播放' + albumName + (out.episode ? '第' + out.episode + '集' : ''));
-    await speakOnDevice(dev, said);
-  }
-  return out;
-}
-
 
 // ---------- 生命周期 ----------
 
