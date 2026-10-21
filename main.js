@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.3';
+var VERSION = '0.23.11';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -44,7 +44,7 @@ var BATCH = 200;           // 单批建歌上限
 var SYNC_MAX_PAGES = 25;   // 增量同步最多回溯 25 页
 
 var config = {
-  auto: { enabled: false, time: '08:30', lastRunDate: '' },
+  auto: { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0 },
   sync: { progress: true },
   dl: { targetDir: '喜马拉雅', format: 'mp3' },
   // 每天检查一次登录态是否还有效，失效时界面上直接提醒
@@ -229,6 +229,36 @@ function netBreakerOk(host) {
   if (b && (b.fail || b.until)) { b.fail = 0; b.until = 0; }
 }
 
+// v0.23.4：限流保护 —— 实测喜马拉雅 WAF 对 m.ximalaya.com/tracks/{id}.json 高频请求
+// 直接返回 HTTP 506（与 UA / Referer / Cookie / HTTP 版本都无关），冷却约 30 秒自动恢复。
+// 506 不是「网络故障」，越重试越糟，所以：命中后按 host 进冷却，冷却期内一个字节都不发、
+// 只记一条日志；冷却结束自动放行。这样预取再多也不会把点播拖下水。
+var netCool = {}, COOL_SEC = 20;
+function isRateLimited(code) { return code === 506 || code === 429; }
+function netCoolLeft(host) {
+  var c = netCool[host];
+  var ms = c ? c.until - Date.now() : 0;
+  return ms > 0 ? ms : 0;
+}
+function netCoolCheck(host) {
+  var ms = netCoolLeft(host);
+  if (ms <= 0) return;
+  var er = new Error('请求过于频繁（喜马拉雅限流），约 ' + Math.ceil(ms / 1000) + ' 秒后自动恢复');
+  er.code = 'ratelimit';
+  throw er;
+}
+function netCoolSet(host, sec, why) {
+  if (netCoolLeft(host) > 0) return;          // 已在冷却窗口内，别重复刷日志
+  var s = Number(sec) || COOL_SEC;
+  netCool[host] = { until: Date.now() + s * 1000, at: Date.now() };
+  logWarn('net', host + ' ' + (why || '触发限流（HTTP 506）') + '，暂停请求 ' + s + ' 秒');
+}
+// v0.23.5：连续 5xx 计数（504 过载风暴之类）——上游在喊「别打了」，满阈值也进短冷却
+var netSoft = {};
+function netCoolClear(host) {
+  if (netCool[host]) delete netCool[host];
+}
+
 async function fetchRetry(url, init, opts) {
   var o = opts || {};
   var tries = Math.max(1, Math.min(Number(o.retries) === undefined ? 3 : Number(o.retries), 4));
@@ -240,12 +270,27 @@ async function fetchRetry(url, init, opts) {
   try {
     for (var i = 0; i < tries; i++) {
       netBreakerCheck(host);
+      netCoolCheck(host);          // v0.23.4：限流冷却期内直接快速失败，不发请求
       try {
         var resp = await fetchT(url, init, timeoutSec);
-        if (resp && resp.ok) { netBreakerOk(host); return resp; }
+        if (resp && resp.ok) { netBreakerOk(host); netCoolClear(host); netSoft[host] = 0; return resp; }
+        if (resp && isRateLimited(resp.status)) {
+          // v0.23.4：506/429 = 被限流。立刻进冷却并抛出，不重试（重试只会延长限流窗口）
+          netCoolSet(host, COOL_SEC);
+          var rle = new Error('请求过于频繁（HTTP ' + resp.status + '），约 ' + COOL_SEC + ' 秒后自动恢复');
+          rle.code = 'ratelimit';
+          rle.status = resp.status;
+          throw rle;
+        }
+        if (resp && resp.status >= 500) {
+          // v0.23.5：连续 5xx（504 过载风暴）累计计数，满 4 次进 15 秒冷却
+          var sc = (netSoft[host] || 0) + 1;
+          netSoft[host] = sc;
+          if (sc >= 4 && netCoolLeft(host) <= 0) netCoolSet(host, 15, '上游连续过载（HTTP ' + resp.status + '）');
+        }
         if (resp && isRetryableStatus(resp.status) && i < tries - 1) {
           lastErr = new Error('HTTP ' + resp.status);
-          logWarn('net', 'HTTP ' + resp.status + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
+          if (i === 0) logWarn('net', 'HTTP ' + resp.status + '，重试中：' + shortUrl(url));   // v0.23.5：只记第一次，不再逐次刷屏
         } else {
           netBreakerOk(host);   // 4xx 是接口层面的问题，不算网络故障
           return resp;
@@ -253,8 +298,9 @@ async function fetchRetry(url, init, opts) {
       } catch (e) {
         lastErr = e;
         var m = String(e && e.message || e);
+        if (e && e.code === 'ratelimit') throw e;     // v0.23.4：限流直接上抛，不进重试
         if (m.indexOf('网络暂时不可用') >= 0) throw e;
-        if (i < tries - 1) logWarn('net', m + '，第 ' + (i + 1) + ' 次重试：' + shortUrl(url));
+        if (i < tries - 1) { if (i === 0) logWarn('net', m + '，重试中：' + shortUrl(url)); }   // v0.23.5：只记第一次
         else { netBreakerFail(host); break; }
       }
       // 退避带抖动：多个请求同时重试时错开，避免又撞在一起
@@ -271,6 +317,7 @@ function shortUrl(u) {
   var i = s.indexOf('?');
   return (i > 0 ? s.slice(0, i) : s).slice(0, 90);
 }
+
 
 function sleepMs(ms) {
   return new Promise(function (r) { setTimeout(r, Math.max(0, Number(ms) || 0)); });
@@ -299,6 +346,9 @@ function netCachePut(k, data) {
   }
 }
 
+// v0.23.5：单飞（singleflight）——同一 URL 的并发请求只发一次上游，其余搭车等结果。
+// 预取、列表渲染、点播同时打同一集时，从 N 个上游请求变成 1 个。
+var netInflight = {}, netDedupN = 0;
 async function getJSON(url, headers, opts) {
   var o = opts || {};
   var key = netCacheKey(url, headers);
@@ -306,12 +356,18 @@ async function getJSON(url, headers, opts) {
     var hit = netCacheGet(key);
     if (hit) return hit;
   }
-  var resp = await fetchRetry(url, { method: 'GET', headers: headers || {} },
-    { retries: o.retries === undefined ? 2 : o.retries, timeout: o.timeout || 15 });
-  if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : '??') + ' ' + shortUrl(url));
-  var data = await resp.json();
-  if (!o.noCache) netCachePut(key, data);
-  return data;
+  if (!o.noMerge && netInflight[key]) { netDedupN++; return netInflight[key]; }
+  var run = (async function () {
+    var resp = await fetchRetry(url, { method: 'GET', headers: headers || {} },
+      { retries: o.retries === undefined ? 2 : o.retries, timeout: o.timeout || 15 });
+    if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : '??') + ' ' + shortUrl(url));
+    var data = await resp.json();
+    if (!o.noCache) netCachePut(key, data);
+    return data;
+  })();
+  if (o.noMerge) return run;
+  netInflight[key] = run;
+  try { return await run; } finally { delete netInflight[key]; }
 }
 
 function stripTags(s) {
@@ -554,7 +610,16 @@ async function fetchShowPage(albumId, page) {
     }
   }
   if (d.ret !== 200) throw new Error('喜马拉雅接口异常 ret=' + d.ret + ' ' + (d.msg || ''));
-  return (d.data && d.data.tracksAudioPlay) || [];
+  var list = (d.data && d.data.tracksAudioPlay) || [];
+  // v0.23.6：play/show 接口不保证页内顺序（实测有的专辑升序 1→30、有的倒序 30→1），
+  // 官方详情页恒为「集数升序」。这里统一按 index 升序整理（同 index 按 trackId 兜底），
+  // 保证分页语义稳定：第 1 页 = 第 1~30 集，第 2 页 = 第 31~60 集，详情页/导入/预取全部对齐官方。
+  list = list.slice().sort(function (a, b) {
+    var ia = Number(a.index) || 0, ib = Number(b.index) || 0;
+    if (ia !== ib) return ia - ib;
+    return (Number(a.trackId) || 0) - (Number(b.trackId) || 0);
+  });
+  return list;
 }
 
 // 专辑目录：逐页扫一轮集数，得到「总页数 + 每页集数范围」，倒序播放靠它从最后一集起播。
@@ -685,6 +750,8 @@ async function fetchTrackUrl(trackId) {
   try {
     d = await getJSON(url, h);
   } catch (e1) {
+    // v0.23.4：被限流时换 UA 再打一次只会加重限流，直接上抛等冷却结束
+    if (e1 && e1.code === 'ratelimit') throw e1;
     logWarn('play', '单集地址失败（' + String(e1 && e1.message || e1) + '），换 UA 重试 ' + trackId);
     d = await getJSON(url, { 'User-Agent': UA_PC, 'Referer': 'https://www.ximalaya.com/' });
   }
@@ -729,13 +796,19 @@ async function trackUrlFast(id, fresh) {
 function prefetchUrls(ids) {
   var list = (ids || []).map(function (x) { return String(x || ''); }).filter(Boolean).slice(0, 12);
   if (!list.length) return 0;
+  // v0.23.4：冷却期内一个预取都不发 —— 预取是锦上添花，绝不能拖累点播
+  if (netCoolLeft('m.ximalaya.com') > 0) return 0;
   setTimeout(function () {
-    list.forEach(function (id) {
-      if (turlGet(id)) return;
-      trackUrlFast(id).catch(function (e) {
-        if (e && (e.code === 'paid' || e.code === 'no_url')) return;   // v0.23.3：不可播的集不打扰日志
-        logWarn('net', '预取地址失败 ' + id + '：' + String(e && e.message || e));
-      });
+    list.forEach(function (id, ix) {
+      // v0.23.5：错峰预取——每集间隔 250ms 平滑发出，不一口气打一串
+      setTimeout(function () {
+        if (netCoolLeft('m.ximalaya.com') > 0) return;   // 预取途中被限流，剩下的全部放弃
+        if (turlGet(id)) return;
+        trackUrlFast(id).catch(function (e) {
+          if (e && (e.code === 'paid' || e.code === 'no_url')) return;   // v0.23.3：不可播的集不打扰日志
+          logWarn('net', '预取地址失败 ' + id + '：' + String(e && e.message || e));
+        });
+      }, 250 * ix);
     });
   }, 50);
   return list.length;
@@ -1301,14 +1374,16 @@ async function loadAll() {
   if (!Array.isArray(todoItems)) todoItems = [];
 
   if (!config || typeof config !== 'object') config = {};
-  if (!config.auto) config.auto = { enabled: false, time: '08:30', lastRunDate: '' };
+  if (!config.auto) config.auto = { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0 };
+  // v0.23.7：自动导入「只导最新 N 集」上限（0 = 全部新集）
+  if (typeof config.auto.latestLimit !== 'number' || !(config.auto.latestLimit >= 0)) config.auto.latestLimit = 0;
   if (!config.sync || typeof config.sync !== 'object') config.sync = { progress: true };
   if (typeof config.sync.progress !== 'boolean') config.sync.progress = true;
   if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
   if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '';
   if (config.dl.format !== '' && config.dl.format !== 'mp3') config.dl.format = 'mp3';
 
-  // v0.17.0 起不再有 AI，旧配置里的 ai 段直接丢掉
+  // AI 推荐功能已移除（v0.23.11）：旧配置里残留的 ai 段直接丢掉（v0.17.0 同款处理）
   if (config.ai) delete config.ai;
 
   // v0.20.3：关键词追更 / 定时语音播报的界面已经下线，但旧配置里可能还开着。
@@ -1887,7 +1962,9 @@ function progList(albumId, limit) {
 
 // 整专辑拉取（start/end 为集号区间，0/0 表示全部）
 async function fetchAlbumTracks(albumId, start, end, maxPages) {
-  var tracks = [], albumName = '', page = 1;
+  var tracks = [], albumName = '';
+  // v0.23.7：给了起始集就直接从对应页开扫（第 N 集 = 第 ceil(N/30) 页），不再从第 1 页全量扫一遍再过滤
+  var page = start > 0 ? Math.max(1, Math.floor((start - 1) / PAGE_SIZE) + 1) : 1;
   var limit = maxPages || MAX_PAGES;
   while (page <= limit) {
     var batch = await fetchShowPage(albumId, page);
@@ -1984,12 +2061,25 @@ async function addTracksToPlaylist(playlistId, tracks, onProgress) {
 
 // ---------- 导入 ----------
 
-async function runImport(albumId, name, start, end) {
+async function runImport(albumId, name, start, end, latest) {
   job = { running: true, mode: 'single', title: '', done: 0, total: 0, playlistId: 0, error: '', finishedAt: '', current: '', parts: [] };
   await persist();
   try {
     var detail = null;
     try { detail = await fetchAlbumDetail(albumId); } catch (e) { detail = null; }
+
+    // v0.23.7：只导最新 N 集 —— 用目录总集数换算成区间（填了 start 区间时按区间，latest 只在未填 start 时生效）
+    latest = Math.floor(Number(latest) || 0);
+    if (latest > 0 && !start) {
+      try {
+        var ol = await fetchAlbumOutline(albumId);
+        var tot = Number(ol.lastIndex) || 0;
+        if (tot > 0) {
+          start = Math.max(1, tot - latest + 1);
+          songloft.log.info('[喜马拉雅]《' + (name || albumId) + '》只导最新 ' + latest + ' 集（第 ' + start + '~' + tot + ' 集）');
+        }
+      } catch (eO) { /* 取不到总集数就退回全量导入 */ }
+    }
 
     var fetched = await fetchAlbumTracks(albumId, start, end);
     stampAuthor(fetched.tracks, detail && detail.author, detail && detail.name);
@@ -2212,6 +2302,14 @@ async function syncOne(sub, opts) {
     }
 
     var r = await fetchNewTracks(sub.albumId, sub.lastIndex || 0);
+    // v0.23.7：自动导入范围 —— 设了「只导最新 N 集」且本次新集超过 N 时，
+    // 只保留最新的 N 集写入，更早的集直接跳过（水位照常推进到最新，不会反复重拉）
+    var aLl2 = Number(config.auto && config.auto.latestLimit) || 0;
+    if (aLl2 > 0 && r.tracks.length > aLl2) {
+      var skipN = r.tracks.length - aLl2;
+      r.tracks = r.tracks.slice(-aLl2);
+      songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》本次新集 ' + (skipN + aLl2) + ' 集，按设置只导最新 ' + aLl2 + ' 集，跳过最早 ' + skipN + ' 集');
+    }
     out.newCount = r.tracks.length;
     out.titles = r.tracks.map(function (t) { return t.index + '. ' + t.title; });
     sub.newCount = r.tracks.length;
@@ -2497,6 +2595,8 @@ async function tick() {
     await persist();
     songloft.log.info('[喜马拉雅] 关键词追更：' + wc.lastMessage);
   }
+
+
 }
 
 // ---------- 整本下载到本地音乐目录 ----------
@@ -3222,7 +3322,9 @@ async function handleHTTPRequest(req) {
   var method = (req.method || 'GET').toUpperCase();
   var q = parseQuery(req);
 
-  if (path === '/config' && method === 'GET') return jsonResp({ success: true, data: config });
+  if (path === '/config' && method === 'GET') {
+    return jsonResp({ success: true, data: config });
+  }
 
   if (path === '/config' && method === 'POST') {
     var body = readBodyJson(req);
@@ -3232,6 +3334,11 @@ async function handleHTTPRequest(req) {
       var aTv = normHHMM(a.time);
       if (aTv) config.auto.time = aTv;
       if (a.lastRunDate === '') config.auto.lastRunDate = '';
+      // v0.23.7：自动导入范围 —— 0 = 全部新集；>0 = 每次只导最新 N 集（更早的跳过，水位照常推进）
+      if (a.latestLimit !== undefined) {
+        var aLl = Math.floor(Number(a.latestLimit) || 0);
+        config.auto.latestLimit = Math.max(0, Math.min(aLl, 500));
+      }
     }
     if (body.sync) {
       if (typeof body.sync.progress === 'boolean') config.sync.progress = body.sync.progress;
@@ -3239,9 +3346,6 @@ async function handleHTTPRequest(req) {
     if (body.dl) {
       if (typeof body.dl.targetDir === 'string') config.dl.targetDir = body.dl.targetDir.trim();
       if (body.dl.format === 'mp3' || body.dl.format === '') config.dl.format = body.dl.format;
-    }
-    if (body.ai) {
-      // 旧版前端可能还会传 ai 段，直接忽略，不再写进配置
     }
     await persist();
     return jsonResp({ success: true, data: config });
@@ -4062,7 +4166,7 @@ async function handleHTTPRequest(req) {
       // v0.23.3：付费/下架是业务状态不是服务端错误 → 200 + success:false（前端直接显示友好文案）；
       // 其余（网络/上游异常）保留错误状态码
       var em = String((e && e.message) || e);
-      if (e && (e.code === 'paid' || e.code === 'no_url')) {
+      if (e && (e.code === 'paid' || e.code === 'no_url' || e.code === 'ratelimit')) {
         return jsonResp({ success: false, code: e.code, error: em });
       }
       return jsonResp({ success: false, error: em }, 502);
@@ -4153,7 +4257,8 @@ async function handleHTTPRequest(req) {
     var aid = extractAlbumId(b3.album_id || b3.url || '');
     if (!aid) return jsonResp({ success: false, error: '请提供专辑链接或数字 ID' }, 400);
     importing = true;
-    runImport(aid, b3.name || '', Number(b3.start) || 0, Number(b3.end) || 0)
+    // v0.23.7：latest = 只导最新 N 集（与 start/end 互斥，latest 优先级低：填了区间按区间）
+    runImport(aid, b3.name || '', Number(b3.start) || 0, Number(b3.end) || 0, Number(b3.latest) || 0)
       .finally(function () { importing = false; });
     return jsonResp({ success: true, data: { message: '导入任务已开始，可在状态栏查看进度' } });
   }
@@ -4460,14 +4565,24 @@ async function handleHTTPRequest(req) {
       var prb = probes[hi], t0 = Date.now();
       try {
         var hresp = await fetchT(prb.url, { method: 'GET', headers: prb.headers }, 8);
-        hitems.push({ name: prb.name, ok: hresp.status < 500, status: hresp.status, ms: Date.now() - t0 });
+        var hlim = isRateLimited(hresp.status);
+        // v0.23.4：诊断同时校正冷却状态 —— 仍 506 就续冷却，已恢复（<400）就立刻解除
+        if (prb.url.indexOf('m.ximalaya.com') >= 0) {
+          if (hlim) netCoolSet('m.ximalaya.com', COOL_SEC);
+          else if (hresp.status < 400) netCoolClear('m.ximalaya.com');
+        }
+        hitems.push({ name: prb.name, ok: hresp.status < 500 && !hlim, limited: hlim, status: hresp.status, ms: Date.now() - t0 });
       } catch (eH) {
         hitems.push({ name: prb.name, ok: false, ms: Date.now() - t0, error: String(eH && eH.message || eH) });
       }
     }
     return jsonResp({
       success: true,
-      data: { at: Date.now(), items: hitems, active: netActive, queued: netWait.length, cache: netCacheN }
+      data: {
+        at: Date.now(), items: hitems, active: netActive, queued: netWait.length, cache: netCacheN,
+        inflight: Object.keys(netInflight).length, dedup: netDedupN,   // v0.23.5：单飞在途数 / 省下的重复请求数
+        cool: netCoolLeft('m.ximalaya.com')     // v0.23.4：取流接口还剩多少毫秒冷却
+      }
     });
   }
 
