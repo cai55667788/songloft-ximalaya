@@ -927,6 +927,19 @@
     @media (hover: hover) {
       .card:hover { border-color: color-mix(in srgb, var(--accent) 24%, var(--border-soft)); }
     }
+
+    /* ========== v0.23.13 收尾轮：修滑杆白底 BUG + 触感细节 ========== */
+    /* 修 BUG：全屏页 26px 高的进度滑杆被全局输入框样式刷成白色长条 —— 滑杆本体应完全透明，只留 track/thumb */
+    input[type=range] { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; cursor: pointer; }
+    /* 按钮按下有物理反馈（限定明确容器，避免影响布局） */
+    .btns button:active, .fpctrl button:active, .qfoot button:active, #player button:active { transform: scale(.95); }
+    /* 文本选中色走主题 */
+    ::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+    /* 键盘可达性：Tab 聚焦按钮时给主题色描边 */
+    button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 62%, transparent); outline-offset: 2px; }
+    /* 全屏页标题在氛围背景上更清晰 */
+    #fullPlayer .fpname { text-shadow: 0 1px 12px rgba(0,0,0,.28); }
+    #fullPlayer .fpmeta { text-shadow: 0 1px 8px rgba(0,0,0,.24); }
 </style>
 </head>
 <body>
@@ -934,7 +947,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.12</span>
+    <span class="ver" id="ver">v0.23.13</span>
   </div>
 
   <div class="tabs">
@@ -1481,6 +1494,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.12"></script>
+<script src="static/app.js?v=0.23.13"></script>
 </body>
 </html>
