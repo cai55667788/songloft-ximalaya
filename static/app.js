@@ -264,19 +264,21 @@
   async function loadLogin() {
     var el = $('loginStatus');
     try {
-      var r = await api('GET', '/login');
+      // v0.23.11：/login 与 /me 并行发（原来已登录时要串行等两跳，/me 还带外网验证，
+      // 登录卡要等两个 RT 才渲染完整）。未登录时 /me 直接 401，catch 掉即可。
+      var pr = api('GET', '/login');
+      var pm = api('GET', '/me').catch(function () { return null; });
+      var r = await pr;
       var d = r.data || {};
       renderLogin(d);
-      // 已登录则顺带验证一次（带 user 信息展示）
-      if (d.loggedIn) {
-        try {
-          var m = await api('GET', '/me');
-          var md = (m && m.data) || {};
-          renderLogin({
-            loggedIn: true, valid: md.valid, user: md.user, error: md.error,
-            savedAt: d.savedAt, mask: d.mask, cookieSane: d.cookieSane, cookieHint: d.cookieHint
-          });
-        } catch (e2) { /* 忽略，保留基础展示 */ }
+      // /me 带用户信息（头像昵称）与实时有效性，回来后补渲染
+      var m = await pm;
+      var md = (m && m.data) || null;
+      if (md && (md.valid || md.user)) {
+        renderLogin({
+          loggedIn: true, valid: md.valid, user: md.user, error: md.error,
+          savedAt: d.savedAt, mask: d.mask, cookieSane: d.cookieSane, cookieHint: d.cookieHint
+        });
       }
     } catch (e) {
       el.innerHTML = '<span class="err">状态加载失败: ' + esc(e.message) + '</span>';
@@ -899,11 +901,16 @@
   // v0.22.5：地址本（内存）——命中就直接设 src，跳过 150~400ms 的取流请求。
   // 配合服务端 20 分钟地址缓存 + 列表渲染后预取，目标是「点下去就出声」。
   var urlMemo = {}, urlFetching = {}, urlBad = {};
+  // v0.23.4：限流闸 —— 服务端报 ratelimit 后本地也停 20 秒预取，
+  // 避免「服务端刚冷却，前端又一口气打 3 个预取、再次触发限流」的来回拉锯
+  var rlUntil = 0;
+  function rlLeft() { var ms = rlUntil - Date.now(); return ms > 0 ? ms : 0; }
   function memoUrl(id, info) {
     if (id && info && info.url) urlMemo[String(id)] = info;
   }
   function prefetchTrack(id, hot) {
     id = String(id || '');
+    if (rlLeft() > 0) return;                    // v0.23.4：限流冷却期内不预取
     if (!id || urlMemo[id] || urlFetching[id] || urlBad[id]) {
       if (hot && urlMemo[id] && urlMemo[id].url) warmAudio(urlMemo[id].url);
       return;
@@ -916,6 +923,8 @@
         if (hot) warmAudio(r.data.url);   // 最可能播的那一集，连首包一起预热
       } else if (r && r.success === false && (r.code === 'paid' || r.code === 'no_url')) {
         urlBad[id] = r.code;   // v0.23.3：付费/下架的集记住，列表渲染不再反复请求
+      } else if (r && r.success === false && r.code === 'ratelimit') {
+        rlUntil = Date.now() + 20000;   // v0.23.4：预取撞上限流，本地也停 20 秒
       }
     }).catch(function () { /* 预取失败不打扰用户 */ }).then(function () { delete urlFetching[id]; });
   }
@@ -960,6 +969,12 @@
       if (!r || r.success === false) {
         // v0.23.3：付费/下架是确定状态，重试没有意义，直接报错
         var knownBad = r && (r.code === 'paid' || r.code === 'no_url');
+        // v0.23.4：限流是「等一会儿就好」，重试只会更糟 → 不重试，直接给友好提示
+        if (r && r.code === 'ratelimit') {
+          rlUntil = Date.now() + 20000;
+          $('pTitle').textContent = '⏳ 请求过于频繁，约 20 秒后自动恢复，请稍后再点';
+          return;
+        }
         // 拿不到地址：自动再试一次（接口抖动很常见），还不行才报错
         if (!retry && !knownBad) {
           $('pTitle').textContent = '重试中… ' + label;
@@ -2001,7 +2016,14 @@
     var t = curTrack();
     $('fpAlbum').textContent = (t && t.albumName) || '—';
     $('fpTitle').textContent = (t && t.title) || '—';
-    $('fpCover').src = (t && t.cover) || (t && t.albumId ? '' : '');
+    var fpc = (t && t.cover) || '';
+    $('fpCover').src = fpc;
+    // v0.23.10：封面同步为全屏页氛围背景（#fullPlayer::before 模糊放大显示）
+    var fpEl = $('fullPlayer');
+    if (fpEl) {
+      if (fpc) fpEl.style.setProperty('--fpcov', 'url("' + String(fpc).replace(/"/g, '%22') + '")');
+      else fpEl.style.removeProperty('--fpcov');
+    }
     var meta = [];
     if (t && t.index) meta.push('第 ' + t.index + ' 集');
     if (qi >= 0 && queue.length > 1) meta.push('队列 ' + (qi + 1) + ' / ' + queue.length);
@@ -2667,18 +2689,52 @@
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   });
 
+  // v0.23.8：导入方式选择弹窗 —— 导入全部，或只导最新 N 集（后端 /import 的 latest 参数）
+  function pickImportMode(name, tracks) {
+    return new Promise(function (resolve) {
+      var panel = $('ipPanel');
+      $('ipTitle').textContent = '导入《' + (name || '专辑') + '》';
+      $('ipInfo').textContent = tracks > 0 ? '共 ' + tracks + ' 集，选择导入方式：' : '选择导入方式：';
+      $('ipN').value = 30;
+      panel.classList.add('show');
+      function done(rs) {
+        panel.classList.remove('show');
+        $('ipAll').onclick = null; $('ipLatest').onclick = null;
+        $('ipClose').onclick = null; panel.onclick = null; $('ipN').onkeydown = null;
+        resolve(rs);
+      }
+      $('ipAll').onclick = function () { done({ mode: 'all' }); };
+      $('ipLatest').onclick = function () {
+        var n = Math.floor(Number($('ipN').value) || 0);
+        if (n <= 0) { msg('请填写要导最新的多少集，如 30', 'err'); return; }
+        done({ mode: 'latest', n: n });
+      };
+      $('ipClose').onclick = function () { done(null); };
+      panel.onclick = function (e) { if (e.target === panel) done(null); };
+      $('ipN').onkeydown = function (e) { if (e.key === 'Enter') $('ipLatest').click(); };
+      setTimeout(function () { try { $('ipN').focus(); $('ipN').select(); } catch (e2) {} }, 60);
+    });
+  }
+
   async function doImport(albumId, name, tracks, fromEp, toEp) {
     var ranged = Number(fromEp) > 0;
-    if (!ranged && tracks > 400 && !confirm('《' + name + '》共 ' + tracks + ' 集，导入需要一些时间，继续？')) return;
+    // v0.23.8：整本导入先选方式（导入全部 / 只导最新 N 集）；按区间导入保持原行为
+    var pick = null;
+    if (!ranged) {
+      pick = await pickImportMode(name, tracks);
+      if (!pick) return;
+    }
     try {
       var payload = { album_id: String(albumId), name: name || '' };
       if (ranged) {
         payload.start = Number(fromEp) || 0;
         payload.end = Number(toEp) || 0;
+      } else if (pick.mode === 'latest') {
+        payload.latest = pick.n;
       }
       var r = await api('POST', '/import', payload);
       if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('⏳ 已开始导入' + (ranged ? '第 ' + fromEp + '-' + toEp + ' 集' : '') + '《' + name + '》');
+      msg('⏳ 已开始导入' + (ranged ? '第 ' + fromEp + '-' + toEp + ' 集' : (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部')) + '《' + name + '》');
       startPolling();
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   }
@@ -2957,6 +3013,8 @@
 
     var shown = 0;
     curVisible = [];   // v0.19.3：记录当前真正显示出来的集，「本页连播」要用它，不能播被过滤掉的已听集
+    // v0.23.11：先在数组里拼好整页再一次挂载（同步 append 本就不触发中间 reflow，等价于 DocumentFragment 且兼容旧环境）
+    var frag = [];
     tracks.forEach(function (t, i) {
       var state = trackStat(t.trackId);
       if (filterUnheard && state === 'done') return;
@@ -3013,9 +3071,10 @@
         var j = indexOfTrack(lst, t.trackId);
         playQueue(lst, j < 0 ? 0 : j, album);
       });
-      el.appendChild(d);
+      frag.push(d);
     });
-    if (!shown) {
+    if (shown) frag.forEach(function (d) { el.appendChild(d); });
+    else {
       el.innerHTML = '<span class="muted">本页都听完了。取消勾选「只看未听」可以看到全部。</span>';
     }
     // v0.22.5：本页出来后就把最可能被点的前 3 集地址备好（打开专辑第一集基本即点即播）
@@ -3427,6 +3486,18 @@
     doImport(cur.id, d && d.name, 0);
   });
 
+  // v0.23.7：只导最新 N 集
+  $('btnImportLatest').addEventListener('click', async function () {
+    var n = Math.floor(Number($('dLatest').value) || 0);
+    if (n <= 0) { msg('请填写要导最新的多少集，如 30', 'err'); return; }
+    try {
+      var r = await api('POST', '/import', { album_id: cur.id, latest: n, name: cur.detail && cur.detail.name });
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ 已开始导入最新 ' + n + ' 集《' + ((cur.detail && cur.detail.name) || '') + '》');
+      startPolling();
+    } catch (e) { msg('导入失败: ' + e.message, 'err'); }
+  });
+
   $('btnImportRange').addEventListener('click', async function () {
     var s = Number($('dStart').value) || 0, e2 = Number($('dEnd').value) || 0;
     if (!s && !e2) { msg('请填写起始集或结束集', 'err'); return; }
@@ -3774,15 +3845,22 @@
       var a = (r.data && r.data.auto) || {};
       $('autoEnabled').value = a.enabled ? '1' : '0';
       $('autoTime').value = a.time || '08:30';
+      // v0.23.7：自动导入范围
+      var aLl = Number(a.latestLimit) || 0;
+      $('autoLatest').value = aLl > 0 ? '1' : '0';
+      $('autoLatestN').value = aLl > 0 ? aLl : 10;
     } catch (e) { /* */ }
   }
 
   $('btnSaveAuto').addEventListener('click', async function () {
     try {
+      var aLlOn = $('autoLatest').value === '1';
+      var aLlN = Math.floor(Number($('autoLatestN').value) || 0);
       await api('POST', '/config', {
         auto: {
           enabled: $('autoEnabled').value === '1',
-          time: $('autoTime').value || '08:30'
+          time: $('autoTime').value || '08:30',
+          latestLimit: aLlOn ? Math.max(1, Math.min(aLlN, 500)) : 0
         }
       });
       msg('✅ 自动同步设置已保存', 'ok');
@@ -4330,24 +4408,41 @@
         var items = (r.data && r.data.items) || [];
         var bad = 0;
         out.innerHTML = '';
+        var lim = 0;
         items.forEach(function (it) {
-          if (!it.ok) bad++;
+          if (!it.ok && !it.limited) bad++;
+          if (it.limited) lim++;
           var row = document.createElement('div');
           row.className = 'diagrow';
           var ms = it.ms
             ? '<span class="' + (it.ms > 3000 ? 'err' : (it.ms > 1200 ? 'warn' : 'ok')) + '">' + it.ms + ' ms</span>'
             : '';
-          row.innerHTML = '<span class="diagdot ' + (it.ok ? 'ok' : 'err') + '">' + (it.ok ? '●' : '●') + '</span>' +
+          // v0.23.4：506 是「被限流」不是「连不上」，黄点 + 说明，别吓人
+          var dot = it.limited ? 'warn' : (it.ok ? 'ok' : 'err');
+          row.innerHTML = '<span class="diagdot ' + dot + '">●</span>' +
             '<span class="diagname">' + escHtml(it.name) + '</span>' + ms +
             (it.error ? '<span class="diagerr">' + escHtml(it.error) + '</span>' : '') +
-            (!it.error && it.status ? '<span class="diagmeta">HTTP ' + it.status + '</span>' : '');
+            (!it.error && it.status ? '<span class="diagmeta">HTTP ' + it.status + '</span>' : '') +
+            (it.limited ? '<span class="diaglim">被限流，稍后自动恢复</span>' : '');
           out.appendChild(row);
         });
         var d = r.data || {};
-        stat.textContent = bad === 0
-          ? '全部正常 · 在途请求 ' + (d.active || 0) + ' · 排队 ' + (d.queued || 0) + ' · 缓存 ' + (d.cache || 0) + ' 条'
-          : (bad + ' 项异常，检查 NAS 的 DNS / 代理设置后重试');
-        stat.className = 'muted small-txt' + (bad ? ' err' : '');
+        var coolLeft = Math.ceil((d.cool || 0) / 1000);
+        if (lim && coolLeft) {
+          stat.textContent = '网络可通，但取流接口被限流（还剩 ' + coolLeft + ' 秒自动恢复）· 这期间点播会提示「请求过于频繁」';
+          stat.className = 'muted small-txt';
+          stat.style.color = '#d19a2a';
+        } else if (lim) {
+          stat.textContent = '网络可通，但取流接口被临时限流 · 约 30 秒后自动恢复，已缓存的内容照常播放';
+          stat.className = 'muted small-txt';
+          stat.style.color = '#d19a2a';
+        } else {
+          stat.textContent = bad === 0
+            ? '全部正常 · 在途请求 ' + (d.active || 0) + ' · 排队 ' + (d.queued || 0) + ' · 缓存 ' + (d.cache || 0) + ' 条 · 单飞省 ' + (d.dedup || 0) + ' 次'
+            : (bad + ' 项异常，检查 NAS 的 DNS / 代理设置后重试');
+          stat.className = 'muted small-txt' + (bad ? ' err' : '');
+          stat.style.color = '';
+        }
       } catch (e) {
         stat.textContent = '检测失败：' + e.message;
         stat.className = 'muted small-txt err';
