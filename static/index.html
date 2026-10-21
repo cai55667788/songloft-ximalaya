@@ -947,7 +947,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.13</span>
+    <span class="ver" id="ver">v0.23.14</span>
   </div>
 
   <div class="tabs">
@@ -1187,6 +1187,12 @@
           <select id="autoLatest"><option value="0">全部新集</option><option value="1">只导最新 N 集</option></select>
         </div>
         <div><label>N（选「只导最新」时生效）</label><input type="number" id="autoLatestN" min="1" max="500" value="10" /></div>
+      </div>
+      <div class="row">
+        <div><label>旧集自动清理</label>
+          <select id="autoKeep"><option value="0">不清理</option><option value="1">只保留最新 N 集</option></select>
+        </div>
+        <div><label>N（选「只保留最新」时生效）</label><input type="number" id="autoKeepN" min="1" max="2000" value="10" /></div>
       </div>
       <div class="btns">
         <button class="small" id="btnSaveAuto">保存设置</button>
@@ -1494,6 +1500,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.13"></script>
+<script src="static/app.js?v=0.23.14"></script>
 </body>
 </html>
