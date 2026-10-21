@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.13';
+var VERSION = '0.23.14';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -44,7 +44,7 @@ var BATCH = 200;           // 单批建歌上限
 var SYNC_MAX_PAGES = 25;   // 增量同步最多回溯 25 页
 
 var config = {
-  auto: { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0 },
+  auto: { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0, keepLatest: 0 },
   sync: { progress: true },
   dl: { targetDir: '喜马拉雅', format: 'mp3' },
   // 每天检查一次登录态是否还有效，失效时界面上直接提醒
@@ -1377,6 +1377,8 @@ async function loadAll() {
   if (!config.auto) config.auto = { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0 };
   // v0.23.7：自动导入「只导最新 N 集」上限（0 = 全部新集）
   if (typeof config.auto.latestLimit !== 'number' || !(config.auto.latestLimit >= 0)) config.auto.latestLimit = 0;
+  // v0.23.14：旧集自动清理（0=不清理，1~2000=订阅歌单只保留最新 N 集）
+  if (typeof config.auto.keepLatest !== 'number' || !(config.auto.keepLatest >= 0)) config.auto.keepLatest = 0;
   if (!config.sync || typeof config.sync !== 'object') config.sync = { progress: true };
   if (typeof config.sync.progress !== 'boolean') config.sync.progress = true;
   if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
@@ -2354,11 +2356,54 @@ async function syncOne(sub, opts) {
   return out;
 }
 
+// v0.23.14：从歌单歌曲标题解析集号（写入格式是「12. 标题」；解析不到返回 0，清理时按位置兜底）
+function songEpIndex(s) {
+  var m = String((s && s.title) || '').match(/^(\d+)\s*[\.、]/);
+  var ix = m ? Number(m[1]) : 0;
+  return ix > 0 ? ix : 0;
+}
+
+// v0.23.14：旧集自动清理 —— 订阅歌单只保留最新 N 集（0=不清理）。
+// 只移除本插件写入的喜马拉雅集（按 sourceData 里的 trackId 识别），用户手动加进歌单的歌一律不动。
+// 宿主没有「移除单曲」接口，用 setSongs 整表重写实现；能力缺失或重写失败就跳过并记日志，绝不动歌。
+async function pruneSubOld(sub, keepN) {
+  var out = { removed: 0, kept: 0, skipped: '' };
+  keepN = Math.floor(Number(keepN) || 0);
+  if (!sub || !sub.playlistId || keepN <= 0) { out.skipped = 'off'; return out; }
+  if (!songloft.playlists || typeof songloft.playlists.getSongs !== 'function' || typeof songloft.playlists.setSongs !== 'function') { out.skipped = 'nocap'; return out; }
+  var songs = [];
+  try { songs = await collectPlaylistSongs(sub.playlistId); } catch (e) { out.skipped = 'scan:' + String(e && e.message || e); return out; }
+  if (!songs || !songs.length) { out.skipped = 'empty'; return out; }
+  var xm = [], hasOther = false;
+  for (var i = 0; i < songs.length; i++) {
+    var s = songs[i];
+    if (songTrackId(s)) xm.push({ id: s.id, ix: songEpIndex(s), pos: i });
+    else hasOther = true;
+  }
+  if (xm.length <= keepN) { out.kept = xm.length; out.skipped = 'under'; return out; }
+  // 集号升序；解析不到集号的按歌单位置兜底（排前面，先被清）
+  xm.sort(function (a, b) { return (a.ix - b.ix) || (a.pos - b.pos); });
+  var rmN = xm.length - keepN;
+  var rmIds = {};
+  for (var j = 0; j < rmN; j++) rmIds[String(xm[j].id)] = true;
+  var keepIds = [];
+  for (var k = 0; k < songs.length; k++) {
+    if (!rmIds[String(songs[k].id)]) keepIds.push(songs[k].id);
+  }
+  try { await songloft.playlists.setSongs(sub.playlistId, keepIds); }
+  catch (e2) { out.skipped = 'setsongs:' + String(e2 && e2.message || e2); return out; }
+  out.removed = rmN;
+  out.kept = keepIds.length;
+  songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》已按设置清理旧集：移除最早 ' + rmN + ' 集，歌单保留 ' + keepIds.length + ' 首' + (hasOther ? '（含手动添加的歌）' : ''));
+  return out;
+}
+
 async function runSyncAll(opts) {
   opts = opts || {};
   if (syncing) return { skipped: true, newCount: 0, checked: 0, errors: [], updates: [] };
   syncing = true;
   var totalNew = 0, totalAdded = 0, checked = 0, errors = [], updates = [];
+  var totalPruned = 0;   // v0.23.14：本轮清理掉的旧集总数
   var pushed = null;
   try {
     for (var i = 0; i < subs.length; i++) {
@@ -2371,10 +2416,17 @@ async function runSyncAll(opts) {
       if (r.added) updates.push({ albumId: s.albumId, name: s.name, added: r.added, titles: r.titles || [] });
       if (r.error) errors.push(r.name + ': ' + r.error);
       if (r.added && !pushed) pushed = s;
+      // v0.23.14：自动清理旧集（只在真导入时跑，只检查不导入不清；清理失败不影响同步）
+      if (opts.import !== false && s.playlistId) {
+        var aKl2 = Number(config.auto && config.auto.keepLatest) || 0;
+        if (aKl2 > 0) {
+          try { var prR = await pruneSubOld(s, aKl2); totalPruned += (prR.removed || 0); } catch (ePr) { }
+        }
+      }
     }
     lastSync = {
       at: nowStr(),
-      result: '检查 ' + checked + ' 张，新增 ' + totalAdded + ' 集' + (errors.length ? '，' + errors.length + ' 张出错' : ''),
+      result: '检查 ' + checked + ' 张，新增 ' + totalAdded + ' 集' + (totalPruned ? '，清理旧集 ' + totalPruned + ' 集' : '') + (errors.length ? '，' + errors.length + ' 张出错' : ''),
       trigger: opts.trigger || '手动'
     };
     if (errors.length) logWarn('sync', '同步有 ' + errors.length + ' 张失败：' + errors.slice(0, 3).join('；'));
@@ -3338,6 +3390,11 @@ async function handleHTTPRequest(req) {
       if (a.latestLimit !== undefined) {
         var aLl = Math.floor(Number(a.latestLimit) || 0);
         config.auto.latestLimit = Math.max(0, Math.min(aLl, 500));
+      }
+      // v0.23.14：旧集自动清理
+      if (a.keepLatest !== undefined) {
+        var aKl = Math.floor(Number(a.keepLatest) || 0);
+        config.auto.keepLatest = Math.max(0, Math.min(aKl, 2000));
       }
     }
     if (body.sync) {
