@@ -3849,6 +3849,10 @@
       var aLl = Number(a.latestLimit) || 0;
       $('autoLatest').value = aLl > 0 ? '1' : '0';
       $('autoLatestN').value = aLl > 0 ? aLl : 10;
+      // v0.23.14：旧集自动清理
+      var aKl = Number(a.keepLatest) || 0;
+      $('autoKeep').value = aKl > 0 ? '1' : '0';
+      $('autoKeepN').value = aKl > 0 ? aKl : 10;
     } catch (e) { /* */ }
   }
 
@@ -3856,11 +3860,14 @@
     try {
       var aLlOn = $('autoLatest').value === '1';
       var aLlN = Math.floor(Number($('autoLatestN').value) || 0);
+      var aKlOn = $('autoKeep').value === '1';
+      var aKlN = Math.floor(Number($('autoKeepN').value) || 0);
       await api('POST', '/config', {
         auto: {
           enabled: $('autoEnabled').value === '1',
           time: $('autoTime').value || '08:30',
-          latestLimit: aLlOn ? Math.max(1, Math.min(aLlN, 500)) : 0
+          latestLimit: aLlOn ? Math.max(1, Math.min(aLlN, 500)) : 0,
+          keepLatest: aKlOn ? Math.max(1, Math.min(aKlN, 2000)) : 0
         }
       });
       msg('✅ 自动同步设置已保存', 'ok');
