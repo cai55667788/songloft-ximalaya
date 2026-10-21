@@ -892,6 +892,41 @@
       border-radius: 2px; background: linear-gradient(180deg, var(--accent), var(--accent-deep));
     }
     @media (prefers-reduced-motion: reduce) { #fullPlayer::before { transition: none; } }
+
+    /* ========== v0.23.12 界面精修第三轮（继续级联覆盖） ========== */
+    /* 统计柱状图：主题色渐变柱体，hover 提亮 */
+    .bars .bfill { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 62%, #fff 8%), var(--accent)); opacity: .9; border-radius: 3px 3px 1px 1px; transition: opacity .15s ease; }
+    .bars .bar:hover .bfill { opacity: 1; }
+    /* 排行榜小条同步渐变 */
+    .rank .rbar span { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 55%, transparent), var(--accent)); border-radius: 3px; }
+    /* 滑杆：thumb 加主题色光晕，track 变细圆角（播放页 / 音量 / 倍速通用） */
+    input[type=range] { -webkit-appearance: none; appearance: none; }
+    input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 999px; background: var(--chip); }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%;
+      background: var(--accent); border: 2px solid #fff;
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent), 0 2px 8px color-mix(in srgb, var(--accent) 45%, transparent);
+      transition: box-shadow .15s ease, transform .15s ease;
+    }
+    input[type=range]:active::-webkit-slider-thumb { transform: scale(1.12); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 30%, transparent), 0 2px 10px color-mix(in srgb, var(--accent) 55%, transparent); }
+    input[type=range]::-moz-range-track { height: 4px; border-radius: 999px; background: var(--chip); }
+    input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent); }
+    /* 页面主滚动条：细圆角，透明轨道 */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 38%, transparent); border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 58%, transparent); }
+    /* 输入框聚焦：主题色柔光环（叠加在原内阴影之上） */
+    input:focus, select:focus, textarea:focus {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent), inset 0 1px 3px rgba(16,24,40,.05);
+    }
+    /* 「有 N 集更新」徽章：渐变底 + 柔光，更醒目 */
+    .badge.new { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, #fff 12%), var(--accent)); box-shadow: 0 1px 6px color-mix(in srgb, var(--accent) 38%, transparent); }
+    /* 卡片 hover 边框染上主题色（配合已有上浮） */
+    @media (hover: hover) {
+      .card:hover { border-color: color-mix(in srgb, var(--accent) 24%, var(--border-soft)); }
+    }
 </style>
 </head>
 <body>
@@ -899,7 +934,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.11</span>
+    <span class="ver" id="ver">v0.23.12</span>
   </div>
 
   <div class="tabs">
@@ -1446,6 +1481,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.11"></script>
+<script src="static/app.js?v=0.23.12"></script>
 </body>
 </html>
