@@ -198,6 +198,8 @@
     .diagdot { font-size: 10px; line-height: 1; }
     .diagdot.ok { color: #35c07a; }
     .diagdot.err { color: #e05b5b; }
+    .diagdot.warn { color: #d19a2a; }
+    .diaglim { color: #d19a2a; }
     .diagname { flex: 1; min-width: 110px; }
     .diagrow .ok { color: #35c07a; }
     .diagrow .warn { color: #d19a2a; }
@@ -261,6 +263,21 @@
     .bmrow .bmdel { flex: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; }
     .bmrow .bmdel:hover { color: var(--err); }
     .bmday { padding: 10px 14px 4px; font-size: 11px; color: var(--muted); background: var(--bg); position: sticky; top: 0; }
+    /* v0.23.8：导入方式选择面板（全部 / 只导最新 N 集） */
+    #ipPanel { position: fixed; left: 0; right: 0; bottom: 0; top: 0; background: rgba(0,0,0,.32); z-index: 64; display: none; }
+    #ipPanel.show { display: block; }
+    #ipPanel .sheet {
+      position: absolute; left: 0; right: 0; bottom: 0; background: var(--card);
+      border-radius: 16px 16px 0 0; border-top: 1px solid var(--border); display: flex; flex-direction: column;
+      max-width: 720px; margin: 0 auto;
+    }
+    #ipPanel .qhead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; border-bottom: 1px solid var(--border); }
+    #ipPanel .qhead .qt { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #ipPanel .ipinfo { padding: 10px 14px 0; color: var(--muted); font-size: 13px; }
+    #ipPanel .ipnrow { display: flex; align-items: center; gap: 8px; padding: 10px 14px 2px; font-size: 13px; }
+    #ipPanel .ipnrow input { width: 96px; font-size: 14px; padding: 6px 10px; }
+    #ipPanel .qfoot { display: flex; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+    #ipPanel .qfoot .primary { background: var(--accent, #3b82f6); border-color: var(--accent, #3b82f6); color: #fff; }
     .bmempty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
 
     /* 全屏播放页 */
@@ -772,6 +789,109 @@
     #fullPlayer.show .fpwrap { animation: fpIn .2s ease both; }
     @media (prefers-reduced-motion: reduce) { #fullPlayer.show .fpwrap { animation: none; } }
 
+
+    /* ========== v0.23.9 视觉精修（集中覆盖，旧规则不动） ========== */
+    /* 1) 入场动画：卡片淡入上移（tab 切换 display 切换会自动重播）；抽屉滑入、遮罩淡入 */
+    @keyframes cardIn { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+    @keyframes sheetIn { from { opacity: .4; transform: translateY(46px); } to { opacity: 1; transform: none; } }
+    @keyframes maskIn { from { opacity: 0; } to { opacity: 1; } }
+    .card { animation: cardIn .3s cubic-bezier(.2,.7,.3,1) both; }
+    #qPanel, #bmPanel, #ipPanel { animation: maskIn .16s ease both; }
+    #qPanel .sheet, #bmPanel .sheet, #ipPanel .sheet { animation: sheetIn .26s cubic-bezier(.2,.7,.3,1) both; }
+    @media (prefers-reduced-motion: reduce) {
+      .card, #qPanel, #bmPanel, #ipPanel,
+      #qPanel .sheet, #bmPanel .sheet, #ipPanel .sheet { animation: none; }
+    }
+    /* 2) 大数字：主题色渐变文字，等宽数字更整齐 */
+    .dash .dv, .stat .sv {
+      background: linear-gradient(180deg, var(--accent), var(--accent-deep));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-variant-numeric: tabular-nums; letter-spacing: .2px;
+    }
+    /* 3) tab 药丸：active 换微渐变，更饱满 */
+    .tab.active {
+      background: linear-gradient(180deg, var(--accent), var(--accent-deep));
+      border-color: transparent;
+    }
+    /* 4) 主按钮：顶部一点高光更有质感；hover 轻浮起 */
+    button:not(.plain):not(.ghost):not(.tab) {
+      background:
+        linear-gradient(180deg, color-mix(in srgb, #fff 14%, transparent), transparent 52%),
+        linear-gradient(180deg, var(--accent), var(--accent-deep));
+    }
+    @media (hover: hover) {
+      button:not(.plain):not(.ghost):not(.tab):hover { transform: translateY(-1px); }
+    }
+    /* 5) 封面：更圆润；搜索结果封面 hover 轻放大 */
+    .res-item img, .line img, .impicon { border-radius: 12px; }
+    @media (hover: hover) {
+      .res-item img { transition: transform .18s ease; }
+      .res-item:hover img { transform: scale(1.045); }
+    }
+    /* 6) 输入框：内一圈极淡内阴影，凹陷感 */
+    input[type=text], input[type=number], input[type=time], textarea, select {
+      box-shadow: inset 0 1px 2px rgba(16,24,40,.045);
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    /* 7) 提示条：滑入出现 */
+    @keyframes jobIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    #jobBar.show { animation: jobIn .22s cubic-bezier(.2,.7,.3,1) both; }
+    /* 8) 柱状图柱体：顶部圆角 + 渐变 */
+    .bar { border-radius: 4px 4px 2px 2px; }
+    /* 9) 卡片标题：左侧主题色小竖条，一眼认出区块 */
+    .card h2 { position: relative; padding-left: 11px; }
+    .card h2::before {
+      content: ''; position: absolute; left: 0; top: 3px; bottom: 3px; width: 4px;
+      border-radius: 2px; background: linear-gradient(180deg, var(--accent), var(--accent-deep));
+    }
+    /* 10) 统计块 hover：轻微上浮（桌面端） */
+    @media (hover: hover) {
+      .dash, .stat { transition: transform .15s ease, background .15s ease; }
+      .dash:hover, .stat:hover { transform: translateY(-2px); }
+    }
+
+    /* ========== v0.23.10 播放界面沉浸化 ========== */
+    /* 1) 全屏播放页背景：当前封面放大 70px 模糊成氛围光（--fpcov 由 syncFull 同步） */
+    #fullPlayer::before {
+      content: ''; position: fixed; inset: -14%; z-index: -1; pointer-events: none;
+      background: var(--fpcov, none) center / cover no-repeat;
+      filter: blur(70px) saturate(1.45);
+      opacity: .34; transform: scale(1.08);
+    }
+    @media (prefers-color-scheme: dark) { #fullPlayer::before { opacity: .42; } }
+    /* 2) 封面：更大圆角 + 主题色投影 + 半透纱圈 */
+    #fullPlayer .fpcover img {
+      border-radius: 26px;
+      box-shadow:
+        0 22px 55px color-mix(in srgb, var(--accent) 30%, rgba(0,0,0,.22)),
+        0 0 0 10px color-mix(in srgb, var(--card) 52%, transparent);
+    }
+    /* 3) 主播放键：光晕更强 */
+    #fullPlayer .fpctrl .fpbig {
+      box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 46%, transparent);
+    }
+    /* 4) 时间行加重 */
+    #fullPlayer .fptime { font-weight: 600; letter-spacing: .02em; }
+    /* 5) 顶栏按钮：圆形毛玻璃底座 */
+    #fullPlayer .fphead button {
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--card) 72%, transparent);
+      -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+      border: 1px solid var(--border-soft);
+    }
+    /* 6) 底部播放条：毛玻璃胶囊 */
+    #player {
+      background: color-mix(in srgb, var(--card) 82%, transparent);
+      -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+    }
+    /* 7) 正在播的行：左侧主题色渐变竖条 */
+    .trk.on { position: relative; }
+    .trk.on::before {
+      content: ''; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px;
+      border-radius: 2px; background: linear-gradient(180deg, var(--accent), var(--accent-deep));
+    }
+    @media (prefers-reduced-motion: reduce) { #fullPlayer::before { transition: none; } }
 </style>
 </head>
 <body>
@@ -779,7 +899,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.3</span>
+    <span class="ver" id="ver">v0.23.11</span>
   </div>
 
   <div class="tabs">
@@ -926,6 +1046,10 @@
       <div id="dHl" class="hide" style="margin-top:10px;"></div>
       <div class="muted small-txt" id="dDlTip" style="margin-top:6px;"></div>
       <div class="row" style="margin-top:10px;">
+        <div><label>只导最新</label><input type="number" id="dLatest" min="1" placeholder="如 30" /></div>
+        <div style="flex:none;padding-top:18px;"><button class="small plain" id="btnImportLatest">集（只导最新 N 集）</button></div>
+      </div>
+      <div class="row">
         <div><label>起始集</label><input type="number" id="dStart" min="1" placeholder="1" /></div>
         <div><label>结束集</label><input type="number" id="dEnd" min="1" placeholder="默认全部" /></div>
         <div style="flex:none"><button class="small plain" id="btnImportRange">按区间导入</button></div>
@@ -1009,6 +1133,12 @@
         <div><label>开关</label>
           <select id="autoEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
         </div>
+      </div>
+      <div class="row">
+        <div><label>新集导入范围</label>
+          <select id="autoLatest"><option value="0">全部新集</option><option value="1">只导最新 N 集</option></select>
+        </div>
+        <div><label>N（选「只导最新」时生效）</label><input type="number" id="autoLatestN" min="1" max="500" value="10" /></div>
       </div>
       <div class="btns">
         <button class="small" id="btnSaveAuto">保存设置</button>
@@ -1254,6 +1384,26 @@
   </div>
 </div>
 
+<!-- v0.23.8：导入方式选择（全部 / 只导最新 N 集） -->
+<div id="ipPanel">
+  <div class="sheet">
+    <div class="qhead">
+      <div class="qt" id="ipTitle">选择导入方式</div>
+      <span class="x" id="ipClose" style="cursor:pointer;color:var(--muted);font-size:18px;line-height:1;">×</span>
+    </div>
+    <div class="ipinfo" id="ipInfo"></div>
+    <div class="ipnrow">
+      <label style="flex:none;">只导最新</label>
+      <input type="number" id="ipN" min="1" max="9999" value="30" />
+      <span style="color:var(--muted);">集（填好点右侧「只导最新」）</span>
+    </div>
+    <div class="qfoot">
+      <button id="ipAll">导入全部</button>
+      <button id="ipLatest" class="primary">只导最新</button>
+    </div>
+  </div>
+</div>
+
 <!-- 全屏播放页 -->
 <div id="fullPlayer">
   <div class="fpwrap">
@@ -1296,6 +1446,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.3"></script>
+<script src="static/app.js?v=0.23.11"></script>
 </body>
-</html>
+</html>
