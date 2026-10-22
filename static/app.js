@@ -229,6 +229,7 @@
         loadSubs();
         if (!meLoaded) loadMySubs(false);
         loadGroups();
+        loadSubGroups();
       }
       if (btn.dataset.tab === 'lib') { loadImported(); poll(); }
       if (btn.dataset.tab === 'subs') { poll(); }
@@ -3560,19 +3561,34 @@
 
   // ---------- 订阅 ----------
   var subsCache = [];
+  // v0.23.15：订阅分组
+  var groupsCache = null;      // [{name, mode, n}]，null = 还没加载
+  var sgDraft = [];            // 分组卡的编辑草稿
+  var sgrpFilter = 'all';      // 'all' | ''（未分组）| 分组名
 
   async function loadSubs() {
     var el = $('subsList');
     try {
       var r = await api('GET', '/subs');
       subsCache = r.data || [];
+      await ensureGroups();          // v0.23.15：分组标签与筛选要用
+      // 分组被删掉后，筛选停在该分组会看到空列表 —— 自动退回「全部」
+      if (sgrpFilter !== 'all' && sgrpFilter !== '' && !(groupsCache || []).some(function (g) { return g.name === sgrpFilter; })) sgrpFilter = 'all';
+      renderSubsFilter();
+      if (sgDraft.length) renderSgCard();   // 分组卡里的「N 张」跟着订阅走
       el.innerHTML = '';
       if (!subsCache.length) {
         el.innerHTML = '<span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span>';
         updateSubBadge();
         return;
       }
-      subsCache.forEach(function (s) {
+      var shownSubs = sgrpFilter === 'all' ? subsCache : subsCache.filter(function (s) { return (s.group || '') === sgrpFilter; });
+      if (!shownSubs.length) {
+        el.innerHTML = '<span class="muted">这个分组里还没有订阅。</span>';
+        updateSubBadge();
+        return;
+      }
+      shownSubs.forEach(function (s) {
         var line = document.createElement('div');
         line.className = 'line';
         var img = document.createElement('img');
@@ -3592,6 +3608,14 @@
         if (s.lastCheckAt) bits.push('检查 ' + s.lastCheckAt);
         if (!s.playlistId) bits.push('<span class="err">未绑定歌单</span>');
         sub2.innerHTML = bits.join(' · ');
+        // v0.23.15：分组标签放信息行最前（不会被省略号截掉），点一下改分组
+        var gtag = document.createElement('span');
+        gtag.className = 'gtag' + (s.group ? '' : ' none');
+        gtag.textContent = '📁 ' + (s.group || '未分组');
+        gtag.title = '点击改分组';
+        gtag.addEventListener('click', function (ev) { ev.stopPropagation(); openGrpPick(s); });
+        sub2.insertBefore(gtag, sub2.firstChild);
+        sub2.insertBefore(document.createTextNode(' '), gtag.nextSibling);
         body.appendChild(n); body.appendChild(sub2);
 
         var ops = document.createElement('div');
@@ -3639,6 +3663,174 @@
       updateSubBadge();
     } catch (e) {
       el.innerHTML = '<span class="err">加载失败: ' + e.message + '</span>';
+    }
+  }
+
+
+  // ---------- v0.23.15：订阅分组 ----------
+  async function ensureGroups(force) {
+    if (groupsCache && !force) return groupsCache;
+    try {
+      var r = await api('GET', '/groups');
+      groupsCache = ((r && r.data && r.data.groups) || []).slice();
+    } catch (e) { groupsCache = groupsCache || []; }
+    return groupsCache;
+  }
+
+  function renderSubsFilter() {
+    var box = $('subsFilter');
+    if (!box) return;
+    var counts = { '': 0 };
+    (groupsCache || []).forEach(function (g) { counts[g.name] = 0; });
+    subsCache.forEach(function (s) {
+      var k = (s.group && counts[s.group] !== undefined) ? s.group : '';
+      counts[k] = (counts[k] || 0) + 1;
+    });
+    box.innerHTML = '';
+    var items = [{ key: 'all', label: '全部', n: subsCache.length }, { key: '', label: '未分组', n: counts[''] || 0 }];
+    (groupsCache || []).forEach(function (g) { items.push({ key: g.name, label: g.name, n: counts[g.name] || 0 }); });
+    if (items.length <= 2 && !(groupsCache || []).length) { box.innerHTML = ''; return; }
+    items.forEach(function (it) {
+      var c = document.createElement('span');
+      c.className = 'chip' + (sgrpFilter === it.key ? ' on' : '');
+      c.textContent = it.label + ' ' + it.n;
+      c.addEventListener('click', function () { sgrpFilter = it.key; loadSubs(); });
+      box.appendChild(c);
+    });
+  }
+
+  // 分组卡：名字 + 同步范围（跟随全局 / 只同步最新 N 集 / 同步全集）
+  async function loadSubGroups() {
+    var box = $('sgList');
+    if (!box) return;
+    await ensureGroups(true);
+    sgDraft = (groupsCache || []).map(function (g) { return { name: g.name, mode: g.mode, n: g.n }; });
+    renderSgCard();
+  }
+
+  function renderSgCard() {
+    var box = $('sgList');
+    if (!box) return;
+    var counts = {};
+    subsCache.forEach(function (s) { var k = s.group || ''; counts[k] = (counts[k] || 0) + 1; });
+    box.innerHTML = '';
+    if (!sgDraft.length) {
+      box.innerHTML = '<div class="muted small-txt">还没有分组。下面输入名字加一个，比如「英语听力」「睡前故事」。</div>';
+      return;
+    }
+    sgDraft.forEach(function (g, i) {
+      var row = document.createElement('div');
+      row.className = 'sgrow';
+      var nm = document.createElement('div');
+      nm.className = 'sgn';
+      nm.textContent = g.name;
+      var cnt = document.createElement('span');
+      cnt.className = 'muted small-txt';
+      cnt.textContent = ' ' + (counts[g.name] || 0) + ' 张';
+      nm.appendChild(cnt);
+
+      var sel = document.createElement('select');
+      sel.className = 'sgs';
+      [['global', '跟随全局'], ['latest', '只同步最新 N 集'], ['all', '同步全集']].forEach(function (o) {
+        var op = document.createElement('option');
+        op.value = o[0]; op.textContent = o[1];
+        sel.appendChild(op);
+      });
+      sel.value = g.mode || 'global';
+
+      var num = document.createElement('input');
+      num.type = 'number'; num.min = '1'; num.max = '2000'; num.className = 'sgnum';
+      num.value = g.n || 20;
+      num.disabled = (g.mode || 'global') !== 'latest';
+      num.title = g.mode === 'latest' ? '只同步最新多少集' : '选「只同步最新 N 集」时可填';
+
+      sel.addEventListener('change', function () {
+        g.mode = sel.value;
+        num.disabled = g.mode !== 'latest';
+      });
+      num.addEventListener('input', function () { g.n = Math.floor(Number(num.value) || 0); });
+
+      var del = document.createElement('button');
+      del.className = 'small plain';
+      del.textContent = '×';
+      del.title = '删除分组（里面的订阅回到未分组）';
+      del.addEventListener('click', function () {
+        if (!confirm('删除分组「' + g.name + '」？组里的订阅会回到未分组，订阅本身不会删。\n（点「保存分组设置」后生效）')) return;
+        sgDraft.splice(i, 1);
+        renderSgCard();
+      });
+
+      row.appendChild(nm); row.appendChild(sel); row.appendChild(num); row.appendChild(del);
+      box.appendChild(row);
+    });
+  }
+
+  // 改某一订阅的分组（底部选择面板）
+  function openGrpPick(s) {
+    var panel = $('gpPanel');
+    if (!panel) return;
+    if (!(groupsCache || []).length) { msg('还没有分组，先在「🗂 订阅分组」里建一个'); return; }
+    $('gpTitle').textContent = '《' + (s.name || s.albumId) + '》归到哪个分组';
+    var box = $('gpBody');
+    box.innerHTML = '';
+    var opts = [{ name: '', label: '未分组（跟随全局设置）' }].concat((groupsCache || []).map(function (g) {
+      var how = g.mode === 'all' ? '同步全集' : (g.mode === 'latest' ? '只同步最新 ' + g.n + ' 集' : '跟随全局');
+      return { name: g.name, label: g.name + ' · ' + how };
+    }));
+    opts.forEach(function (o) {
+      var b = document.createElement('button');
+      b.className = 'small plain gpopt' + ((s.group || '') === o.name ? ' on' : '');
+      b.textContent = o.label;
+      b.addEventListener('click', async function () {
+        try {
+          var rr = await api('POST', '/subs/group', { album_id: s.albumId, group: o.name });
+          if (rr && rr.success === false) { msg('❌ ' + (rr.error || '改分组失败'), 'err'); return; }
+          panel.classList.remove('show');
+          msg(o.name ? '✅ 已归到「' + o.name + '」' : '✅ 已移出分组');
+          loadSubs();
+        } catch (e) { msg('改分组失败: ' + e.message, 'err'); }
+      });
+      box.appendChild(b);
+    });
+    panel.classList.add('show');
+    panel.onclick = function (e) { if (e.target === panel) panel.classList.remove('show'); };
+    $('gpClose').onclick = function () { panel.classList.remove('show'); };
+    $('gpCancel').onclick = function () { panel.classList.remove('show'); };
+  }
+
+  function bindSubGroupUI() {
+    if ($('btnSgAdd')) {
+      $('btnSgAdd').addEventListener('click', function () {
+        var el = $('sgNewName');
+        var nm = String(el.value || '').replace(/\s+/g, ' ').trim();
+        if (!nm) { msg('请填写分组名', 'err'); return; }
+        nm = nm.slice(0, 24);
+        if (sgDraft.some(function (g) { return g.name === nm; })) { msg('已经有同名分组了', 'err'); return; }
+        if (sgDraft.length >= 50) { msg('分组最多 50 个', 'err'); return; }
+        sgDraft.push({ name: nm, mode: 'global', n: 20 });
+        el.value = '';
+        renderSgCard();
+      });
+      $('sgNewName').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('btnSgAdd').click(); });
+    }
+    if ($('btnSgSave')) {
+      $('btnSgSave').addEventListener('click', async function () {
+        var payload = sgDraft.map(function (g) {
+          var n = Math.floor(Number(g.n) || 0);
+          return { name: g.name, mode: g.mode, n: n > 0 ? n : 20 };
+        });
+        var btn = $('btnSgSave');
+        btn.disabled = true;
+        try {
+          var r = await api('POST', '/groups', { groups: payload });
+          if (r && r.success === false) { msg('❌ ' + (r.error || '保存失败'), 'err'); return; }
+          var mv = (r.data && r.data.moved) || 0;
+          msg('✅ 已保存 ' + payload.length + ' 个分组' + (mv ? '，' + mv + ' 张订阅回到未分组' : ''));
+          await loadSubGroups();
+          loadSubs();
+        } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+        btn.disabled = false;
+      });
     }
   }
 
@@ -4590,6 +4782,8 @@
     loadLogin();
     loadAuto();
     loadProgCfg();
+    bindSubGroupUI();
+    loadSubGroups();
     loadSubs();
     loadImported();
     renderIdleChips();
