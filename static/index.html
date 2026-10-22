@@ -964,6 +964,13 @@
     .gplist { padding: 8px 14px 10px; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
     .gplist .gpopt { text-align: left; justify-content: flex-start; }
     .gplist .gpopt.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+    /* ===== v0.23.16：订阅多选 + 全选批量操作 ===== */
+    .line .ck { flex: none; width: 18px; height: 18px; margin: 0 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+    .line.sel { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 10px; }
+    #subsSelBar { margin-top: 8px; padding: 8px 10px; border-radius: 12px; border-top: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border)); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+    #subsSelBar #subsSelCount { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+    #subsSelBar select { width: auto; min-width: 108px; }
+    .gpopt { justify-content: flex-start; text-align: left; }
 </style>
 </head>
 <body>
@@ -971,7 +978,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.15</span>
+    <span class="ver" id="ver">v0.23.16</span>
   </div>
 
   <div class="tabs">
@@ -1182,6 +1189,7 @@
       </div>
       <div class="btns" style="margin-top:6px;">
         <button class="small plain" id="btnGrpLoad">刷新</button>
+        <button class="small plain" id="btnGrpGroup">📁 设置分组</button>
         <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
       </div>
       <div id="grpBody" style="margin-top:8px;"></div>
@@ -1228,7 +1236,7 @@
 
     <div class="card" id="sgCard">
       <h2>🗂 订阅分组</h2>
-      <div class="muted small-txt">给订阅分组，每组能单独设「只同步最新 N 集」或「同步全集」——比如「英语听力」只要最近 20 集，「睡前故事」要全集。点订阅行里的分组标签即可改所属分组。</div>
+      <div class="muted small-txt">给订阅分组，每组能单独设「只同步最新 N 集」或「同步全集」——比如「英语听力」只要最近 20 集，「睡前故事」要全集。点订阅行里的分组标签即可改所属分组；也可以在下面「我的订阅」里勾选多张，一次性设分组。</div>
       <div id="sgList" style="margin-top:8px;"></div>
       <div class="row" style="margin-top:10px;">
         <div><label>新建分组</label><input type="text" id="sgNewName" placeholder="如：英语听力 / 睡前故事" maxlength="24" /></div>
@@ -1241,6 +1249,19 @@
     <div class="card">
       <h2>📌 我的订阅</h2>
       <div class="chips" id="subsFilter"></div>
+      <div class="selbar hide" id="subsSelBar">
+        <label class="muted small-txt" style="margin:0;display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="subsCkAll" style="accent-color:var(--accent)" /> 全选
+        </label>
+        <span class="muted small-txt" id="subsSelCount">已选 0</span>
+        <button class="small" id="btnSubsGroup">📁 设置分组</button>
+        <select id="subsBulkAuto" title="给勾选的订阅批量开/关自动同步">
+          <option value="">自动同步…</option>
+          <option value="1">全部开启</option>
+          <option value="0">全部关闭</option>
+        </select>
+        <button class="small plain" id="btnSubsUnsub">取消订阅所选</button>
+      </div>
       <div id="subsList" style="margin-top:8px;"><span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span></div>
     </div>
   </section>
@@ -1548,6 +1569,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.15"></script>
+<script src="static/app.js?v=0.23.16"></script>
 </body>
 </html>
