@@ -3729,7 +3729,14 @@
     var box = $('sgList');
     if (!box) return;
     await ensureGroups(true);
-    sgDraft = (groupsCache || []).map(function (g) { return { name: g.name, mode: g.mode, n: g.n }; });
+    // v0.23.17：连同步方式一起带进草稿（开关 / 时间 / 内容 / 上次跑的时间）
+    sgDraft = (groupsCache || []).map(function (g) {
+      return {
+        name: g.name, mode: g.mode, n: g.n,
+        auto: g.auto || 'global', time: g.time || '', import: g.import || 'global',
+        lastRunDate: g.lastRunDate || ''
+      };
+    });
     renderSgCard();
   }
 
@@ -3749,10 +3756,43 @@
       var nm = document.createElement('div');
       nm.className = 'sgn';
       nm.textContent = g.name;
+      if (g.lastRunDate) nm.title = '上次自动同步：' + g.lastRunDate;
       var cnt = document.createElement('span');
       cnt.className = 'muted small-txt';
       cnt.textContent = ' ' + (counts[g.name] || 0) + ' 张';
       nm.appendChild(cnt);
+
+      // v0.23.17：立即同步这一组（按该组的「内容」决定导入还是只检查）
+      var bRun = document.createElement('button');
+      bRun.className = 'small plain sgbtn';
+      bRun.textContent = '同步';
+      bRun.title = '立即按这个分组自己的方式同步一次';
+      bRun.addEventListener('click', async function () {
+        bRun.disabled = true;
+        try {
+          var r = await api('POST', '/groups/sync', { name: g.name });
+          if (r && r.success === false) msg('❌ ' + (r.error || '同步启动失败'), 'err');
+          else { msg('⏳ 正在同步「' + g.name + '」' + (g.import === 'check' ? '（只检查）' : '')); startPolling(); }
+        } catch (e) { msg('同步失败: ' + e.message, 'err'); }
+        bRun.disabled = false;
+      });
+
+      var del = document.createElement('button');
+      del.className = 'small plain sgbtn';
+      del.textContent = '×';
+      del.title = '删除分组（里面的订阅回到未分组）';
+      del.addEventListener('click', function () {
+        if (!confirm('删除分组「' + g.name + '」？组里的订阅会回到未分组，订阅本身不会删。\n（点「保存分组设置」后生效）')) return;
+        sgDraft.splice(i, 1);
+        renderSgCard();
+      });
+
+      // 第二行：同步范围 + 同步方式（自动同步开关 / 时间 / 内容）
+      var opt = document.createElement('div');
+      opt.className = 'sgopt';
+
+      var lb1 = document.createElement('label');
+      lb1.textContent = '范围';
 
       var sel = document.createElement('select');
       sel.className = 'sgs';
@@ -3775,17 +3815,52 @@
       });
       num.addEventListener('input', function () { g.n = Math.floor(Number(num.value) || 0); });
 
-      var del = document.createElement('button');
-      del.className = 'small plain';
-      del.textContent = '×';
-      del.title = '删除分组（里面的订阅回到未分组）';
-      del.addEventListener('click', function () {
-        if (!confirm('删除分组「' + g.name + '」？组里的订阅会回到未分组，订阅本身不会删。\n（点「保存分组设置」后生效）')) return;
-        sgDraft.splice(i, 1);
-        renderSgCard();
-      });
+      var lb2 = document.createElement('label');
+      lb2.textContent = '自动同步';
 
-      row.appendChild(nm); row.appendChild(sel); row.appendChild(num); row.appendChild(del);
+      var autoSel = document.createElement('select');
+      autoSel.className = 'sgs';
+      [['global', '跟随全局'], ['on', '开'], ['off', '关']].forEach(function (o) {
+        var op = document.createElement('option');
+        op.value = o[0]; op.textContent = o[1];
+        autoSel.appendChild(op);
+      });
+      autoSel.value = g.auto || 'global';
+      autoSel.title = '「关」= 只在你手动点同步时才跑';
+
+      var timeInp = document.createElement('input');
+      timeInp.type = 'time';
+      timeInp.className = 'sgtime';
+      timeInp.value = g.time || '';
+      timeInp.disabled = (g.auto || 'global') === 'off';
+      timeInp.title = '这一组每天几点自动同步；留空 = 跟随上面「每天几点检查」';
+
+      autoSel.addEventListener('change', function () {
+        g.auto = autoSel.value;
+        timeInp.disabled = g.auto === 'off';
+      });
+      timeInp.addEventListener('change', function () { g.time = timeInp.value || ''; });
+
+      var lb3 = document.createElement('label');
+      lb3.textContent = '新集';
+
+      var impSel = document.createElement('select');
+      impSel.className = 'sgs';
+      [['global', '自动导入'], ['check', '只检查不导入']].forEach(function (o) {
+        var op = document.createElement('option');
+        op.value = o[0]; op.textContent = o[1];
+        impSel.appendChild(op);
+      });
+      impSel.value = (g.import === 'check') ? 'check' : 'global';
+      impSel.title = '「只检查」= 只标记有 N 集更新，不往歌单里加';
+      impSel.addEventListener('change', function () { g.import = impSel.value; });
+
+      opt.appendChild(lb1); opt.appendChild(sel); opt.appendChild(num);
+      opt.appendChild(lb2); opt.appendChild(autoSel); opt.appendChild(timeInp);
+      opt.appendChild(lb3); opt.appendChild(impSel);
+
+      row.appendChild(nm); row.appendChild(bRun); row.appendChild(del);
+      row.appendChild(opt);
       box.appendChild(row);
     });
   }
@@ -3938,7 +4013,7 @@
         nm = nm.slice(0, 24);
         if (sgDraft.some(function (g) { return g.name === nm; })) { msg('已经有同名分组了', 'err'); return; }
         if (sgDraft.length >= 50) { msg('分组最多 50 个', 'err'); return; }
-        sgDraft.push({ name: nm, mode: 'global', n: 20 });
+        sgDraft.push({ name: nm, mode: 'global', n: 20, auto: 'global', time: '', import: 'global', lastRunDate: '' });
         el.value = '';
         renderSgCard();
       });
@@ -3948,7 +4023,11 @@
       $('btnSgSave').addEventListener('click', async function () {
         var payload = sgDraft.map(function (g) {
           var n = Math.floor(Number(g.n) || 0);
-          return { name: g.name, mode: g.mode, n: n > 0 ? n : 20 };
+          return {
+            name: g.name, mode: g.mode, n: n > 0 ? n : 20,
+            auto: g.auto || 'global', time: g.time || '', import: g.import || 'global',
+            lastRunDate: g.lastRunDate || ''
+          };
         });
         var btn = $('btnSgSave');
         btn.disabled = true;
