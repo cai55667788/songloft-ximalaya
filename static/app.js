@@ -3740,6 +3740,18 @@
     renderSgCard();
   }
 
+  // v0.23.18：折叠态摘要，一眼看清这组怎么同步
+  function sgSummary(g) {
+    var bits = [];
+    if (g.mode === 'all') bits.push('同步全集');
+    else if (g.mode === 'latest') bits.push('最新 ' + (g.n || 20) + ' 集');
+    else bits.push('范围随全局');
+    if (g.auto === 'off') bits.push('仅手动');
+    else bits.push('自动' + (g.time ? ' ' + g.time : '（全局时间）'));
+    if (g.import === 'check') bits.push('只检查');
+    return bits.join(' · ');
+  }
+
   function renderSgCard() {
     var box = $('sgList');
     if (!box) return;
@@ -3761,6 +3773,20 @@
       cnt.className = 'muted small-txt';
       cnt.textContent = ' ' + (counts[g.name] || 0) + ' 张';
       nm.appendChild(cnt);
+
+      // v0.23.18：摘要 + 展开/收起
+      var sum = document.createElement('span');
+      sum.className = 'sgsum';
+      sum.textContent = sgSummary(g);
+
+      var bEdit = document.createElement('button');
+      bEdit.className = 'small plain sgbtn';
+      bEdit.textContent = g._open ? '收起' : '编辑';
+      bEdit.title = '展开或收起这一组的同步设置';
+      bEdit.addEventListener('click', function () {
+        g._open = !g._open;
+        renderSgCard();
+      });
 
       // v0.23.17：立即同步这一组（按该组的「内容」决定导入还是只检查）
       var bRun = document.createElement('button');
@@ -3790,6 +3816,8 @@
       // 第二行：同步范围 + 同步方式（自动同步开关 / 时间 / 内容）
       var opt = document.createElement('div');
       opt.className = 'sgopt';
+      // v0.23.18：默认收起，点「编辑」展开，行首只留一行摘要
+      opt.style.display = g._open ? '' : 'none';
 
       var lb1 = document.createElement('label');
       lb1.textContent = '范围';
@@ -3812,8 +3840,9 @@
       sel.addEventListener('change', function () {
         g.mode = sel.value;
         num.disabled = g.mode !== 'latest';
+        sum.textContent = sgSummary(g);
       });
-      num.addEventListener('input', function () { g.n = Math.floor(Number(num.value) || 0); });
+      num.addEventListener('input', function () { g.n = Math.floor(Number(num.value) || 0); sum.textContent = sgSummary(g); });
 
       var lb2 = document.createElement('label');
       lb2.textContent = '自动同步';
@@ -3838,8 +3867,9 @@
       autoSel.addEventListener('change', function () {
         g.auto = autoSel.value;
         timeInp.disabled = g.auto === 'off';
+        sum.textContent = sgSummary(g);
       });
-      timeInp.addEventListener('change', function () { g.time = timeInp.value || ''; });
+      timeInp.addEventListener('change', function () { g.time = timeInp.value || ''; sum.textContent = sgSummary(g); });
 
       var lb3 = document.createElement('label');
       lb3.textContent = '新集';
@@ -3853,13 +3883,13 @@
       });
       impSel.value = (g.import === 'check') ? 'check' : 'global';
       impSel.title = '「只检查」= 只标记有 N 集更新，不往歌单里加';
-      impSel.addEventListener('change', function () { g.import = impSel.value; });
+      impSel.addEventListener('change', function () { g.import = impSel.value; sum.textContent = sgSummary(g); });
 
       opt.appendChild(lb1); opt.appendChild(sel); opt.appendChild(num);
       opt.appendChild(lb2); opt.appendChild(autoSel); opt.appendChild(timeInp);
       opt.appendChild(lb3); opt.appendChild(impSel);
 
-      row.appendChild(nm); row.appendChild(bRun); row.appendChild(del);
+      row.appendChild(nm); row.appendChild(sum); row.appendChild(bRun); row.appendChild(bEdit); row.appendChild(del);
       row.appendChild(opt);
       box.appendChild(row);
     });
@@ -4018,29 +4048,6 @@
         renderSgCard();
       });
       $('sgNewName').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('btnSgAdd').click(); });
-    }
-    if ($('btnSgSave')) {
-      $('btnSgSave').addEventListener('click', async function () {
-        var payload = sgDraft.map(function (g) {
-          var n = Math.floor(Number(g.n) || 0);
-          return {
-            name: g.name, mode: g.mode, n: n > 0 ? n : 20,
-            auto: g.auto || 'global', time: g.time || '', import: g.import || 'global',
-            lastRunDate: g.lastRunDate || ''
-          };
-        });
-        var btn = $('btnSgSave');
-        btn.disabled = true;
-        try {
-          var r = await api('POST', '/groups', { groups: payload });
-          if (r && r.success === false) { msg('❌ ' + (r.error || '保存失败'), 'err'); return; }
-          var mv = (r.data && r.data.moved) || 0;
-          msg('✅ 已保存 ' + payload.length + ' 个分组' + (mv ? '，' + mv + ' 张订阅回到未分组' : ''));
-          await loadSubGroups();
-          loadSubs();
-        } catch (e) { msg('保存失败: ' + e.message, 'err'); }
-        btn.disabled = false;
-      });
     }
   }
 
@@ -4258,7 +4265,10 @@
     } catch (e) { /* */ }
   }
 
+  // v0.23.18：默认设置与分组都在同一张卡里，「保存设置」一次全存，不再分两个按钮
   $('btnSaveAuto').addEventListener('click', async function () {
+    var btn = $('btnSaveAuto');
+    btn.disabled = true;
     try {
       var aLlOn = $('autoLatest').value === '1';
       var aLlN = Math.floor(Number($('autoLatestN').value) || 0);
@@ -4272,8 +4282,31 @@
           keepLatest: aKlOn ? Math.max(1, Math.min(aKlN, 2000)) : 0
         }
       });
-      msg('✅ 自动同步设置已保存', 'ok');
+      var gn = 0, mvTxt = '';
+      if (Array.isArray(groupsCache)) {
+        var payload = sgDraft.map(function (g) {
+          var n = Math.floor(Number(g.n) || 0);
+          return {
+            name: g.name, mode: g.mode, n: n > 0 ? n : 20,
+            auto: g.auto || 'global', time: g.time || '', import: g.import || 'global',
+            lastRunDate: g.lastRunDate || ''
+          };
+        });
+        var r2 = await api('POST', '/groups', { groups: payload });
+        if (r2 && r2.success === false) {
+          msg('❌ 分组没存上：' + (r2.error || '保存失败') + '（默认设置已保存）', 'err');
+          btn.disabled = false;
+          return;
+        }
+        gn = payload.length;
+        var mv = (r2.data && r2.data.moved) || 0;
+        if (mv) mvTxt = '，' + mv + ' 张订阅回到未分组';
+        await loadSubGroups();
+      }
+      msg('✅ 设置已保存' + (gn ? '（' + gn + ' 个分组' + mvTxt + '）' : ''), 'ok');
+      loadSubs();
     } catch (e) { msg('保存失败: ' + e.message, 'err'); }
+    btn.disabled = false;
   });
 
   // v0.19.4：后端 /sync、/subs/check（全量）改成异步立即返回 —— 订阅一多就必然撞宿主 60s 上限，
