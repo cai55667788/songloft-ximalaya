@@ -977,6 +977,18 @@
     .sgrow .sgopt select, .sgrow .sgopt input { width: auto; font-size: 12px; padding: 4px 6px; }
     .sgrow .sgopt .sgtime { width: 94px; }
     .sgrow .sgbtn { flex: none; }
+    /* ---- v0.23.18 订阅页梳理 ---- */
+    details.fold { background: var(--card); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 14px; overflow: hidden; }
+    details.fold > summary { list-style: none; cursor: pointer; padding: 15px 16px 13px; font-size: 15px; font-weight: 700; display: flex; align-items: center; user-select: none; }
+    details.fold > summary::-webkit-details-marker { display: none; }
+    details.fold > summary::after { content: '展开'; margin-left: auto; font-size: 12px; font-weight: 400; color: var(--muted); }
+    details.fold[open] > summary::after { content: '收起'; }
+    details.fold > .foldbody { padding: 0 16px 16px; }
+    .defbox { border: 1px solid var(--border-soft); border-radius: 12px; padding: 8px 12px 2px; margin: 8px 0 4px; background: var(--chip); }
+    .defbox .dh { font-size: 13px; font-weight: 700; }
+    .defbox label { margin: 6px 0 2px; font-size: 12px; }
+    .sgrow .sgn { flex: 0 1 auto; }
+    .sgrow .sgsum { flex: 1 1 90px; min-width: 0; font-size: 11px; color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -984,7 +996,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.17</span>
+    <span class="ver" id="ver">v0.23.18</span>
   </div>
 
   <div class="tabs">
@@ -1163,96 +1175,6 @@
   <!-- ===== 订阅 ===== -->
   <section id="tab-subs" class="hide">
     <div class="card">
-      <h2>👤 我订阅的专辑</h2>
-      <div id="meStatus" class="muted small-txt">未检查登录态（登录后这里会列出你账号里订阅的专辑）</div>
-      <div class="btns">
-        <button class="small" id="btnLoadMySubs">读取我的订阅</button>
-        <button class="small plain" id="btnRefreshMySubs">强制刷新</button>
-        <button class="small plain" id="btnGoSet">去登录</button>
-      </div>
-      <div id="meSubsList" style="margin-top:8px;"></div>
-      <div class="selbar hide" id="meSelBar">
-        <label class="muted small-txt" style="margin:0;display:flex;align-items:center;gap:6px;">
-          <input type="checkbox" id="meCkAll" style="accent-color:var(--accent)" /> 全选
-        </label>
-        <span class="muted small-txt" id="meSelCount">已选 0</span>
-        <select id="meSelMode">
-          <option value="separate">每张一个歌单</option>
-          <option value="merge">合并成一个歌单</option>
-        </select>
-        <button class="small" id="btnMeImport">导入所选</button>
-        <button class="small ghost" id="btnMeSub">只订阅不导入</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>🗂 订阅分组</h2>
-      <div class="muted small-txt">同一批订阅，换个角度看：按更新快慢、按有没有新集、按主播。</div>
-      <div class="tabs" style="margin-top:8px;">
-        <span class="chip on" id="grpByCat">按更新</span>
-        <span class="chip" id="grpByStatus">按状态</span>
-        <span class="chip" id="grpByAnchor">按主播</span>
-      </div>
-      <div class="btns" style="margin-top:6px;">
-        <button class="small plain" id="btnGrpLoad">刷新</button>
-        <button class="small plain" id="btnGrpGroup">📁 设置分组</button>
-        <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
-      </div>
-      <div id="grpBody" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>📤 导出清单</h2>
-      <div class="muted small-txt">把订阅列表导出成文件，换设备、备份或交给别人都方便。</div>
-      <div class="btns">
-        <button class="small plain" id="btnExpJson">导出 JSON</button>
-        <button class="small plain" id="btnExpCsv">导出 CSV（Excel）</button>
-        <button class="small plain" id="btnExpMd">导出 Markdown</button>
-      </div>
-      <div class="muted small-txt" id="expStat" style="margin-top:6px;"></div>
-    </div>
-
-    <div class="card">
-      <h2>⏰ 自动同步</h2>
-      <div class="row">
-        <div><label>每天几点检查</label><input type="time" id="autoTime" value="08:30" /></div>
-        <div><label>开关</label>
-          <select id="autoEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
-        </div>
-      </div>
-      <div class="row">
-        <div><label>新集导入范围</label>
-          <select id="autoLatest"><option value="0">全部新集</option><option value="1">只导最新 N 集</option></select>
-        </div>
-        <div><label>N（选「只导最新」时生效）</label><input type="number" id="autoLatestN" min="1" max="500" value="10" /></div>
-      </div>
-      <div class="row">
-        <div><label>旧集自动清理</label>
-          <select id="autoKeep"><option value="0">不清理</option><option value="1">只保留最新 N 集</option></select>
-        </div>
-        <div><label>N（选「只保留最新」时生效）</label><input type="number" id="autoKeepN" min="1" max="2000" value="10" /></div>
-      </div>
-      <div class="btns">
-        <button class="small" id="btnSaveAuto">保存设置</button>
-        <button class="small plain" id="btnSyncAll">立即全部同步</button>
-        <button class="small plain" id="btnCheckAll">只检查不导入</button>
-      </div>
-      <div class="muted small-txt" style="margin-top:8px;" id="lastSyncInfo">—</div>
-    </div>
-
-    <div class="card" id="sgCard">
-      <h2>🗂 订阅分组</h2>
-      <div class="muted small-txt">给订阅分组，每组能单独设同步范围（只同步最新 N 集 / 全集），还能单独设同步方式：自动同步开或关、每天几点跑、新集是自动导入还是只检查。点订阅行里的分组标签即可改所属分组；也可以在下面「我的订阅」里勾选多张一次性设分组。</div>
-      <div id="sgList" style="margin-top:8px;"></div>
-      <div class="row" style="margin-top:10px;">
-        <div><label>新建分组</label><input type="text" id="sgNewName" placeholder="如：英语听力 / 睡前故事" maxlength="24" /></div>
-        <div><label>&nbsp;</label><button class="small plain" id="btnSgAdd">添加分组</button></div>
-      </div>
-      <div class="btns"><button class="small" id="btnSgSave">保存分组设置</button></div>
-      <div class="muted small-txt" style="margin-top:6px;">「跟随全局」= 用上面「新集导入范围」；「同步全集」的组不会被旧集自动清理；「只同步最新 N 集」的组，歌单里也只保留最新 N 集。同步方式按每组单独生效：自动同步「关」的组只在手动点「同步」时跑；时间留空跟随全局；「只检查不导入」只标记有 N 集更新，不动歌单。</div>
-    </div>
-
-    <div class="card">
       <h2>📌 我的订阅</h2>
       <div class="chips" id="subsFilter"></div>
       <div class="selbar hide" id="subsSelBar">
@@ -1270,6 +1192,100 @@
       </div>
       <div id="subsList" style="margin-top:8px;"><span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span></div>
     </div>
+
+    <div class="card" id="sgCard">
+      <h2>🗂 分组与同步</h2>
+      <div class="muted small-txt">给订阅分组，每组能单独设同步方式：自动同步开或关、每天几点跑、新集是自动导入还是只检查；没单独设的组用「默认设置」。点订阅行的 📁 标签或在上面勾选多张可改分组。</div>
+      <div class="defbox">
+        <div class="dh">默认设置 <span class="muted small-txt">未分组与「跟随全局」的组用这套</span></div>
+        <div class="row">
+          <div><label>自动同步</label>
+            <select id="autoEnabled"><option value="0">关闭</option><option value="1">开启</option></select>
+          </div>
+          <div><label>每天几点检查</label><input type="time" id="autoTime" value="08:30" /></div>
+        </div>
+        <div class="row">
+          <div><label>新集导入范围</label>
+            <select id="autoLatest"><option value="0">全部新集</option><option value="1">只导最新 N 集</option></select>
+          </div>
+          <div><label>最新 N 集</label><input type="number" id="autoLatestN" min="1" max="500" value="10" /></div>
+        </div>
+        <div class="row">
+          <div><label>旧集自动清理</label>
+            <select id="autoKeep"><option value="0">不清理</option><option value="1">只保留最新 N 集</option></select>
+          </div>
+          <div><label>保留 N 集</label><input type="number" id="autoKeepN" min="1" max="2000" value="10" /></div>
+        </div>
+      </div>
+      <div id="sgList" style="margin-top:8px;"></div>
+      <div class="row" style="margin-top:10px;">
+        <div><label>新建分组</label><input type="text" id="sgNewName" placeholder="如：英语听力 / 睡前故事" maxlength="24" /></div>
+        <div><label>&nbsp;</label><button class="small plain" id="btnSgAdd">添加分组</button></div>
+      </div>
+      <div class="btns">
+        <button class="small" id="btnSaveAuto">💾 保存设置</button>
+        <button class="small plain" id="btnSyncAll">立即全部同步</button>
+        <button class="small plain" id="btnCheckAll">只检查不导入</button>
+      </div>
+      <div class="muted small-txt" style="margin-top:8px;" id="lastSyncInfo">—</div>
+      <div class="muted small-txt" style="margin-top:2px;">「跟随全局」= 用默认设置；「同步全集」的组不会被旧集清理；「只检查」只标记有 N 集更新、不动歌单、不推进收录进度。</div>
+    </div>
+
+    <details class="fold">
+      <summary>📊 订阅视角</summary>
+      <div class="foldbody">
+        <div class="muted small-txt">同一批订阅，换个角度看：按更新快慢、按有没有新集、按主播。</div>
+        <div class="tabs" style="margin-top:8px;">
+          <span class="chip on" id="grpByCat">按更新</span>
+          <span class="chip" id="grpByStatus">按状态</span>
+          <span class="chip" id="grpByAnchor">按主播</span>
+        </div>
+        <div class="btns" style="margin-top:6px;">
+          <button class="small plain" id="btnGrpLoad">刷新</button>
+          <button class="small plain" id="btnGrpGroup">📁 设置分组</button>
+          <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
+        </div>
+        <div id="grpBody" style="margin-top:8px;"></div>
+      </div>
+    </details>
+
+    <details class="fold">
+      <summary>☁️ 从喜马拉雅账号导入</summary>
+      <div class="foldbody">
+        <div id="meStatus" class="muted small-txt">读取你喜马拉雅账号里的订阅，勾选后可批量导入或订阅。</div>
+        <div class="btns">
+          <button class="small" id="btnLoadMySubs">读取我的订阅</button>
+          <button class="small plain" id="btnRefreshMySubs">强制刷新</button>
+          <button class="small plain" id="btnGoSet">去登录</button>
+        </div>
+        <div id="meSubsList" style="margin-top:8px;"></div>
+        <div class="selbar hide" id="meSelBar">
+          <label class="muted small-txt" style="margin:0;display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="meCkAll" style="accent-color:var(--accent)" /> 全选
+          </label>
+          <span class="muted small-txt" id="meSelCount">已选 0</span>
+          <select id="meSelMode">
+            <option value="separate">每张一个歌单</option>
+            <option value="merge">合并成一个歌单</option>
+          </select>
+          <button class="small" id="btnMeImport">导入所选</button>
+          <button class="small ghost" id="btnMeSub">只订阅不导入</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="fold">
+      <summary>📤 导出清单</summary>
+      <div class="foldbody">
+        <div class="muted small-txt">把订阅列表导出成文件，换设备、备份或交给别人都方便。</div>
+        <div class="btns">
+          <button class="small plain" id="btnExpJson">导出 JSON</button>
+          <button class="small plain" id="btnExpCsv">导出 CSV（Excel）</button>
+          <button class="small plain" id="btnExpMd">导出 Markdown</button>
+        </div>
+        <div class="muted small-txt" id="expStat" style="margin-top:6px;"></div>
+      </div>
+    </details>
   </section>
 
   <!-- ===== 已导入 ===== -->
@@ -1312,17 +1328,20 @@
       <div id="scBody" style="margin-top:8px;"></div>
     </div>
 
-    <div class="card">
-      <h2>📶 网络诊断</h2>
+    <details class="fold">
+      <summary>📶 网络诊断</summary>
+      <div class="foldbody">
       <div class="muted small-txt" id="netDiagStat">测一下到喜马拉雅主站、取流接口、图片 CDN 的连通性与延迟。</div>
       <div class="btns" style="margin-top:8px;">
         <button class="small" id="btnNetDiag">开始检测</button>
       </div>
       <div id="netDiagOut" style="margin-top:8px;"></div>
-    </div>
+      </div>
+    </details>
 
-    <div class="card">
-      <h2>📝 运行日志</h2>
+    <details class="fold">
+      <summary>📝 运行日志</summary>
+      <div class="foldbody">
       <div class="muted small-txt" id="logStat">—</div>
       <div class="btns">
         <button class="small plain" id="btnLogRefresh">刷新</button>
@@ -1336,7 +1355,8 @@
       </div>
       <div id="logBody" style="margin-top:8px;max-height:280px;overflow:auto;"></div>
       <div class="muted small-txt" style="margin-top:4px;">保留最近 100 条（警告与错误重启后仍在）。遇到「怎么没反应」，先看这里。</div>
-    </div>
+      </div>
+    </details>
 
     <div class="card">
       <h2>☁️ 跨设备收听进度</h2>
@@ -1575,6 +1595,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.17"></script>
+<script src="static/app.js?v=0.23.18"></script>
 </body>
 </html>
