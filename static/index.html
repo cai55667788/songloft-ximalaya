@@ -940,6 +940,30 @@
     /* 全屏页标题在氛围背景上更清晰 */
     #fullPlayer .fpname { text-shadow: 0 1px 12px rgba(0,0,0,.28); }
     #fullPlayer .fpmeta { text-shadow: 0 1px 8px rgba(0,0,0,.24); }
+
+    /* ========== v0.23.15 订阅分组 ========== */
+    .gtag { display: inline-flex; align-items: center; padding: 0 7px; margin-right: 5px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); background: var(--accent-soft); color: var(--accent); font-size: 11px; line-height: 17px; cursor: pointer; vertical-align: 1px; transition: transform .06s ease; }
+    .gtag.none { border-color: var(--border); background: var(--bg); color: var(--muted); }
+    .gtag:active { transform: scale(.94); }
+    .sgrow { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+    .sgrow:last-child { border-bottom: none; }
+    .sgrow .sgn { flex: 1; min-width: 88px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sgrow .sgs { width: auto; min-width: 122px; font-size: 12px; padding: 5px 8px; }
+    .sgrow .sgnum { width: 74px; font-size: 12px; padding: 5px 8px; }
+    .sgrow .sgnum:disabled { opacity: .45; }
+    #gpPanel { position: fixed; left: 0; right: 0; bottom: 0; top: 0; background: rgba(0,0,0,.32); z-index: 64; display: none; }
+    #gpPanel.show { display: block; }
+    #gpPanel .sheet {
+      position: absolute; left: 0; right: 0; bottom: 0; background: var(--card);
+      border-radius: 16px 16px 0 0; border-top: 1px solid var(--border); display: flex; flex-direction: column;
+      max-width: 720px; margin: 0 auto; max-height: 74vh;
+    }
+    #gpPanel .qhead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; border-bottom: 1px solid var(--border); }
+    #gpPanel .qhead .qt { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #gpPanel .qfoot { display: flex; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+    .gplist { padding: 8px 14px 10px; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
+    .gplist .gpopt { text-align: left; justify-content: flex-start; }
+    .gplist .gpopt.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 </style>
 </head>
 <body>
@@ -947,7 +971,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.14</span>
+    <span class="ver" id="ver">v0.23.15</span>
   </div>
 
   <div class="tabs">
@@ -1202,9 +1226,22 @@
       <div class="muted small-txt" style="margin-top:8px;" id="lastSyncInfo">—</div>
     </div>
 
+    <div class="card" id="sgCard">
+      <h2>🗂 订阅分组</h2>
+      <div class="muted small-txt">给订阅分组，每组能单独设「只同步最新 N 集」或「同步全集」——比如「英语听力」只要最近 20 集，「睡前故事」要全集。点订阅行里的分组标签即可改所属分组。</div>
+      <div id="sgList" style="margin-top:8px;"></div>
+      <div class="row" style="margin-top:10px;">
+        <div><label>新建分组</label><input type="text" id="sgNewName" placeholder="如：英语听力 / 睡前故事" maxlength="24" /></div>
+        <div><label>&nbsp;</label><button class="small plain" id="btnSgAdd">添加分组</button></div>
+      </div>
+      <div class="btns"><button class="small" id="btnSgSave">保存分组设置</button></div>
+      <div class="muted small-txt" style="margin-top:6px;">「跟随全局」= 用上面「新集导入范围」；「同步全集」的组不会被旧集自动清理；「只同步最新 N 集」的组，歌单里也只保留最新 N 集。</div>
+    </div>
+
     <div class="card">
       <h2>📌 我的订阅</h2>
-      <div id="subsList"><span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span></div>
+      <div class="chips" id="subsFilter"></div>
+      <div id="subsList" style="margin-top:8px;"><span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span></div>
     </div>
   </section>
 
@@ -1439,6 +1476,17 @@
 </div>
 
 <!-- v0.23.8：导入方式选择（全部 / 只导最新 N 集） -->
+<div id="gpPanel">
+  <div class="sheet">
+    <div class="qhead">
+      <div class="qt" id="gpTitle">选择分组</div>
+      <span class="x" id="gpClose" style="cursor:pointer;color:var(--muted);font-size:18px;line-height:1;">×</span>
+    </div>
+    <div class="gplist" id="gpBody"></div>
+    <div class="qfoot"><button id="gpCancel" class="plain">取消</button></div>
+  </div>
+</div>
+
 <div id="ipPanel">
   <div class="sheet">
     <div class="qhead">
@@ -1500,6 +1548,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.14"></script>
+<script src="static/app.js?v=0.23.15"></script>
 </body>
 </html>
