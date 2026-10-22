@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.15';
+var VERSION = '0.23.16';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -4609,6 +4609,32 @@ async function handleHTTPRequest(req) {
     if (!gMoved) return jsonResp({ success: false, error: '未订阅该专辑' }, 404);
     await persist();
     return jsonResp({ success: true, data: { moved: gMoved, group: gName, counts: groupCounts() } });
+  }
+
+
+  // 订阅批量操作（v0.23.16）：多选后一次改分组 / 批量开关自动同步
+  // {albumIds:[...], group?: string, autoSync?: boolean}，两个字段至少给一个
+  if (path === '/subs/bulk' && method === 'POST') {
+    var bkBody = readBodyJson(req);
+    var bkIds = Array.isArray(bkBody.albumIds) ? bkBody.albumIds.map(String) : [];
+    if (!bkIds.length) return jsonResp({ success: false, error: '没有勾选专辑' }, 400);
+    var bkHasG = typeof bkBody.group === 'string';
+    var bkHasA = typeof bkBody.autoSync === 'boolean';
+    if (!bkHasG && !bkHasA) return jsonResp({ success: false, error: '没有要修改的字段' }, 400);
+    var bkGrp = bkHasG ? String(bkBody.group || '').trim() : '';
+    if (bkHasG && bkGrp && !findGroup(bkGrp)) return jsonResp({ success: false, error: '分组不存在：' + bkGrp }, 400);
+    var bkN = 0;
+    bkIds.forEach(function (bkId) {
+      var bkSub = findSub(bkId);
+      if (!bkSub) return;
+      if (bkHasG) bkSub.group = bkGrp;
+      if (bkHasA) bkSub.autoSync = bkBody.autoSync;
+      bkN += 1;
+    });
+    if (!bkN) return jsonResp({ success: false, error: '没有匹配的订阅，可能已经取消订阅' }, 404);
+    await persist();
+    logInfo('subs', '批量设置 ' + bkN + ' 张订阅' + (bkHasG ? '，分组「' + (bkGrp || '未分组') + '」' : '') + (bkHasA ? '，自动同步' + (bkBody.autoSync ? '开' : '关') : ''));
+    return jsonResp({ success: true, data: { updated: bkN, group: bkHasG ? bkGrp : null, autoSync: bkHasA ? !!bkBody.autoSync : null, counts: groupCounts() } });
   }
 
   // ---------- 批量取消订阅 ----------
