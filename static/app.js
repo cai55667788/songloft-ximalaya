@@ -2955,6 +2955,7 @@
     }
     var txt = '已订阅，收录到第 ' + (sub.lastIndex || 0) + ' 集';
     if (sub.newCount) txt += ' · <span class="badge new">有 ' + sub.newCount + ' 集更新</span>';
+    if (sub.group) txt += ' · 📁 ' + esc(sub.group);
     if (sub.lastCheckAt) txt += ' · 上次检查 ' + esc(sub.lastCheckAt);
     $('dSubState').innerHTML = '<span class="ok">●</span> ' + txt;
     $('btnSub').textContent = '取消订阅';
@@ -3565,6 +3566,9 @@
   var groupsCache = null;      // [{name, mode, n}]，null = 还没加载
   var sgDraft = [];            // 分组卡的编辑草稿
   var sgrpFilter = 'all';      // 'all' | ''（未分组）| 分组名
+  // v0.23.16：订阅多选（albumId -> true）→ 批量设分组 / 批量开关自动同步 / 批量取消订阅
+  var subSel = {};
+  var subShown = [];           // 最近一次渲染出来的订阅（当前筛选范围，「全选」只作用于这里）
 
   async function loadSubs() {
     var el = $('subsList');
@@ -3580,17 +3584,37 @@
       if (!subsCache.length) {
         el.innerHTML = '<span class="muted">还没有订阅。搜索专辑后进入详情页点「订阅并跟进更新」。</span>';
         updateSubBadge();
+        subShown = []; updateSubsSelBar();
         return;
       }
       var shownSubs = sgrpFilter === 'all' ? subsCache : subsCache.filter(function (s) { return (s.group || '') === sgrpFilter; });
       if (!shownSubs.length) {
         el.innerHTML = '<span class="muted">这个分组里还没有订阅。</span>';
         updateSubBadge();
+        subShown = []; updateSubsSelBar();
         return;
       }
+      // v0.23.16：勾选状态只保留仍然存在的订阅；当前筛选范围记下来给「全选」用
+      var alive0 = {};
+      subsCache.forEach(function (s0) { alive0[String(s0.albumId)] = true; });
+      Object.keys(subSel).forEach(function (k0) { if (!alive0[k0]) delete subSel[k0]; });
+      subShown = shownSubs;
       shownSubs.forEach(function (s) {
         var line = document.createElement('div');
-        line.className = 'line';
+        line.className = 'line' + (subSel[String(s.albumId)] ? ' sel' : '');
+        // 行首勾选框：配合顶栏「全选」做批量操作
+        var ck = document.createElement('input');
+        ck.type = 'checkbox';
+        ck.className = 'ck';
+        ck.setAttribute('data-id', String(s.albumId));
+        ck.checked = !!subSel[String(s.albumId)];
+        ck.title = '勾选后可批量设分组 / 开关自动同步 / 取消订阅';
+        ck.addEventListener('change', function () {
+          if (ck.checked) subSel[String(s.albumId)] = true;
+          else delete subSel[String(s.albumId)];
+          line.classList.toggle('sel', !!ck.checked);
+          updateSubsSelBar();
+        });
         var img = document.createElement('img');
         img.src = s.cover || '';
         img.onerror = function () { img.style.visibility = 'hidden'; };
@@ -3657,10 +3681,11 @@
         });
 
         ops.appendChild(bSync); ops.appendChild(bAuto); ops.appendChild(bDel);
-        line.appendChild(img); line.appendChild(body); line.appendChild(ops);
+        line.appendChild(ck); line.appendChild(img); line.appendChild(body); line.appendChild(ops);
         el.appendChild(line);
       });
       updateSubBadge();
+      updateSubsSelBar();
     } catch (e) {
       el.innerHTML = '<span class="err">加载失败: ' + e.message + '</span>';
     }
@@ -3694,7 +3719,7 @@
       var c = document.createElement('span');
       c.className = 'chip' + (sgrpFilter === it.key ? ' on' : '');
       c.textContent = it.label + ' ' + it.n;
-      c.addEventListener('click', function () { sgrpFilter = it.key; loadSubs(); });
+      c.addEventListener('click', function () { sgrpFilter = it.key; subSel = {}; loadSubs(); });
       box.appendChild(c);
     });
   }
@@ -3765,12 +3790,115 @@
     });
   }
 
-  // 改某一订阅的分组（底部选择面板）
+  // ---------- v0.23.16：多选 / 全选 + 批量操作 ----------
+  function subSelList() {
+    var ids = [];
+    Object.keys(subSel).forEach(function (k) {
+      if (!subSel[k]) return;
+      for (var i = 0; i < subsCache.length; i++) {
+        if (String(subsCache[i].albumId) === String(k)) { ids.push(String(k)); return; }
+      }
+    });
+    return ids;
+  }
+
+  function subSelObjects() {
+    var out = [];
+    subSelList().forEach(function (id) {
+      for (var i = 0; i < subsCache.length; i++) {
+        if (String(subsCache[i].albumId) === id) { out.push(subsCache[i]); return; }
+      }
+    });
+    return out;
+  }
+
+  // 批量条：全选框只针对「当前筛选可见」的订阅；已选数量 / 按钮可用性跟着走
+  function updateSubsSelBar() {
+    var bar = $('subsSelBar');
+    if (!bar) return;
+    bar.classList.toggle('hide', !(subsCache || []).length);
+    var ids = subSelList();
+    if ($('subsSelCount')) $('subsSelCount').textContent = '已选 ' + ids.length + ' / ' + (subShown || []).length;
+    var all = $('subsCkAll');
+    if (all) {
+      var nShown = 0, nOn = 0;
+      (subShown || []).forEach(function (s) { nShown += 1; if (subSel[String(s.albumId)]) nOn += 1; });
+      all.checked = nShown > 0 && nOn === nShown;
+      // 部分选中显示半选框，避免「全选了却还有几张没动」的错觉
+      all.indeterminate = nOn > 0 && nOn < nShown;
+    }
+    ['btnSubsGroup', 'subsBulkAuto', 'btnSubsUnsub'].forEach(function (id2) {
+      var el = $(id2);
+      if (el) el.disabled = ids.length === 0;
+    });
+  }
+
+  function bindSubsMultiUI() {
+    if (!$('subsCkAll')) return;
+    $('subsCkAll').addEventListener('change', function () {
+      var on = $('subsCkAll').checked;
+      (subShown || []).forEach(function (s) {
+        if (on) subSel[String(s.albumId)] = true;
+        else delete subSel[String(s.albumId)];
+      });
+      loadSubs();   // 重渲染回填勾选态（全选范围 = 当前筛选看到的这些）
+    });
+    if ($('btnSubsGroup')) {
+      $('btnSubsGroup').addEventListener('click', function () {
+        var list = subSelObjects();
+        if (!list.length) { msg('先勾选订阅', 'warn'); return; }
+        openGrpPick(list);
+      });
+    }
+    if ($('subsBulkAuto')) {
+      $('subsBulkAuto').addEventListener('change', async function () {
+        var v = $('subsBulkAuto').value;
+        if (!v) return;
+        var ids = subSelList();
+        if (!ids.length) { msg('先勾选订阅', 'warn'); $('subsBulkAuto').value = ''; return; }
+        var on = v === '1';
+        try {
+          var r = await api('POST', '/subs/bulk', { albumIds: ids, autoSync: on });
+          if (r && r.success === false) { msg('❌ ' + (r.error || '设置失败'), 'err'); return; }
+          msg('✅ ' + ((r.data && r.data.updated) || ids.length) + ' 张订阅已' + (on ? '开启' : '关闭') + '自动同步');
+          $('subsBulkAuto').value = '';
+          loadSubs();
+        } catch (e) { msg('设置失败: ' + e.message, 'err'); $('subsBulkAuto').value = ''; }
+      });
+    }
+    if ($('btnSubsUnsub')) {
+      $('btnSubsUnsub').addEventListener('click', async function () {
+        var ids = subSelList();
+        if (!ids.length) { msg('先勾选订阅', 'warn'); return; }
+        if (!confirm('取消订阅 ' + ids.length + ' 张专辑？\n（只是不再跟更，已导入的歌单不会删）')) return;
+        try {
+          var r = await api('POST', '/subs/unsub', { albumIds: ids });
+          if (r && r.success === false) { msg(r.error || '操作失败', 'err'); return; }
+          msg('✅ 已取消 ' + ((r.data && r.data.removed) || ids.length) + ' 张订阅');
+          subSel = {};
+          loadSubs();
+          if ($('grpBody')) loadGroups();
+        } catch (e) { msg('操作失败: ' + e.message, 'err'); }
+      });
+    }
+  }
+
+  // 改分组（底部选择面板）——支持单张订阅对象，也支持多选后的数组
   function openGrpPick(s) {
     var panel = $('gpPanel');
     if (!panel) return;
     if (!(groupsCache || []).length) { msg('还没有分组，先在「🗂 订阅分组」里建一个'); return; }
-    $('gpTitle').textContent = '《' + (s.name || s.albumId) + '》归到哪个分组';
+    var isBulk = Array.isArray(s);
+    var list = (isBulk ? s : [s]).filter(Boolean);
+    if (!list.length) { msg('先勾选订阅', 'warn'); return; }
+    var ids = list.map(function (x) { return String(x.albumId); });
+    // 多张时只有全部还在同一个组才高亮该组，否则不高亮（免得误以为已经属于别的组）
+    var sameGroup = true;
+    for (var gi = 1; gi < list.length; gi++) if ((list[gi].group || '') !== (list[0].group || '')) { sameGroup = false; break; }
+    var curGroup = sameGroup ? (list[0].group || '') : null;
+    $('gpTitle').textContent = list.length === 1
+      ? ('《' + (list[0].name || list[0].albumId) + '》归到哪个分组')
+      : ('把选中的 ' + list.length + ' 张订阅归到哪个分组');
     var box = $('gpBody');
     box.innerHTML = '';
     var opts = [{ name: '', label: '未分组（跟随全局设置）' }].concat((groupsCache || []).map(function (g) {
@@ -3779,15 +3907,18 @@
     }));
     opts.forEach(function (o) {
       var b = document.createElement('button');
-      b.className = 'small plain gpopt' + ((s.group || '') === o.name ? ' on' : '');
+      b.className = 'small plain gpopt' + (curGroup !== null && curGroup === o.name ? ' on' : '');
       b.textContent = o.label;
       b.addEventListener('click', async function () {
         try {
-          var rr = await api('POST', '/subs/group', { album_id: s.albumId, group: o.name });
+          var payload = list.length === 1 ? { album_id: ids[0], group: o.name } : { albumIds: ids, group: o.name };
+          var rr = await api('POST', '/subs/group', payload);
           if (rr && rr.success === false) { msg('❌ ' + (rr.error || '改分组失败'), 'err'); return; }
           panel.classList.remove('show');
-          msg(o.name ? '✅ 已归到「' + o.name + '」' : '✅ 已移出分组');
+          var nmv = (rr && rr.data && rr.data.moved) || list.length;
+          msg(o.name ? ('✅ ' + nmv + ' 张已归到「' + o.name + '」') : ('✅ ' + nmv + ' 张已移出分组'));
           loadSubs();
+          if ($('grpBody')) loadGroups();
         } catch (e) { msg('改分组失败: ' + e.message, 'err'); }
       });
       box.appendChild(b);
@@ -4764,6 +4895,22 @@
   if ($('grpByStatus')) $('grpByStatus').addEventListener('click', function () { setGrpBy('status'); });
   if ($('grpByAnchor')) $('grpByAnchor').addEventListener('click', function () { setGrpBy('anchor'); });
   if ($('btnGrpLoad')) $('btnGrpLoad').addEventListener('click', loadGroups);
+  // v0.23.16：分组视图里勾选后同样能批量设分组
+  if ($('btnGrpGroup')) {
+    $('btnGrpGroup').addEventListener('click', function () {
+      var gids = Object.keys(grpSel).filter(function (k) { return grpSel[k]; });
+      if (!gids.length) { msg('先勾选要设置分组的专辑', 'warn'); return; }
+      ensureGroups().then(function () {
+        var list = gids.map(function (id) {
+          for (var i = 0; i < subsCache.length; i++) {
+            if (String(subsCache[i].albumId) === String(id)) return subsCache[i];
+          }
+          return { albumId: String(id), name: '', group: '' };
+        });
+        openGrpPick(list);
+      });
+    });
+  }
   if ($('btnGrpUnsub')) {
     $('btnGrpUnsub').addEventListener('click', async function () {
       var ids = Object.keys(grpSel).filter(function (k) { return grpSel[k]; });
@@ -4783,6 +4930,7 @@
     loadAuto();
     loadProgCfg();
     bindSubGroupUI();
+    bindSubsMultiUI();
     loadSubGroups();
     loadSubs();
     loadImported();
