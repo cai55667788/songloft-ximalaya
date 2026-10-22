@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.16';
+var VERSION = '0.23.17';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -1383,6 +1383,12 @@ async function loadAll() {
   if (typeof config.auto.keepLatest !== 'number' || !(config.auto.keepLatest >= 0)) config.auto.keepLatest = 0;
   // v0.23.15：订阅分组 —— 归一化配置；订阅上残留的已删分组名回到「未分组」
   config.groups = normGroups(config.groups);
+  // v0.23.17：老分组没有 lastRunDate —— 跟随全局时间的组继承今天「已跑过」，避免升级当天再跑一遍
+  if (config.auto && config.auto.enabled && config.auto.lastRunDate) {
+    (config.groups || []).forEach(function (gm) {
+      if (!gm.lastRunDate && !gm.time) gm.lastRunDate = config.auto.lastRunDate;
+    });
+  }
   subs.forEach(function (s) {
     if (typeof s.group !== 'string') s.group = '';
     if (s.group && !findGroup(s.group)) s.group = '';
@@ -1502,6 +1508,11 @@ var GROUP_MAX = 50;
 function normGroups(arr) {
   var out = [], seen = {};
   if (!Array.isArray(arr)) return out;
+  // v0.23.17：保留同名分组已有的「上次自动同步日期」，避免改设置后当天又白跑一遍
+  var prev = {};
+  (config.groups || []).forEach(function (p) {
+    if (p && p.name !== undefined) prev[String(p.name)] = p;
+  });
   for (var i = 0; i < arr.length && out.length < GROUP_MAX; i++) {
     var g = arr[i] || {};
     var name = String(g.name === undefined ? '' : g.name).replace(/[\r\n\t]/g, ' ').trim().slice(0, 24);
@@ -1511,7 +1522,16 @@ function normGroups(arr) {
     var n = Math.floor(Number(g.n));
     if (!(n >= 1)) n = 20;
     if (n > 2000) n = 2000;
-    out.push({ name: name, mode: mode, n: n });
+    var old = prev[name] || {};
+    var lrd = /^\d{4}-\d{2}-\d{2}$/.test(String(g.lastRunDate || '')) ? String(g.lastRunDate) : String(old.lastRunDate || '');
+    out.push({
+      name: name, mode: mode, n: n,
+      // v0.23.17：每组的同步方式 —— auto=跟随全局/强制开/强制关，time=自己几点跑（空=跟随全局），import=自动导入/只检查
+      auto: (g.auto === 'on' || g.auto === 'off') ? g.auto : 'global',
+      time: normHHMM(g.time),
+      import: (g.import === 'check' || g.import === 'import') ? g.import : 'global',
+      lastRunDate: /^\d{4}-\d{2}-\d{2}$/.test(lrd) ? lrd : ''
+    });
   }
   return out;
 }
@@ -1542,6 +1562,42 @@ function subKeepN(s) {
     if (g.mode === 'latest') return Math.max(1, Math.min(Math.floor(Number(g.n) || 0) || 20, 2000));
   }
   return Number(config.auto && config.auto.keepLatest) || 0;
+}
+
+// ---------- v0.23.17：每个分组自己的同步方式 ----------
+// auto:  'global' 跟随全局自动同步开关 / 'on' 强制参与 / 'off' 不参与
+// time:  'HH:MM' 自己几点跑，空 = 跟随全局时间
+// import:'check' 只检查新集不导入 / 'import' 自动导入 / 'global' 跟随全局（=自动导入）
+function gAutoOn(g) {
+  if (g && g.auto === 'off') return false;
+  if (g && g.auto === 'on') return true;
+  return !!(config.auto && config.auto.enabled);
+}
+
+function gTime(g) {
+  return (g && normHHMM(g.time)) || (config.auto && config.auto.time) || '08:30';
+}
+
+function gImport(g) {
+  return !(g && g.import === 'check');
+}
+
+// 今天这个分组是不是到点该跑（已跑过 / 关闭 / 没到点 → false）
+function gDue(g, now, today) {
+  if (!gAutoOn(g)) return false;
+  if (g && g.lastRunDate === today) return false;
+  return hmMin(now) >= hmMin(gTime(g));
+}
+
+// 调度总览（只读）：给前端显示「几点跑 / 是否启用 / 今天跑过没」，也给诊断用
+function groupPlan() {
+  var now = hhmmNow(), today = todayStr();
+  return (config.groups || []).map(function (g) {
+    return {
+      name: g.name, auto: g.auto || 'global', on: gAutoOn(g), at: gTime(g),
+      imp: gImport(g), due: gDue(g, now, today), lastRunDate: g.lastRunDate || ''
+    };
+  });
 }
 
 function groupCounts() {
@@ -2476,11 +2532,17 @@ async function runSyncAll(opts) {
   var totalNew = 0, totalAdded = 0, checked = 0, errors = [], updates = [];
   var totalPruned = 0;   // v0.23.14：本轮清理掉的旧集总数
   var pushed = null;
+  // v0.23.17：onlyGroup 指定只同步某一组（''=未分组），不传 = 全部（手动全量）
+  var only = (opts.onlyGroup === undefined || opts.onlyGroup === null) ? null : String(opts.onlyGroup);
   try {
     for (var i = 0; i < subs.length; i++) {
       var s = subs[i];
+      if (only !== null && String(s.group || '') !== only) continue;
       if (!opts.force && s.autoSync === false) continue;
-      var r = await syncOne(s, { import: opts.import !== false });
+      // v0.23.17：组设了「只检查不导入」时，全量 / 手动同步也不往歌单加（组级设置优先）
+      var doImp = opts.import !== false;
+      if (doImp) { var gImp2 = findGroup(s.group); if (gImp2 && gImp2.import === 'check') doImp = false; }
+      var r = await syncOne(s, { import: doImp });
       checked += 1;
       totalNew += r.newCount || 0;
       totalAdded += r.added || 0;
@@ -2488,20 +2550,25 @@ async function runSyncAll(opts) {
       if (r.error) errors.push(r.name + ': ' + r.error);
       if (r.added && !pushed) pushed = s;
       // v0.23.14：自动清理旧集（只在真导入时跑，只检查不导入不清；清理失败不影响同步）
-      if (opts.import !== false && s.playlistId) {
+      if (doImp && s.playlistId) {
         var aKl2 = subKeepN(s);   // v0.23.15：分组优先（全集组 0=不清，最新 N 组=留 N），未分组沿用全局
         if (aKl2 > 0) {
           try { var prR = await pruneSubOld(s, aKl2); totalPruned += (prR.removed || 0); } catch (ePr) { }
         }
       }
     }
+    var scopeTxt = only === null ? '' : (only ? '「' + only + '」组 ' : '未分组 ');
     lastSync = {
       at: nowStr(),
-      result: '检查 ' + checked + ' 张，新增 ' + totalAdded + ' 集' + (totalPruned ? '，清理旧集 ' + totalPruned + ' 集' : '') + (errors.length ? '，' + errors.length + ' 张出错' : ''),
+      result: scopeTxt + '检查 ' + checked + ' 张，新增 ' + totalAdded + ' 集' + (totalPruned ? '，清理旧集 ' + totalPruned + ' 集' : '') + (errors.length ? '，' + errors.length + ' 张出错' : ''),
       trigger: opts.trigger || '手动'
     };
     if (errors.length) logWarn('sync', '同步有 ' + errors.length + ' 张失败：' + errors.slice(0, 3).join('；'));
-    if (opts.markAuto) { config.auto.lastRunDate = todayStr(); }
+    if (opts.markAuto) {
+      // v0.23.17：按调度单元记「今天跑过」——未分组记全局，分组记到组自己身上
+      if (only === null || only === '') config.auto.lastRunDate = todayStr();
+      else { var gDone = findGroup(only); if (gDone) gDone.lastRunDate = todayStr(); }
+    }
     await persist();
 
     songloft.log.info('[喜马拉雅] 同步完成：' + lastSync.result);
@@ -2689,9 +2756,17 @@ async function tick() {
   }
 
   // 定时自动同步（播报刚同步过就不重复跑，避免一天两次全量抓取）
+  // v0.23.17：未分组跟全局设置；每个分组按自己的开关 / 时间 / 内容各跑一次
   if (config.auto && config.auto.enabled && config.auto.lastRunDate !== today && hmMin(now) >= hmMin(config.auto.time || '08:30')) {
-    songloft.log.info('[喜马拉雅] 触发定时同步（设定 ' + config.auto.time + '）');
-    await runSyncAll({ import: true, markAuto: true, trigger: '定时' });
+    songloft.log.info('[喜马拉雅] 触发定时同步（未分组，设定 ' + config.auto.time + '）');
+    await runSyncAll({ import: true, markAuto: true, onlyGroup: '', trigger: '定时' });
+  }
+  var gsRun = config.groups || [];
+  for (var gsi = 0; gsi < gsRun.length; gsi++) {
+    var gcur = gsRun[gsi];
+    if (!gDue(gcur, now, today)) continue;
+    songloft.log.info('[喜马拉雅] 触发分组定时同步「' + gcur.name + '」（' + gTime(gcur) + (gImport(gcur) ? '，导入新集' : '，只检查') + '）');
+    await runSyncAll({ import: gImport(gcur), markAuto: true, onlyGroup: gcur.name, trigger: '定时·' + gcur.name });
   }
 
   // 关键词追更（跟着定时同步的开关与时间走，避免一天多次抓取）
@@ -4580,7 +4655,7 @@ async function handleHTTPRequest(req) {
 
   // ---------- 订阅分组：用户自定义，每组独立同步范围 ----------
   if (path === '/groups' && method === 'GET') {
-    return jsonResp({ success: true, data: { groups: config.groups || [], counts: groupCounts() } });
+    return jsonResp({ success: true, data: { groups: config.groups || [], counts: groupCounts(), plan: groupPlan() } });
   }
   if (path === '/groups' && method === 'POST') {
     var bg = readBodyJson(req);
@@ -4596,6 +4671,21 @@ async function handleHTTPRequest(req) {
     logInfo('subs', '保存订阅分组 ' + ng.length + ' 个' + (moved0 ? '，' + moved0 + ' 张订阅回到未分组' : ''));
     return jsonResp({ success: true, data: { groups: config.groups, counts: groupCounts(), moved: moved0 } });
   }
+  // 立即同步某一组（v0.23.17）：{name} 不传 = 只跑未分组；按该组自己的「内容」决定导入还是只检查
+  if (path === '/groups/sync' && method === 'POST') {
+    var bgsy = readBodyJson(req);
+    var gsyName = String(bgsy.name || '').trim();
+    var gsy = gsyName ? findGroup(gsyName) : null;
+    if (gsyName && !gsy) return jsonResp({ success: false, error: '分组不存在：' + gsyName }, 400);
+    if (syncing) return jsonResp({ success: false, error: '已有同步任务在跑，请稍候' }, 409);
+    var gsyOnly = gsy ? gsy.name : '';
+    var gsyImp = gsy ? gImport(gsy) : true;
+    runSyncAll({ onlyGroup: gsyOnly, import: gsyImp, markAuto: true, trigger: '手动·' + (gsyOnly || '未分组') })
+      .catch(function (e) { songloft.log.warn('[喜马拉雅] 分组同步异常: ' + String(e)); });
+    logInfo('subs', '开始同步' + (gsyOnly ? '分组「' + gsyOnly + '」' : '未分组订阅') + (gsyImp ? '（导入新集）' : '（只检查）'));
+    return jsonResp({ success: true, data: { message: '已开始同步', async: true, group: gsyOnly, import: gsyImp } });
+  }
+
   // 给订阅改分组：{album_id} 或 {albumIds: [...]} + {group}（空字符串 = 未分组）
   if (path === '/subs/group' && method === 'POST') {
     var bsg = readBodyJson(req);
