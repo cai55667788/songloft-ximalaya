@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.14';
+var VERSION = '0.23.15';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -45,6 +45,8 @@ var SYNC_MAX_PAGES = 25;   // 增量同步最多回溯 25 页
 
 var config = {
   auto: { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0, keepLatest: 0 },
+  // v0.23.15：订阅分组 [{name, mode:'global'|'all'|'latest', n}]；订阅上记 group 分组名（空=未分组）
+  groups: [],
   sync: { progress: true },
   dl: { targetDir: '喜马拉雅', format: 'mp3' },
   // 每天检查一次登录态是否还有效，失效时界面上直接提醒
@@ -1379,6 +1381,12 @@ async function loadAll() {
   if (typeof config.auto.latestLimit !== 'number' || !(config.auto.latestLimit >= 0)) config.auto.latestLimit = 0;
   // v0.23.14：旧集自动清理（0=不清理，1~2000=订阅歌单只保留最新 N 集）
   if (typeof config.auto.keepLatest !== 'number' || !(config.auto.keepLatest >= 0)) config.auto.keepLatest = 0;
+  // v0.23.15：订阅分组 —— 归一化配置；订阅上残留的已删分组名回到「未分组」
+  config.groups = normGroups(config.groups);
+  subs.forEach(function (s) {
+    if (typeof s.group !== 'string') s.group = '';
+    if (s.group && !findGroup(s.group)) s.group = '';
+  });
   if (!config.sync || typeof config.sync !== 'object') config.sync = { progress: true };
   if (typeof config.sync.progress !== 'boolean') config.sync.progress = true;
   if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
@@ -1486,6 +1494,66 @@ async function persistDl() {
   try { await songloft.storage.set(DL_KEY, JSON.stringify(dlJob)); } catch (e) { /* */ }
 }
 
+// ---------- v0.23.15：订阅分组（每组可单独设「全集 / 最新 N 集」同步范围） ----------
+var GROUP_MODES = ['global', 'all', 'latest'];
+var GROUP_MAX = 50;
+
+// 归一化分组配置：丢空名/重名、名字去控制字符截 24 字、mode 兜底 global、N 钳制 1~2000
+function normGroups(arr) {
+  var out = [], seen = {};
+  if (!Array.isArray(arr)) return out;
+  for (var i = 0; i < arr.length && out.length < GROUP_MAX; i++) {
+    var g = arr[i] || {};
+    var name = String(g.name === undefined ? '' : g.name).replace(/[\r\n\t]/g, ' ').trim().slice(0, 24);
+    if (!name || seen[name]) continue;
+    seen[name] = true;
+    var mode = GROUP_MODES.indexOf(String(g.mode)) >= 0 ? String(g.mode) : 'global';
+    var n = Math.floor(Number(g.n));
+    if (!(n >= 1)) n = 20;
+    if (n > 2000) n = 2000;
+    out.push({ name: name, mode: mode, n: n });
+  }
+  return out;
+}
+
+function findGroup(name) {
+  var nm = String(name === undefined || name === null ? '' : name);
+  if (!nm) return null;
+  var gs = config.groups || [];
+  for (var i = 0; i < gs.length; i++) if (gs[i].name === nm) return gs[i];
+  return null;
+}
+
+// 该订阅本次同步的「新集导入范围」：分组设定优先，未分组 / 跟随全局时用 config.auto.latestLimit（0 = 全集）
+function subLimit(s) {
+  var g = findGroup(s && s.group);
+  if (g) {
+    if (g.mode === 'all') return 0;
+    if (g.mode === 'latest') return Math.max(1, Math.min(Math.floor(Number(g.n) || 0) || 20, 2000));
+  }
+  return Number(config.auto && config.auto.latestLimit) || 0;
+}
+
+// 该订阅同步后歌单保留多少集（0 = 不清理）：全集组不清、最新 N 组留 N、未分组沿用全局旧集清理
+function subKeepN(s) {
+  var g = findGroup(s && s.group);
+  if (g) {
+    if (g.mode === 'all') return 0;
+    if (g.mode === 'latest') return Math.max(1, Math.min(Math.floor(Number(g.n) || 0) || 20, 2000));
+  }
+  return Number(config.auto && config.auto.keepLatest) || 0;
+}
+
+function groupCounts() {
+  var m = { '': 0 };
+  (config.groups || []).forEach(function (g) { m[g.name] = 0; });
+  subs.forEach(function (s) {
+    var k = (s.group && m[s.group] !== undefined) ? s.group : '';
+    m[k] = (m[k] || 0) + 1;
+  });
+  return m;
+}
+
 function findSub(albumId) {
   var id = String(albumId || '');
   for (var i = 0; i < subs.length; i++) if (String(subs[i].albumId) === id) return subs[i];
@@ -1497,7 +1565,8 @@ function upsertSub(patch) {
   if (!s) {
     s = {
       albumId: String(patch.albumId || ''), name: '', playlistId: 0, lastIndex: 0, songCount: 0,
-      cover: '', author: '', updateDate: '', lastCheckAt: '', newCount: 0, newTitles: [], autoSync: true
+      cover: '', author: '', updateDate: '', lastCheckAt: '', newCount: 0, newTitles: [], autoSync: true,
+      group: ''
     };
     subs.push(s);
   }
@@ -2306,11 +2375,13 @@ async function syncOne(sub, opts) {
     var r = await fetchNewTracks(sub.albumId, sub.lastIndex || 0);
     // v0.23.7：自动导入范围 —— 设了「只导最新 N 集」且本次新集超过 N 时，
     // 只保留最新的 N 集写入，更早的集直接跳过（水位照常推进到最新，不会反复重拉）
-    var aLl2 = Number(config.auto && config.auto.latestLimit) || 0;
+    // v0.23.15：生效范围优先取订阅所在分组（全集 / 最新 N 集），没有分组就跟随全局设置
+    var aLl2 = subLimit(sub);
+    var aLlFrom = sub.group ? ('分组「' + sub.group + '」') : '设置';
     if (aLl2 > 0 && r.tracks.length > aLl2) {
       var skipN = r.tracks.length - aLl2;
       r.tracks = r.tracks.slice(-aLl2);
-      songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》本次新集 ' + (skipN + aLl2) + ' 集，按设置只导最新 ' + aLl2 + ' 集，跳过最早 ' + skipN + ' 集');
+      songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》本次新集 ' + (skipN + aLl2) + ' 集，按' + aLlFrom + '只导最新 ' + aLl2 + ' 集，跳过最早 ' + skipN + ' 集');
     }
     out.newCount = r.tracks.length;
     out.titles = r.tracks.map(function (t) { return t.index + '. ' + t.title; });
@@ -2418,7 +2489,7 @@ async function runSyncAll(opts) {
       if (r.added && !pushed) pushed = s;
       // v0.23.14：自动清理旧集（只在真导入时跑，只检查不导入不清；清理失败不影响同步）
       if (opts.import !== false && s.playlistId) {
-        var aKl2 = Number(config.auto && config.auto.keepLatest) || 0;
+        var aKl2 = subKeepN(s);   // v0.23.15：分组优先（全集组 0=不清，最新 N 组=留 N），未分组沿用全局
         if (aKl2 > 0) {
           try { var prR = await pruneSubOld(s, aKl2); totalPruned += (prR.removed || 0); } catch (ePr) { }
         }
@@ -4472,6 +4543,8 @@ async function handleHTTPRequest(req) {
       updateDate: (detailS && detailS.updateDate) || ''
     };
     if (typeof bs.autoSync === 'boolean') patch.autoSync = bs.autoSync;
+    // v0.23.15：订阅可直接带分组（不存在的分组名忽略，不报错，避免批量导入因分组改名断掉）
+    if (typeof bs.group === 'string') { var gWant = bs.group.trim(); patch.group = findGroup(gWant) ? gWant : ''; }
     if (bs.playlist_id) patch.playlistId = Number(bs.playlist_id);
     upsertSub(patch);
     await persist();
@@ -4503,6 +4576,39 @@ async function handleHTTPRequest(req) {
     } catch (e) {
       return jsonResp({ success: false, error: String(e && e.message || e) }, 500);
     }
+  }
+
+  // ---------- 订阅分组：用户自定义，每组独立同步范围 ----------
+  if (path === '/groups' && method === 'GET') {
+    return jsonResp({ success: true, data: { groups: config.groups || [], counts: groupCounts() } });
+  }
+  if (path === '/groups' && method === 'POST') {
+    var bg = readBodyJson(req);
+    if (!Array.isArray(bg.groups)) return jsonResp({ success: false, error: '参数不合法：groups 必须是数组' }, 400);
+    var ng = normGroups(bg.groups);
+    // 被删掉的分组，里面的订阅回到「未分组」——绝不动订阅本身
+    var names = {};
+    ng.forEach(function (g2) { names[g2.name] = true; });
+    var moved0 = 0;
+    subs.forEach(function (s) { if (s.group && !names[s.group]) { s.group = ''; moved0 += 1; } });
+    config.groups = ng;
+    await persist();
+    logInfo('subs', '保存订阅分组 ' + ng.length + ' 个' + (moved0 ? '，' + moved0 + ' 张订阅回到未分组' : ''));
+    return jsonResp({ success: true, data: { groups: config.groups, counts: groupCounts(), moved: moved0 } });
+  }
+  // 给订阅改分组：{album_id} 或 {albumIds: [...]} + {group}（空字符串 = 未分组）
+  if (path === '/subs/group' && method === 'POST') {
+    var bsg = readBodyJson(req);
+    var gName = String(bsg.group === undefined || bsg.group === null ? '' : bsg.group).trim();
+    if (gName && !findGroup(gName)) return jsonResp({ success: false, error: '分组不存在：' + gName }, 400);
+    var gIds = Array.isArray(bsg.albumIds) ? bsg.albumIds.map(String) : [];
+    if (bsg.album_id || bsg.albumId) gIds.push(String(bsg.album_id || bsg.albumId));
+    if (!gIds.length) return jsonResp({ success: false, error: '缺少 album_id' }, 400);
+    var gMoved = 0;
+    gIds.forEach(function (gid) { var gs2 = findSub(gid); if (gs2) { gs2.group = gName; gMoved += 1; } });
+    if (!gMoved) return jsonResp({ success: false, error: '未订阅该专辑' }, 404);
+    await persist();
+    return jsonResp({ success: true, data: { moved: gMoved, group: gName, counts: groupCounts() } });
   }
 
   // ---------- 批量取消订阅 ----------
