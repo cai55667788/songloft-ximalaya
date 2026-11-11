@@ -996,7 +996,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.19</span>
+    <span class="ver" id="ver">v0.23.20</span>
   </div>
 
   <div class="tabs">
@@ -1180,6 +1180,24 @@
 
   <!-- ===== 订阅 ===== -->
   <section id="tab-subs" class="hide">
+    <details class="fold" open>
+      <summary>📊 订阅视角 <span class="muted small-txt" style="font-weight:400;font-size:12px;margin-left:6px;">想听就点专辑名</span></summary>
+      <div class="foldbody">
+        <div class="muted small-txt">按更新快慢看最近有什么新集，点专辑名就能进详情播放；也能按状态、按主播看。</div>
+        <div class="tabs" style="margin-top:8px;">
+          <span class="chip on" id="grpByCat">按更新</span>
+          <span class="chip" id="grpByStatus">按状态</span>
+          <span class="chip" id="grpByAnchor">按主播</span>
+        </div>
+        <div class="btns" style="margin-top:6px;">
+          <button class="small plain" id="btnGrpLoad">刷新</button>
+          <button class="small plain" id="btnGrpGroup">📁 设置分组</button>
+          <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
+        </div>
+        <div id="grpBody" style="margin-top:8px;"></div>
+      </div>
+    </details>
+
     <div class="card">
       <h2>📌 我的订阅</h2>
       <div class="chips" id="subsFilter"></div>
@@ -1236,24 +1254,6 @@
       <div class="muted small-txt" style="margin-top:8px;" id="lastSyncInfo">—</div>
       <div class="muted small-txt" style="margin-top:2px;">「跟随全局」= 用默认设置；「同步全集」的组不会被旧集清理；「只检查」只标记有 N 集更新、不动歌单、不推进收录进度。</div>
     </div>
-
-    <details class="fold">
-      <summary>📊 订阅视角</summary>
-      <div class="foldbody">
-        <div class="muted small-txt">同一批订阅，换个角度看：按更新快慢、按有没有新集、按主播。</div>
-        <div class="tabs" style="margin-top:8px;">
-          <span class="chip on" id="grpByCat">按更新</span>
-          <span class="chip" id="grpByStatus">按状态</span>
-          <span class="chip" id="grpByAnchor">按主播</span>
-        </div>
-        <div class="btns" style="margin-top:6px;">
-          <button class="small plain" id="btnGrpLoad">刷新</button>
-          <button class="small plain" id="btnGrpGroup">📁 设置分组</button>
-          <button class="small ghost" id="btnGrpUnsub">取消订阅所选</button>
-        </div>
-        <div id="grpBody" style="margin-top:8px;"></div>
-      </div>
-    </details>
 
     <details class="fold">
       <summary>☁️ 从喜马拉雅账号导入</summary>
@@ -1604,6 +1604,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.19"></script>
+<script src="static/app.js?v=0.23.20"></script>
 </body>
 </html>
