@@ -996,7 +996,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.18</span>
+    <span class="ver" id="ver">v0.23.19</span>
   </div>
 
   <div class="tabs">
@@ -1136,21 +1136,27 @@
         <span class="muted small-txt" id="dProgStat"></span>
       </div>
       <div class="btns">
-        <button class="small" id="btnImportDetail">导入全部</button>
+        <button class="small" id="btnImportDetail" title="按上次选择的导入方式一键导入">📥 导入</button>
+        <button class="small plain" id="btnImportPick" title="选择导入方式（导入全部 / 只导最新），可设为默认">方式</button>
         <button class="small ghost" id="btnSub">订阅并跟进更新</button>
         <button class="small plain" id="btnDownload">⬇ 下载到本地</button>
               </div>
       <div id="dHl" class="hide" style="margin-top:10px;"></div>
       <div class="muted small-txt" id="dDlTip" style="margin-top:6px;"></div>
-      <div class="row" style="margin-top:10px;">
-        <div><label>只导最新</label><input type="number" id="dLatest" min="1" placeholder="如 30" /></div>
-        <div style="flex:none;padding-top:18px;"><button class="small plain" id="btnImportLatest">集（只导最新 N 集）</button></div>
-      </div>
-      <div class="row">
-        <div><label>起始集</label><input type="number" id="dStart" min="1" placeholder="1" /></div>
-        <div><label>结束集</label><input type="number" id="dEnd" min="1" placeholder="默认全部" /></div>
-        <div style="flex:none"><button class="small plain" id="btnImportRange">按区间导入</button></div>
-      </div>
+      <details class="fold" style="margin-top:10px;">
+        <summary>更多导入方式</summary>
+        <div class="foldbody">
+          <div class="row">
+            <div><label>只导最新</label><input type="number" id="dLatest" min="1" placeholder="如 30" /></div>
+            <div style="flex:none;padding-top:18px;"><button class="small plain" id="btnImportLatest">集（只导最新 N 集）</button></div>
+          </div>
+          <div class="row">
+            <div><label>起始集</label><input type="number" id="dStart" min="1" placeholder="1" /></div>
+            <div><label>结束集</label><input type="number" id="dEnd" min="1" placeholder="默认全部" /></div>
+            <div style="flex:none"><button class="small plain" id="btnImportRange">按区间导入</button></div>
+          </div>
+        </div>
+      </details>
       <div id="dTracks" style="margin-top:12px;"></div>
       <div class="pager">
         <button class="small plain" id="dFirst" title="第一页">⏮</button>
@@ -1223,7 +1229,7 @@
         <div><label>&nbsp;</label><button class="small plain" id="btnSgAdd">添加分组</button></div>
       </div>
       <div class="btns">
-        <button class="small" id="btnSaveAuto">💾 保存设置</button>
+        <span class="muted small-txt" id="btnSaveAuto" style="align-self:center;">✏️ 改动会自动保存</span>
         <button class="small plain" id="btnSyncAll">立即全部同步</button>
         <button class="small plain" id="btnCheckAll">只检查不导入</button>
       </div>
@@ -1546,6 +1552,9 @@
       <input type="number" id="ipN" min="1" max="9999" value="30" />
       <span style="color:var(--muted);">集（填好点右侧「只导最新」）</span>
     </div>
+    <label style="display:flex;align-items:center;gap:6px;margin:8px 2px 0;font-size:12px;color:var(--muted);">
+      <input type="checkbox" id="ipRemember" style="accent-color:var(--accent)" /> 记住这个选择，以后点「导入」一键完成
+    </label>
     <div class="qfoot">
       <button id="ipAll">导入全部</button>
       <button id="ipLatest" class="primary">只导最新</button>
@@ -1595,6 +1604,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.18"></script>
+<script src="static/app.js?v=0.23.19"></script>
 </body>
 </html>
