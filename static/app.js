@@ -2745,12 +2745,44 @@
       } else if (pick.mode === 'latest') {
         payload.latest = pick.n;
       }
-      var r = await api('POST', '/import', payload);
-      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      var how = ranged ? '第 ' + fromEp + '-' + toEp + ' 集' : (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部');
-      msg('⏳ 已开始导入' + (!ranged && quick && getIpPref() ? how + '（按上次设置）' : how) + '《' + name + '》');
-      startPolling();
+      if (importBusy) { msg('正在导入中，请稍候…', 'warn'); return; }
+      importBtnLock(true);
+      try {
+        var r = await api('POST', '/import', payload);
+        if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+        var how = ranged ? '第 ' + fromEp + '-' + toEp + ' 集' : (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部');
+        // v0.23.26：用「本次是否真走了记忆路径」的快照，而不是 await 后重读偏好
+        var usedPref = !ranged && quick && !!getIpPref();
+        msg('⏳ 已开始导入' + (usedPref ? how + '（按上次设置）' : how) + '《' + name + '》');
+        startPolling();
+      } finally { importBtnLock(false); }
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
+  }
+
+  // v0.23.26：「更多导入方式」公共助手 —— 导入防连点 + 集数校验 + 回显，4 个入口共用。
+  var importBusy = false;
+  function importBtnLock(on) {
+    importBusy = !!on;
+    ['btnImportDetail', 'btnImportPick', 'btnImportLatest', 'btnImportRange'].forEach(function (id) {
+      var b = $(id); if (b) b.disabled = !!on;
+    });
+  }
+  // 解析正整数输入：空→0（区间结束集可空=默认全部），非法→-1
+  function parseEpInput(v, allowEmpty) {
+    var s = String(v === undefined || v === null ? '' : v).trim();
+    if (s === '') return allowEmpty ? 0 : -1;
+    if (!/^\d+$/.test(s)) return -1;
+    var n = Number(s);
+    return (isFinite(n) && Math.floor(n) === n) ? n : -1;
+  }
+  var MAX_IMPORT_N = 2000;   // 对齐后端 /import latest 上限
+  // 区间/最新上限提示：用详情页已知总集数 cur.lastIndex，避免超总集数被后端 400
+  function importCap() {
+    var tot = Number(cur.lastIndex) || 0;
+    return tot > 0 ? Math.min(tot, MAX_IMPORT_N) : MAX_IMPORT_N;
+  }
+  function setImportEcho(txt) {
+    var el = $('dImportEcho'); if (el) el.textContent = txt || '';
   }
 
   // ---------- 详情 ----------
@@ -2779,7 +2811,14 @@
     // v0.20.3：换专辑要清掉上一本的集名筛选，否则新专辑可能一进来就「筛出 0 集」
     nameFilter = '';
     if ($('dFilter')) $('dFilter').value = '';
-    $('searchCard').classList.add('hide');
+    // v0.23.26：切专辑清掉「更多导入方式」里上张专辑残留的区间/N，避免误导
+    if ($('dLatest')) $('dLatest').value = '';
+    if ($('dStart')) $('dStart').value = '';
+    if ($('dEnd')) $('dEnd').value = '';
+    // v0.23.26：只读回填当前导入偏好（不写 IP_KEY，避免与「方式」抽屉的两套语义冲突）
+    var ipPref = getIpPref();
+    if (ipPref && ipPref.mode === 'latest' && $('dLatest')) $('dLatest').value = ipPref.n;
+    setImportEcho(ipPref ? ('当前默认：' + ipPrefLabel(ipPref) + '（点「方式」可改）') : '');
     showListen(false);   // v0.20.0：详情页也不能露出「继续听」
     $('detailCard').classList.remove('hide');
     $('dName').textContent = '载入中…';
@@ -3500,35 +3539,63 @@
     var pick = await pickImportMode(d && d.name, d && d.tracks || 0);
     if (!pick) return;
     try {
-      var payload = { album_id: String(cur.id), name: (d && d.name) || '' };
-      if (pick.mode === 'latest') payload.latest = pick.n;
-      var r = await api('POST', '/import', payload);
-      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('⏳ 已开始导入' + (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部') + '《' + ((d && d.name) || '') + '》');
-      startPolling();
+      if (importBusy) { msg('正在导入中，请稍候…', 'warn'); return; }
+      importBtnLock(true);
+      try {
+        var payload = { album_id: String(cur.id), name: (d && d.name) || '' };
+        if (pick.mode === 'latest') payload.latest = pick.n;
+        var r = await api('POST', '/import', payload);
+        if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+        msg('⏳ 已开始导入' + (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部') + '《' + ((d && d.name) || '') + '》');
+        startPolling();
+      } finally { importBtnLock(false); }
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   });
 
   // v0.23.7：只导最新 N 集
   $('btnImportLatest').addEventListener('click', async function () {
-    var n = Math.floor(Number($('dLatest').value) || 0);
-    if (n <= 0) { msg('请填写要导最新的多少集，如 30', 'err'); return; }
+    var d = cur.detail, an = (d && d.name) || '', aid = String(cur.id);
+    var n = parseEpInput($('dLatest').value, false);
+    if (n <= 0) { msg('请填写要导最新的集数（正整数，如 30）', 'err'); return; }
+    var cap = importCap();
+    if (n > cap) { n = cap; setImportEcho('已按专辑总集数把「最新 N 集」调整为 ' + n); }
+    if (importBusy) { msg('正在导入中，请稍候…', 'warn'); return; }
     try {
-      var r = await api('POST', '/import', { album_id: cur.id, latest: n, name: cur.detail && cur.detail.name });
-      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('⏳ 已开始导入最新 ' + n + ' 集《' + ((cur.detail && cur.detail.name) || '') + '》');
-      startPolling();
+      if (!confirm('将导入《' + an + '》最新 ' + n + ' 集，确定吗？')) return;
+      importBtnLock(true);
+      try {
+        var r = await api('POST', '/import', { album_id: aid, latest: n, name: an });
+        if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+        msg('⏳ 已开始导入最新 ' + n + ' 集《' + an + '》');
+        startPolling();
+      } finally { importBtnLock(false); }
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   });
 
   $('btnImportRange').addEventListener('click', async function () {
-    var s = Number($('dStart').value) || 0, e2 = Number($('dEnd').value) || 0;
+    var d = cur.detail, an = (d && d.name) || '', aid = String(cur.id);
+    var tot = Number(cur.lastIndex) || 0;
+    var s = parseEpInput($('dStart').value, false);
+    var e2 = parseEpInput($('dEnd').value, true);   // 结束集留空 = 导到末集
     if (!s && !e2) { msg('请填写起始集或结束集', 'err'); return; }
+    if (s < 0 || e2 < 0) { msg('集数必须是正整数（结束集可留空=导到末集）', 'err'); return; }
+    if (!s) s = 1;
+    if (e2 && e2 < s) { msg('结束集不能小于起始集', 'err'); return; }
+    if (tot && e2 > tot) { msg('结束集 ' + e2 + ' 超出本专辑总集数 ' + tot + '，请刷新详情页', 'err'); return; }
+    if (tot && s > tot) { msg('起始集 ' + s + ' 超出本专辑总集数 ' + tot + '，请刷新详情页', 'err'); return; }
+    if (e2 && e2 - s + 1 > MAX_IMPORT_N) { msg('一次最多导入 ' + MAX_IMPORT_N + ' 集，请缩小区间', 'err'); return; }
+    var hi = e2 || tot;
+    setImportEcho(hi ? ('将导入第 ' + s + '~' + hi + ' 集（共 ' + (hi - s + 1) + ' 集）') : ('将导入第 ' + s + ' 集到末集'));
+    if (importBusy) { msg('正在导入中，请稍候…', 'warn'); return; }
     try {
-      var r = await api('POST', '/import', { album_id: cur.id, start: s, end: e2, name: cur.detail && cur.detail.name });
-      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('⏳ 已开始按区间导入');
-      startPolling();
+      if (!confirm('将导入《' + an + '》' + (hi ? ('第 ' + s + '~' + hi + ' 集（共 ' + (hi - s + 1) + ' 集）') : ('第 ' + s + ' 集到末集')) + '，确定吗？')) return;
+      importBtnLock(true);
+      try {
+        var r = await api('POST', '/import', { album_id: aid, start: s, end: e2, name: an });
+        if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+        msg('⏳ 已开始导入' + (hi ? ('第 ' + s + '-' + hi + ' 集') : ('第 ' + s + ' 集到末集')) + '《' + an + '》');
+        startPolling();
+      } finally { importBtnLock(false); }
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   });
 
@@ -4668,11 +4735,13 @@
       // v0.19.2：定时器的生命周期只在 poll() 末尾统一管（它还会看下载任务是否在跑）。
       // 这里原来无条件清掉，会把同时在进行的下载进度也停更。
       $('jobFill').style.width = '100%';
-      $('jobText').className = 'txt ' + (j && j.error ? 'err' : 'ok');
-      $('jobText').innerHTML = (j && j.error ? '❌ ' : '✅ ') +
+      // v0.23.26：区间被相对窗口截断时给警示，别让用户以为「完成」= 全导完
+      $('jobText').className = 'txt ' + (j && (j.error || j.warning) ? 'err' : 'ok');
+      $('jobText').innerHTML = (j && j.error ? '❌ ' : (j && j.warning ? '⚠️ ' : '✅ ')) +
         escHtml(((j && (j.title || j.current)) || '任务')) +
-        (j && j.error ? '：' + errClip(j.error, 110) : ' 完成') +
-        (j && j.total ? '（' + j.done + '/' + j.total + ' 集）' : '');
+        (j && j.error ? '：' + errClip(j.error, 110) : (j && j.warning ? ' 已导入部分集' : ' 完成')) +
+        (j && j.total ? '（' + j.done + '/' + j.total + ' 集）' : '') +
+        (j && j.warning ? ' · ' + escHtml(j.warning) : '');
       // v0.18.0：有写入失败时直接给个重试按钮，不用重导整本
       var oldRetry = $('jobRetry'); if (oldRetry) oldRetry.remove();
       if (j && j.error && /写入失败/.test(j.error) && (j.failedTracks || []).length) {
@@ -4697,7 +4766,7 @@
       // v0.18.7：原来这里引用了未声明的 canRetry → 任务结束时抛 ReferenceError，
       // 导致下面的 loadImported/loadSubs 不执行、进度条不收起、重试按钮不消失。
       var canRetry = !!(j && j.error && /写入失败/.test(j.error) && (j.failedTracks || []).length);
-      setTimeout(function () { if (!jobActive) { $('jobBar').classList.remove('show'); var jr = $('jobRetry'); if (jr) jr.remove(); } }, canRetry ? 20000 : 5000);
+      setTimeout(function () { if (!jobActive) { $('jobBar').classList.remove('show'); var jr = $('jobRetry'); if (jr) jr.remove(); } }, canRetry ? 20000 : ((j && j.warning) ? 12000 : 5000));
       loadImported();
       loadSubs();
     }
