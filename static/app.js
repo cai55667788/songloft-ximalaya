@@ -874,27 +874,6 @@
     renderResume();
   }
 
-  // v0.19.0：只在**刚打开专辑**时调用——倒序默认停在最后一页（最新集在前），正序停在第 1 页。
-  // 用户手动切顺序走 setOrder，那里只翻面不搬页，所以这里带 toLast 才有意义。
-  async function jumpToOrderPage(toLast) {
-    try {
-      await ensureLastPage();
-      var p = toLast ? (cur.lastPage || 1) : 1;
-      if (p && p !== cur.page) {
-        await gotoPage(p);
-        msg(playOrder === 'desc' ? '倒序：已跳到第 ' + p + ' 页（最新集在前）' : '正序：已回到第 1 页');
-      } else {
-        msg(playOrder === 'desc' ? '第 ' + cur.page + ' 页已切为倒序（本页最新集在前）' : '第 ' + cur.page + ' 页已切为正序（本页最早集在前）');
-        syncPageBtns();
-      }
-    } catch (e) {
-      msg(playOrder === 'desc' ? '已切换为倒序（新集在前）' : '已切换为正序（旧集在前）');
-      syncPageBtns();
-    }
-    syncOrderBtn();
-    renderResume();
-  }
-
   // v0.19.2：请求序号。连点两集时网络返回顺序不定，谁后返回谁抢到 src，
   // 但 qi 已经被最后一次点击改掉 → 音频和 qi 错位，进度会写进别的集。
   var playSeq = 0;
@@ -2855,9 +2834,9 @@
       await ensureLastPage();
       if (my !== detailSeq) return;
       syncPageBtns();
-      // 倒序时直接翻到最后一页，最新一集在最前
-      if (playOrder === 'desc' && d.hasMore) await jumpToOrderPage(true);
-      else syncPageBtns();
+      // v0.23.21：打开专辑一律停在第 1 页，不再因「倒序」自动搬到最后一页。
+      // 倒序只影响本页内的排列（最新集在本页最前）；要看最新集点分页条的「跳到最后」。
+      syncPageBtns();
     } catch (e) { $('dName').textContent = '加载失败: ' + e.message; }
   }
 
