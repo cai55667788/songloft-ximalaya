@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.27';
+var VERSION = '0.23.28';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -4769,7 +4769,28 @@ async function handleHTTPRequest(req) {
 
   // ---------- 订阅 ----------
   if (path === '/subs' && method === 'GET') {
-    return jsonResp({ success: true, data: subs });
+    // v0.23.28：附带每本订阅歌单的「真实歌曲数」与当前同步策略摘要。
+    // 订阅页原来的「收录到第 N 集」是抓取水位，不是歌单实际集数——
+    // 分组 mode=latest + 全局 keepLatest 会让歌单只留最新 N 首，两者对不上常被误认为「同步不一致」。
+    var playlistCounts = {};
+    try {
+      if (songloft.playlists && typeof songloft.playlists.list === 'function') {
+        var allPl = await songloft.playlists.list() || [];
+        allPl.forEach(function (pl) {
+          if (!pl) return;
+          var sc = pl.song_count !== undefined ? pl.song_count : pl.songCount;
+          if (sc !== undefined && sc !== null) playlistCounts[String(pl.id)] = Number(sc) || 0;
+        });
+      }
+    } catch (e) { /* 读歌单数失败不影响订阅列表本身 */ }
+    // 策略摘要：每组的同步方式（全集 / 最新N集 / 只检查）+ 全局旧集清理条数
+    var policy = { globalKeep: Number(config.auto && config.auto.keepLatest) || 0, groups: {} };
+    (config.groups || []).forEach(function (g0) {
+      if (g0 && g0.name) policy.groups[g0.name] = {
+        mode: g0.mode || 'follow', n: Number(g0.n) || 0, import: g0.import || 'global'
+      };
+    });
+    return jsonResp({ success: true, data: subs, playlistCounts: playlistCounts, syncPolicy: policy });
   }
 
   if (path === '/subs' && method === 'POST') {
