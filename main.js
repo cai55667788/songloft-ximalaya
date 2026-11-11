@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.25';
+var VERSION = '0.23.26';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -39,9 +39,18 @@ var COOKIE_CHK_KEY = 'cookie_check:v1';
 var UA_PC = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 var UA_M = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
 var PAGE_SIZE = 30;
-var MAX_PAGES = 60;        // 单次导入最多拉 60 页（约 1800 集）
+var MAX_PAGES = 60;        // 单次导入的「基础相对窗口」页数（从起始页起算，约 1800 集）
+var WINDOW_CAP = 200;      // v0.23.26：相对窗口硬顶（约 6000 集），防长专辑一次打满
 var BATCH = 200;           // 单批建歌上限
 var SYNC_MAX_PAGES = 25;   // 增量同步最多回溯 25 页
+// v0.23.26：分页从「绝对页码上限」改为「从起始页起的相对窗口」。
+// 原 while(page<=MAX_PAGES=60) 让 >1800 集专辑的「只导最新 N 集 / 按区间」在起始页 >60 时
+// 循环一次都不进 → 误报「专辑已下架」；增量同步水位过 1800 后永久「0 新增」。
+// 上限随 startPage 抬高，只限制单次扫描页数，不再限制绝对页号。
+function windowCeil(startPage, want) {
+  var w = Math.max(1, Math.min(Number(want) || MAX_PAGES, WINDOW_CAP));
+  return startPage + w - 1;
+}
 
 var config = {
   auto: { enabled: false, time: '08:30', lastRunDate: '', latestLimit: 0, keepLatest: 0 },
@@ -54,7 +63,7 @@ var config = {
 };
 var imported = [];   // [{albumId, name, playlistId, count, importedAt}]
 var subs = [];       // [{albumId, name, playlistId, lastIndex, songCount, cover, author, updateDate, lastCheckAt, newCount, newTitles, autoSync}]
-var job = { running: false, mode: '', title: '', done: 0, total: 0, playlistId: 0, error: '', finishedAt: '', current: '', parts: [] };
+var job = { running: false, mode: '', title: '', done: 0, total: 0, playlistId: 0, error: '', warning: '', finishedAt: '', current: '', parts: [] };
 var dlJob = { running: false, playlistId: 0, title: '', done: 0, total: 0, ok: 0, fail: 0, current: '', error: '', finishedAt: '', targetDir: '', cancel: false };
 var watch = { items: [], job: { running: false, at: '', added: 0, msg: '' } };
 var progress = { tracks: {}, albums: {}, at: '' };
@@ -652,7 +661,7 @@ async function fetchAlbumOutline(albumId) {
   var pages = [];
   var page = 1;
   var lastIndex = 0;
-  while (page <= 200) {
+  while (page <= WINDOW_CAP) {
     var list = await fetchShowPage(albumId, page);
     if (!list.length) break;
     var idx = list.map(function (t) { return Number(t.index) || 0; });
@@ -700,11 +709,11 @@ function mapTrack(t, albumName) {
   return {
     index: t.index,
     trackId: t.trackId,
-    title: t.trackName || ('第' + t.index + '集'),
-    album: t.albumName || albumName || '',
+    title: stripHtml(t.trackName || ('第' + t.index + '集')),
+    album: stripHtml(t.albumName || albumName || ''),
     duration: t.duration || 0,
     updatedAt: normMonth(t.updateTime || t.createTime || ''),
-    cover: t.trackCoverPath ? ('https://imagev2.xmcdn.com/' + t.trackCoverPath) : ''
+    cover: normCover(t.trackCoverPath || '')
   };
 }
 
@@ -1451,7 +1460,7 @@ async function loadAll() {
   if (!login || typeof login.cookie !== 'string') login = { cookie: '', savedAt: '' };
   if (!Array.isArray(subs)) subs = [];
   if (!Array.isArray(imported)) imported = [];
-  if (!job || typeof job !== 'object') job = { running: false, mode: '', title: '', done: 0, total: 0, playlistId: 0, error: '', finishedAt: '', current: '', parts: [] };
+  if (!job || typeof job !== 'object') job = { running: false, mode: '', title: '', done: 0, total: 0, playlistId: 0, error: '', warning: '', finishedAt: '', current: '', parts: [] };
 
   if (!watch || typeof watch !== 'object') watch = { items: [], job: { running: false, at: '', added: 0, msg: '' } };
   if (!Array.isArray(watch.items)) watch.items = [];
@@ -2128,9 +2137,16 @@ async function fetchAlbumTracks(albumId, start, end, maxPages) {
   var tracks = [], albumName = '';
   // v0.23.7：给了起始集就直接从对应页开扫（第 N 集 = 第 ceil(N/30) 页），不再从第 1 页全量扫一遍再过滤
   var page = start > 0 ? Math.max(1, Math.floor((start - 1) / PAGE_SIZE) + 1) : 1;
-  var limit = maxPages || MAX_PAGES;
+  // v0.23.26：相对窗口 —— 从 startPage 起最多扫 want 页，不再用绝对页码 MAX_PAGES 硬顶。
+  // 给了 end 就按 end 反推需要的页数（含一页冗余），否则用基础窗口；返回 truncated 让上层提示。
+  var want = MAX_PAGES;
+  if (end > 0) want = Math.floor((end - 1) / PAGE_SIZE) + 2 - page;
+  if (maxPages > 0) want = maxPages;
+  var limit = windowCeil(page, want);
+  var scanned = 0, reachedEnd = false, hitLimit = false;
   while (page <= limit) {
-    var batch = await fetchShowPage(albumId, page);
+    var batch = await fetchShowPage(albumId, page);   // 坏页仍上抛（v0.23.25 语义不变）
+    scanned += 1;
     if (batch.length && !albumName) albumName = batch[0].albumName || ('专辑' + albumId);
     for (var i = 0; i < batch.length; i++) {
       var t = mapTrack(batch[i], albumName);
@@ -2138,15 +2154,19 @@ async function fetchAlbumTracks(albumId, start, end, maxPages) {
       tracks.push(t);
     }
     if (batch.length < PAGE_SIZE) break;
-    if (end && batch[batch.length - 1].index >= end) break;
+    if (end && batch[batch.length - 1].index >= end) { reachedEnd = true; break; }
     page += 1;
+    if (page > limit) hitLimit = true;
   }
-  if (!tracks.length) throw new Error('未取到曲目，专辑可能已下架或 ID 无效');
+  if (!tracks.length) throw new Error('未取到曲目，专辑可能已下架、ID 无效，或起始集超出总集数');
   if (start || end) {
     var lo = start || 1, hi = end || 999999;
     tracks = tracks.filter(function (t) { return t.index >= lo && t.index <= hi; });
   }
-  return { albumName: albumName || ('专辑' + albumId), tracks: tracks };
+  // truncated：显式给 end 时窗口被硬顶截断且没扫到 end 所在页 → 上层给 warning。
+  // 全量导入（end=0）沿用原来的基础窗口，不报「区间未导完」以免误导。
+  var truncated = !!(end > 0 && hitLimit && !reachedEnd);
+  return { albumName: albumName || ('专辑' + albumId), tracks: tracks, truncated: truncated, scannedPages: scanned };
 }
 
 // 增量拉取：只返回 index > afterIndex 的曲目
@@ -2155,7 +2175,8 @@ async function fetchNewTracks(albumId, afterIndex) {
   var startPage = after > 0 ? Math.max(1, Math.floor((after - 1) / PAGE_SIZE) + 1) : 1;
   var out = [], page = startPage, guard = 0, albumName = '', lastIndex = after, pageErr = '';
 
-  while (page <= MAX_PAGES && guard < SYNC_MAX_PAGES) {
+  // v0.23.26：相对窗口 —— 水位过 1800 集后不再因绝对页码 >60 永久「0 新增」。
+  while (page <= windowCeil(startPage, SYNC_MAX_PAGES) && guard < SYNC_MAX_PAGES) {
     var batch;
     try { batch = await fetchShowPage(albumId, page); }
     catch (eP) {
@@ -2231,8 +2252,20 @@ async function addTracksToPlaylist(playlistId, tracks, onProgress) {
 
 // ---------- 导入 ----------
 
+// v0.23.26：解析导入集数参数。空→0；只接受非负整数字面量；非法→把 label 推进 errs 并返回 -1。
+// 不用 Number.isSafeInteger（部分 JS 宿主引擎可能缺失），用 isFinite + Math.floor 判定。
+function parseImportEp(v, label, errs) {
+  if (v === null || v === undefined || v === '') return 0;
+  var sv = String(v).trim();
+  var nv = Number(sv);
+  if (!/^\d+$/.test(sv) || !isFinite(nv) || Math.floor(nv) !== nv) {
+    errs.push(label + '必须是非负整数'); return -1;
+  }
+  return nv;
+}
+
 async function runImport(albumId, name, start, end, latest) {
-  job = { running: true, mode: 'single', title: '', done: 0, total: 0, playlistId: 0, error: '', finishedAt: '', current: '', parts: [] };
+  job = { running: true, mode: 'single', title: '', done: 0, total: 0, playlistId: 0, error: '', warning: '', finishedAt: '', current: '', parts: [] };
   await persist();
   try {
     var detail = null;
@@ -2255,7 +2288,26 @@ async function runImport(albumId, name, start, end, latest) {
       }
     }
 
+    // v0.23.26：区间模式的越界预检 + 开放式区间（只填起始集）补到末集。
+    // outline 拿不到不阻断（fetchAlbumTracks 会明确报错），只在确实拿到总集数时校验。
+    if (start > 0) {
+      var ol2 = null;
+      try { ol2 = await fetchAlbumOutline(albumId); } catch (e2) { /* 不阻断导入 */ }
+      var tot2 = Number(ol2 && ol2.lastIndex) || 0;
+      if (tot2 > 0) {
+        if (start > tot2 || (end > 0 && end > tot2)) {
+          throw new Error('区间超出专辑总集数 ' + tot2 + '（可导 1~' + tot2 + ' 集），请刷新详情页后重试');
+        }
+        if (!end) end = tot2;   // 只填起始集 → 补到末集，避免相对窗口静默截断
+      }
+    }
+
     var fetched = await fetchAlbumTracks(albumId, start, end);
+    // v0.23.26：区间被相对窗口截断时给 warning，不写 job.error（避免误出「重试失败集」按钮）
+    job.warning = fetched.truncated
+      ? ('区间未导完：本次已导入 ' + fetched.tracks.length + ' 集，专辑可能还有更多集，请缩小结束集分批导入')
+      : '';
+    if (job.warning) songloft.log.warn('[喜马拉雅] ' + job.warning);
     stampAuthor(fetched.tracks, detail && detail.author, detail && detail.name);
     var title = name || (detail && detail.name) || fetched.albumName;
     job.title = title;
@@ -2592,6 +2644,8 @@ async function pruneSubOld(sub, keepN) {
   catch (e2) { out.skipped = 'setsongs:' + String(e2 && e2.message || e2); return out; }
   out.removed = rmN;
   out.kept = keepIds.length;
+  // v0.23.26：删旧集后同步订阅计数，避免 songCount 与实际歌单数持续漂移
+  if (sub && typeof sub === 'object') sub.songCount = Math.max(0, (Number(sub.songCount) || 0) - rmN);
   songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》已按设置清理旧集：移除最早 ' + rmN + ' 集，歌单保留 ' + keepIds.length + ' 首' + (hasOther ? '（含手动添加的歌）' : '') + (unknownN ? '（' + unknownN + ' 集标题无法解析集号，已保留未清理）' : ''));
   return out;
 }
@@ -4560,9 +4614,20 @@ async function handleHTTPRequest(req) {
     var b3 = readBodyJson(req);
     var aid = extractAlbumId(b3.album_id || b3.url || '');
     if (!aid) return jsonResp({ success: false, error: '请提供专辑链接或数字 ID' }, 400);
-    importing = true;
+    // v0.23.26：参数强校验 —— 原 Number(x)||0 让 latest=-1 / start=-1 静默全量导入（建出超大歌单），
+    // start>end 报「专辑已下架」误导。非法参数一律同步 400，不启动任务。
+    var ipErrs = [];
+    var ipLatest = parseImportEp(b3.latest, '最新集数', ipErrs);
+    var ipStart = parseImportEp(b3.start, '起始集', ipErrs);
+    var ipEnd = parseImportEp(b3.end, '结束集', ipErrs);
+    if (ipErrs.length) return jsonResp({ success: false, error: ipErrs.join('；') }, 400);
+    if (ipLatest > 2000) return jsonResp({ success: false, error: '一次最多导入最新 2000 集' }, 400);
+    if (ipLatest > 0 && (ipStart || ipEnd)) return jsonResp({ success: false, error: '「只导最新 N 集」与「按区间」不能同时使用' }, 400);
+    if (!ipStart && ipEnd) return jsonResp({ success: false, error: '按区间导入请填写起始集' }, 400);
+    if (ipEnd && ipEnd < ipStart) return jsonResp({ success: false, error: '结束集不能小于起始集' }, 400);
     // v0.23.7：latest = 只导最新 N 集（与 start/end 互斥，latest 优先级低：填了区间按区间）
-    runImport(aid, b3.name || '', Number(b3.start) || 0, Number(b3.end) || 0, Number(b3.latest) || 0)
+    importing = true;   // 提前占锁，防 runImport 内 await 期间并发请求同时通过 409
+    runImport(aid, b3.name || '', ipStart, ipEnd, ipLatest)
       .finally(function () { importing = false; });
     return jsonResp({ success: true, data: { message: '导入任务已开始，可在状态栏查看进度' } });
   }
@@ -4600,6 +4665,8 @@ async function handleHTTPRequest(req) {
       groups = [{ retryPlaylistId: Number(job.retryPlaylistId || job.playlistId) || 0, failedTracks: job.failedTracks }];
     }
     if (!groups.length) return jsonResp({ success: true, data: { added: 0, left: 0, message: '没有需要重试的集' } });
+    importing = true;   // v0.23.26：原实现只检查不置位，await 写入期间并发 retry / import 会重复写歌单
+    try {
     var addedSum = 0, leftSum = 0, skipped = 0;
     for (var gi = 0; gi < groups.length; gi++) {
       var gp = groups[gi];
@@ -4624,6 +4691,7 @@ async function handleHTTPRequest(req) {
     await persist();
     songloft.log.info('[喜马拉雅] 重试失败集: 补上 ' + addedSum + ' 集，剩 ' + job.failedTracks.length + ' 集');
     return jsonResp({ success: true, data: { added: addedSum, left: job.failedTracks.length } });
+    } finally { importing = false; }
   }
 
   if (path === '/imported' && method === 'GET') {
