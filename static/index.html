@@ -1008,7 +1008,7 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.25</span>
+    <span class="ver" id="ver">v0.23.26</span>
   </div>
 
   <div class="tabs">
@@ -1159,14 +1159,15 @@
         <summary>更多导入方式（按最新 N 集 / 按区间）</summary>
         <div class="foldbody">
           <div class="row">
-            <div><label>只导最新</label><input type="number" id="dLatest" min="1" placeholder="如 30" /></div>
+            <div><label>只导最新</label><input type="number" id="dLatest" min="1" max="2000" step="1" inputmode="numeric" placeholder="如 30" /></div>
             <div style="flex:none;padding-top:18px;"><button class="small plain" id="btnImportLatest">集（只导最新 N 集）</button></div>
           </div>
           <div class="row">
-            <div><label>起始集</label><input type="number" id="dStart" min="1" placeholder="1" /></div>
-            <div><label>结束集</label><input type="number" id="dEnd" min="1" placeholder="默认全部" /></div>
+            <div><label>起始集</label><input type="number" id="dStart" min="1" max="2000" step="1" inputmode="numeric" placeholder="1" /></div>
+            <div><label>结束集</label><input type="number" id="dEnd" min="1" max="2000" step="1" inputmode="numeric" placeholder="默认到末集" /></div>
             <div style="flex:none"><button class="small plain" id="btnImportRange">按区间导入</button></div>
           </div>
+          <div class="muted small-txt" id="dImportEcho" style="margin-top:6px;"></div>
         </div>
       </details>
       <div id="dTracks" style="margin-top:12px;"></div>
@@ -1566,7 +1567,7 @@
     <div class="ipinfo" id="ipInfo"></div>
     <div class="ipnrow">
       <label style="flex:none;">只导最新</label>
-      <input type="number" id="ipN" min="1" max="9999" value="30" />
+      <input type="number" id="ipN" min="1" max="2000" value="30" />
       <span style="color:var(--muted);">集（填好点右侧「只导最新」）</span>
     </div>
     <label style="display:flex;align-items:center;gap:6px;margin:8px 2px 0;font-size:12px;color:var(--muted);">
@@ -1621,6 +1622,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.25"></script>
+<script src="static/app.js?v=0.23.26"></script>
 </body>
 </html>
