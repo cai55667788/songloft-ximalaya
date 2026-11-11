@@ -3657,12 +3657,18 @@
   // v0.23.16：订阅多选（albumId -> true）→ 批量设分组 / 批量开关自动同步 / 批量取消订阅
   var subSel = {};
   var subShown = [];           // 最近一次渲染出来的订阅（当前筛选范围，「全选」只作用于这里）
+  // v0.23.28：后端 /subs 附带的真实歌单集数与同步策略摘要，用来解释「水位 vs 歌单集数」的差异
+  var subPlaylistCounts = {};
+  var subSyncPolicy = { globalKeep: 0, groups: {} };
 
   async function loadSubs() {
     var el = $('subsList');
     try {
       var r = await api('GET', '/subs');
       subsCache = r.data || [];
+      // v0.23.28：真实歌单集数 + 同步策略（后端一次 playlists.list 汇总，零额外请求）
+      subPlaylistCounts = (r && r.playlistCounts) || {};
+      subSyncPolicy = (r && r.syncPolicy) || { globalKeep: 0, groups: {} };
       setCardHint('subsCardHint', subsCache.length ? subsCache.length + ' 张订阅 · 可勾选批量管理' : '订阅与批量管理');
       await ensureGroups();          // v0.23.15：分组标签与筛选要用
       // 分组被删掉后，筛选停在该分组会看到空列表 —— 自动退回「全部」
@@ -3718,6 +3724,18 @@
         // v0.23.25：这些字段来自喜马拉雅元数据，进 innerHTML 前统一转义（原样拼接是存储型 XSS sink）。
         if (s.newCount) bits.push('<span class="badge new">有 ' + escHtml(s.newCount) + ' 集更新</span>');
         bits.push('收录到第 ' + escHtml(s.lastIndex || 0) + ' 集');
+        // v0.23.28：把「抓取水位」和「歌单实际集数」分开显示，并说明为什么歌单集数更少
+        var plReal = (s.playlistId != null) ? subPlaylistCounts[String(s.playlistId)] : undefined;
+        if (plReal !== undefined) {
+          bits.push('<span class="plreal">歌单 ' + escHtml(plReal) + ' 首</span>');
+          var pol = (subSyncPolicy.groups && s.group) ? subSyncPolicy.groups[s.group] : null;
+          var keepN = pol ? (pol.mode === 'all' ? 0 : (Number(pol.n) || 0)) : (Number(subSyncPolicy.globalKeep) || 0);
+          if (pol && pol.import === 'check') {
+            bits.push('<span class="plpolicy">只检查不导入</span>');
+          } else if (keepN > 0) {
+            bits.push('<span class="plpolicy">按策略仅留最新 ' + escHtml(keepN) + ' 集</span>');
+          }
+        }
         if (s.updateDate) bits.push('专辑更新 ' + escHtml(s.updateDate));
         if (s.lastCheckAt) bits.push('检查 ' + escHtml(s.lastCheckAt));
         if (!s.playlistId) bits.push('<span class="err">未绑定歌单</span>');
