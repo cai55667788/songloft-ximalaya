@@ -1014,6 +1014,54 @@
     .grphead { min-height: 34px; gap: 9px; font-size: 14px; }
     /* 「我的订阅」列表勾选框同步放大 */
     .line .ck { width: 24px; height: 24px; }
+    /* ===== v0.23.28：仿知音全屏布局（标签栏移到底部）+ 双行专辑名（追加覆盖，旧规则不动） ===== */
+    /* 1) 主标签栏固定在屏幕底部，做成原生式 tab-bar（图标在上、文字在下、大热区） */
+    #mainTabs {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 45;
+      display: flex; align-items: stretch; gap: 2px; overflow: visible;
+      max-width: 720px; margin: 0 auto; box-sizing: border-box;
+      padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+      background: var(--card); border-top: 1px solid var(--border-soft);
+      box-shadow: 0 -4px 20px rgba(0,0,0,.12);
+    }
+    #mainTabs .tab {
+      position: relative; flex: 1 1 0; min-width: 0; min-height: 54px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+      padding: 5px 2px; margin: 0; border: 0; border-radius: 12px;
+      background: transparent; color: var(--muted); font-size: 11px; font-weight: 500;
+      box-shadow: none; white-space: nowrap;
+    }
+    #mainTabs .tab::before { font-size: 21px; line-height: 1; font-weight: 400; }
+    #mainTabs .tab[data-tab="search"]::before { content: '🔍'; }
+    #mainTabs .tab[data-tab="subs"]::before { content: '📌'; }
+    #mainTabs .tab[data-tab="lib"]::before { content: '📚'; }
+    #mainTabs .tab[data-tab="set"]::before { content: '⚙️'; }
+    #mainTabs .tab.active {
+      background: var(--accent-soft); color: var(--accent); border-color: transparent;
+      box-shadow: none; font-weight: 700;
+    }
+    #mainTabs #subBadge { position: absolute; top: 2px; right: calc(50% - 22px); margin: 0; }
+    /* 2) 内容区给底部 tab-bar（含安全区）让位，避免最后一行被盖住 */
+    body { padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+    body.has-player { padding-bottom: calc(164px + env(safe-area-inset-bottom, 0px)); }
+    @media (max-width: 560px) {
+      body { padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+      body.has-player { padding-bottom: calc(172px + env(safe-area-inset-bottom, 0px)); }
+    }
+    /* 3) 迷你播放器 / 导入进度条上移到 tab-bar 之上，互不遮挡 */
+    #player { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+    #jobBar { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+    /* 4) 标题栏收紧（标签已移到底部，顶部只留标题） */
+    .hdr { padding-bottom: 10px; }
+    /* 5) 订阅视角长专辑名两行显示（原来单行省略号，字数多看不到全名） */
+    .grpname {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      white-space: normal; overflow: hidden; line-height: 1.35;
+    }
+    .grpitem { min-height: 56px; }
+    /* 6) 订阅行「真实歌单集数 / 同步策略」小标 */
+    .plreal { color: var(--accent); font-weight: 600; }
+    .plpolicy { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -1021,16 +1069,16 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.27</span>
+    <span class="ver" id="ver">v0.23.28</span>
   </div>
+  </header>
 
-  <div class="tabs">
+  <nav class="tabs" id="mainTabs" aria-label="主导航">
     <button class="tab" data-tab="search">发现</button>
     <button class="tab active" data-tab="subs">订阅 <span id="subBadge"></span></button>
     <button class="tab" data-tab="lib">已导入</button>
     <button class="tab" data-tab="set">设置</button>
-  </div>
-  </header>
+  </nav>
 
   <!-- ===== 搜索 ===== -->
   <section id="tab-search" class="hide">
@@ -1635,6 +1683,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.27"></script>
+<script src="static/app.js?v=0.23.28"></script>
 </body>
 </html>
