@@ -1001,6 +1001,19 @@
       font-size: 15px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.10); }
     .grpcover img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .grpitem { padding: 4px 0 4px 16px; min-height: 34px; }
+    /* ===== v0.23.27：默认开订阅页 + 订阅视角图标加大，手机防误触 ===== */
+    /* 订阅视角：勾选项 / 封面 / 行高三件套一起放大，手指点得准、不误触隔壁 */
+    .grpitem { padding: 8px 0 8px 14px; min-height: 52px; gap: 10px; }
+    .grpitem .ck,
+    .grphead input[type=checkbox] {
+      flex: none; width: 24px; height: 24px; margin: 0;
+      accent-color: var(--accent); cursor: pointer;
+    }
+    .grpcover { width: 44px; height: 44px; border-radius: 11px; font-size: 20px; }
+    .grpname { font-size: 14px; }
+    .grphead { min-height: 34px; gap: 9px; font-size: 14px; }
+    /* 「我的订阅」列表勾选框同步放大 */
+    .line .ck { width: 24px; height: 24px; }
 </style>
 </head>
 <body>
@@ -1008,19 +1021,19 @@
   <header class="hdr">
   <div class="top">
     <h1>🎧 喜马拉雅</h1>
-    <span class="ver" id="ver">v0.23.26</span>
+    <span class="ver" id="ver">v0.23.27</span>
   </div>
 
   <div class="tabs">
-    <button class="tab active" data-tab="search">发现</button>
-    <button class="tab" data-tab="subs">订阅 <span id="subBadge"></span></button>
+    <button class="tab" data-tab="search">发现</button>
+    <button class="tab active" data-tab="subs">订阅 <span id="subBadge"></span></button>
     <button class="tab" data-tab="lib">已导入</button>
     <button class="tab" data-tab="set">设置</button>
   </div>
   </header>
 
   <!-- ===== 搜索 ===== -->
-  <section id="tab-search">
+  <section id="tab-search" class="hide">
     <div class="card" id="searchCard">
       <div class="row">
         <div><input type="text" id="kw" placeholder="关键词，如：股票、三国演义、郭德纲" /></div>
@@ -1192,7 +1205,7 @@
 
 
   <!-- ===== 订阅 ===== -->
-  <section id="tab-subs" class="hide">
+  <section id="tab-subs">
     <details class="fold" id="grpCard" open>
       <summary>📊 订阅视角 <span class="muted small-txt" style="font-weight:400;font-size:12px;margin-left:6px;">想听就点专辑名</span></summary>
       <div class="foldbody">
@@ -1622,6 +1635,6 @@
   </div>
 </div>
 
-<script src="static/app.js?v=0.23.26"></script>
+<script src="static/app.js?v=0.23.27"></script>
 </body>
 </html>
