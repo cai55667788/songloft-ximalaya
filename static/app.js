@@ -2457,7 +2457,7 @@
       var bImport = document.createElement('button');
       bImport.className = 'small';
       bImport.textContent = '导入';
-      bImport.addEventListener('click', function () { doImport(a.id, a.title, a.tracks); });
+      bImport.addEventListener('click', function () { doImport(a.id, a.title, a.tracks, 0, 0, true); });
       acts.appendChild(bImport); acts.appendChild(bDetail);
 
       item.appendChild(ck); item.appendChild(img); item.appendChild(body); item.appendChild(acts);
@@ -2690,13 +2690,32 @@
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   });
 
+  // v0.23.19：导入方式偏好 —— 记住上次选择，「导入」一键完成，不用每次都弹抽屉
+  var IP_KEY = 'xm_import_pref';
+  function getIpPref() {
+    try {
+      var p = JSON.parse(sGet(IP_KEY) || 'null');
+      if (p && (p.mode === 'all' || (p.mode === 'latest' && p.n > 0))) return p;
+    } catch (e) { /* */ }
+    return null;
+  }
+  function setIpPref(p) {
+    try { sSet(IP_KEY, p ? JSON.stringify(p) : ''); } catch (e2) { /* */ }
+  }
+  function ipPrefLabel(p) {
+    if (!p) return '';
+    return p.mode === 'latest' ? ('最新 ' + p.n + ' 集') : '全部';
+  }
+
   // v0.23.8：导入方式选择弹窗 —— 导入全部，或只导最新 N 集（后端 /import 的 latest 参数）
   function pickImportMode(name, tracks) {
     return new Promise(function (resolve) {
       var panel = $('ipPanel');
       $('ipTitle').textContent = '导入《' + (name || '专辑') + '》';
       $('ipInfo').textContent = tracks > 0 ? '共 ' + tracks + ' 集，选择导入方式：' : '选择导入方式：';
-      $('ipN').value = 30;
+      var pref0 = getIpPref();
+      $('ipN').value = (pref0 && pref0.mode === 'latest') ? pref0.n : 30;
+      if ($('ipRemember')) $('ipRemember').checked = !!pref0;
       panel.classList.add('show');
       function done(rs) {
         panel.classList.remove('show');
@@ -2704,11 +2723,17 @@
         $('ipClose').onclick = null; panel.onclick = null; $('ipN').onkeydown = null;
         resolve(rs);
       }
-      $('ipAll').onclick = function () { done({ mode: 'all' }); };
+      function remember(pick) {
+        if (!$('ipRemember')) return;
+        setIpPref($('ipRemember').checked ? pick : null);
+      }
+      $('ipAll').onclick = function () { var p0 = { mode: 'all' }; remember(p0); done(p0); };
       $('ipLatest').onclick = function () {
         var n = Math.floor(Number($('ipN').value) || 0);
         if (n <= 0) { msg('请填写要导最新的多少集，如 30', 'err'); return; }
-        done({ mode: 'latest', n: n });
+        var p0 = { mode: 'latest', n: n };
+        remember(p0);
+        done(p0);
       };
       $('ipClose').onclick = function () { done(null); };
       panel.onclick = function (e) { if (e.target === panel) done(null); };
@@ -2717,13 +2742,18 @@
     });
   }
 
-  async function doImport(albumId, name, tracks, fromEp, toEp) {
+  async function doImport(albumId, name, tracks, fromEp, toEp, quick) {
     var ranged = Number(fromEp) > 0;
-    // v0.23.8：整本导入先选方式（导入全部 / 只导最新 N 集）；按区间导入保持原行为
     var pick = null;
     if (!ranged) {
-      pick = await pickImportMode(name, tracks);
-      if (!pick) return;
+      // v0.23.19：quick 时用记住的偏好一键导入（搜索结果行 / 详情页 / 账号导入列表共用）
+      if (quick) {
+        pick = getIpPref();
+        if (!pick) { pick = await pickImportMode(name, tracks); if (!pick) return; }
+      } else {
+        pick = await pickImportMode(name, tracks);
+        if (!pick) return;
+      }
     }
     try {
       var payload = { album_id: String(albumId), name: name || '' };
@@ -2735,7 +2765,8 @@
       }
       var r = await api('POST', '/import', payload);
       if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
-      msg('⏳ 已开始导入' + (ranged ? '第 ' + fromEp + '-' + toEp + ' 集' : (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部')) + '《' + name + '》');
+      var how = ranged ? '第 ' + fromEp + '-' + toEp + ' 集' : (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部');
+      msg('⏳ 已开始导入' + (!ranged && quick && getIpPref() ? how + '（按上次设置）' : how) + '《' + name + '》');
       startPolling();
     } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   }
@@ -3485,7 +3516,21 @@
 
   $('btnImportDetail').addEventListener('click', function () {
     var d = cur.detail;
-    doImport(cur.id, d && d.name, 0);
+    doImport(cur.id, d && d.name, 0, 0, 0, true);
+  });
+  // v0.23.19：明式入口 —— 想换方式时点「方式」，还能顺手改成默认
+  $('btnImportPick').addEventListener('click', async function () {
+    var d = cur.detail;
+    var pick = await pickImportMode(d && d.name, d && d.tracks || 0);
+    if (!pick) return;
+    try {
+      var payload = { album_id: String(cur.id), name: (d && d.name) || '' };
+      if (pick.mode === 'latest') payload.latest = pick.n;
+      var r = await api('POST', '/import', payload);
+      if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
+      msg('⏳ 已开始导入' + (pick.mode === 'latest' ? '最新 ' + pick.n + ' 集' : '全部') + '《' + ((d && d.name) || '') + '》');
+      startPolling();
+    } catch (e) { msg('导入失败: ' + e.message, 'err'); }
   });
 
   // v0.23.7：只导最新 N 集
@@ -3730,11 +3775,14 @@
     if (!box) return;
     await ensureGroups(true);
     // v0.23.17：连同步方式一起带进草稿（开关 / 时间 / 内容 / 上次跑的时间）
+    var prevOpen = {};
+    sgDraft.forEach(function (g0) { if (g0._open) prevOpen[g0.name] = true; });
     sgDraft = (groupsCache || []).map(function (g) {
       return {
         name: g.name, mode: g.mode, n: g.n,
         auto: g.auto || 'global', time: g.time || '', import: g.import || 'global',
-        lastRunDate: g.lastRunDate || ''
+        lastRunDate: g.lastRunDate || '',
+        _open: !!prevOpen[g.name]   // v0.23.19：自动保存会重渲染，别把展开态收回去
       };
     });
     renderSgCard();
@@ -3808,9 +3856,10 @@
       del.textContent = '×';
       del.title = '删除分组（里面的订阅回到未分组）';
       del.addEventListener('click', function () {
-        if (!confirm('删除分组「' + g.name + '」？组里的订阅会回到未分组，订阅本身不会删。\n（点「保存分组设置」后生效）')) return;
+        if (!confirm('删除分组「' + g.name + '」？组里的订阅会回到未分组，订阅本身不会删。\n（删除会立即自动保存）')) return;
         sgDraft.splice(i, 1);
         renderSgCard();
+        scheduleAutoSave();
       });
 
       // 第二行：同步范围 + 同步方式（自动同步开关 / 时间 / 内容）
@@ -3841,8 +3890,9 @@
         g.mode = sel.value;
         num.disabled = g.mode !== 'latest';
         sum.textContent = sgSummary(g);
+        scheduleAutoSave();
       });
-      num.addEventListener('input', function () { g.n = Math.floor(Number(num.value) || 0); sum.textContent = sgSummary(g); });
+      num.addEventListener('input', function () { g.n = Math.floor(Number(num.value) || 0); sum.textContent = sgSummary(g); scheduleAutoSave(); });
 
       var lb2 = document.createElement('label');
       lb2.textContent = '自动同步';
@@ -3868,8 +3918,9 @@
         g.auto = autoSel.value;
         timeInp.disabled = g.auto === 'off';
         sum.textContent = sgSummary(g);
+        scheduleAutoSave();
       });
-      timeInp.addEventListener('change', function () { g.time = timeInp.value || ''; sum.textContent = sgSummary(g); });
+      timeInp.addEventListener('change', function () { g.time = timeInp.value || ''; sum.textContent = sgSummary(g); scheduleAutoSave(); });
 
       var lb3 = document.createElement('label');
       lb3.textContent = '新集';
@@ -3883,7 +3934,7 @@
       });
       impSel.value = (g.import === 'check') ? 'check' : 'global';
       impSel.title = '「只检查」= 只标记有 N 集更新，不往歌单里加';
-      impSel.addEventListener('change', function () { g.import = impSel.value; sum.textContent = sgSummary(g); });
+      impSel.addEventListener('change', function () { g.import = impSel.value; sum.textContent = sgSummary(g); scheduleAutoSave(); });
 
       opt.appendChild(lb1); opt.appendChild(sel); opt.appendChild(num);
       opt.appendChild(lb2); opt.appendChild(autoSel); opt.appendChild(timeInp);
@@ -4046,6 +4097,7 @@
         sgDraft.push({ name: nm, mode: 'global', n: 20, auto: 'global', time: '', import: 'global', lastRunDate: '' });
         el.value = '';
         renderSgCard();
+        scheduleAutoSave();
       });
       $('sgNewName').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('btnSgAdd').click(); });
     }
@@ -4125,7 +4177,7 @@
       bImp.className = 'small';
       bImp.textContent = a.playlistId ? '已在库' : '导入';
       bImp.disabled = !!a.playlistId;
-      bImp.addEventListener('click', function () { doImport(a.id, a.title, a.tracks); });
+      bImp.addEventListener('click', function () { doImport(a.id, a.title, a.tracks, 0, 0, true); });
       var bSub = document.createElement('button');
       bSub.className = 'small plain';
       bSub.textContent = a.subscribed ? '已订阅' : '跟进';
@@ -4265,10 +4317,20 @@
     } catch (e) { /* */ }
   }
 
-  // v0.23.18：默认设置与分组都在同一张卡里，「保存设置」一次全存，不再分两个按钮
-  $('btnSaveAuto').addEventListener('click', async function () {
-    var btn = $('btnSaveAuto');
-    btn.disabled = true;
+  // v0.23.19：默认设置与分组改动即自动保存，不再要点「保存」——少一步，也不会忘存
+  var autoSaveTimer = null;
+  var savingNow = false;
+  function scheduleAutoSave() {
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(async function () {
+      autoSaveTimer = null;
+      await saveSyncSettings();
+    }, 800);
+  }
+  async function saveSyncSettings() {
+    if (savingNow) { scheduleAutoSave(); return; }   // 上一轮还在跑，稍后再存一次
+    savingNow = true;
+    var st = $('btnSaveAuto');   // v0.23.19 起是状态行，不是按钮
     try {
       var aLlOn = $('autoLatest').value === '1';
       var aLlN = Math.floor(Number($('autoLatestN').value) || 0);
@@ -4295,7 +4357,8 @@
         var r2 = await api('POST', '/groups', { groups: payload });
         if (r2 && r2.success === false) {
           msg('❌ 分组没存上：' + (r2.error || '保存失败') + '（默认设置已保存）', 'err');
-          btn.disabled = false;
+          if (st) st.textContent = '⚠️ 保存失败，改一下会重试';
+          savingNow = false;
           return;
         }
         gn = payload.length;
@@ -4303,10 +4366,20 @@
         if (mv) mvTxt = '，' + mv + ' 张订阅回到未分组';
         await loadSubGroups();
       }
-      msg('✅ 设置已保存' + (gn ? '（' + gn + ' 个分组' + mvTxt + '）' : ''), 'ok');
+      if (st) st.textContent = '✅ 已自动保存 ' + new Date().toTimeString().slice(0, 5) + (gn ? '（' + gn + ' 个分组' + mvTxt + '）' : '');
       loadSubs();
-    } catch (e) { msg('保存失败: ' + e.message, 'err'); }
-    btn.disabled = false;
+    } catch (e) {
+      msg('保存失败: ' + e.message, 'err');
+      if (st) st.textContent = '⚠️ 保存失败，改一下会重试';
+    }
+    savingNow = false;
+  }
+  // 默认设置六个控件：用户改动即自动保存（loadAuto 程序化赋值不触发 change，不会误存）
+  ['autoEnabled', 'autoTime', 'autoLatest', 'autoLatestN', 'autoKeep', 'autoKeepN'].forEach(function (id2) {
+    var el2 = $(id2);
+    if (!el2) return;
+    el2.addEventListener('change', scheduleAutoSave);
+    if (el2.tagName === 'INPUT') el2.addEventListener('input', scheduleAutoSave);
   });
 
   // v0.19.4：后端 /sync、/subs/check（全量）改成异步立即返回 —— 订阅一多就必然撞宿主 60s 上限，
