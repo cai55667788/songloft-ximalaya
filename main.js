@@ -23,7 +23,7 @@
 //   登录态:   GET /revision/main/getCurrentUser、/revision/my/getSubscriptionSynthesize 等（需 Cookie）
 //   扫码登录: GET /passport/qrcode/gen?level=L → {qrId, img}；GET /passport/qrcode/check/{qrId}/{ts} → Set-Cookie 1&_token
 
-var VERSION = '0.23.21';
+var VERSION = '0.23.25';
 var ENTRY = 'ximalaya';
 var MIOT_ENTRY = 'miot';
 var CFG_KEY = 'config:v1';
@@ -328,8 +328,21 @@ function sleepMs(ms) {
 // v0.22.4：GET 结果短缓存（15 秒）。翻回上一页、重复点同一集、同一页面被轮询时
 // 不再重复打网络 —— 既快也更抗抖动。
 var NET_CACHE = {}, NET_CACHE_TTL = 15000, NET_CACHE_MAX = 80, netCacheN = 0;
+// v0.23.24：缓存/单飞 key 纳入 Cookie 身份（FNV-1a 哈希，不明文入 key）。
+// 原实现只用「有无 Cookie」区分，导致不同账号的私有接口 GET 共享 15s 缓存与单飞，
+// 换账号/连续验证两个 Cookie 会读到上一个账号的用户/订阅数据。
+function cookieId(cookie) {
+  var s = String(cookie || '');
+  var h = 0x811c9dc5;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(36);
+}
 function netCacheKey(url, headers) {
-  return String(url) + '|' + ((headers && headers.Cookie) ? 'L' : 'A');
+  var ck = headers && headers.Cookie;
+  return String(url) + '|' + (ck ? ('L' + cookieId(ck)) : 'A');
 }
 function netCacheGet(k) {
   var c = NET_CACHE[k];
@@ -340,11 +353,12 @@ function netCacheGet(k) {
 function netCachePut(k, data) {
   if (!NET_CACHE[k]) netCacheN++;
   NET_CACHE[k] = { at: Date.now(), data: data };
-  if (netCacheN > NET_CACHE_MAX) {
-    var keys = Object.keys(NET_CACHE);
-    for (var i = 0; i < keys.length && netCacheN > NET_CACHE_MAX; i++) {
-      if (Date.now() - NET_CACHE[keys[i]].at > 3000) { delete NET_CACHE[keys[i]]; netCacheN--; }
-    }
+  // v0.23.25：硬上限 FIFO —— 原实现只删「年龄 > 3000ms」的条目，突发涌入大量不同 URL
+  // 时全部 < 3s 一个都删不掉，netCacheN 无界增长且每次 put 都 O(n) 全表扫描。
+  while (netCacheN > NET_CACHE_MAX) {
+    var k0 = Object.keys(NET_CACHE)[0];
+    if (!k0) break;
+    delete NET_CACHE[k0]; netCacheN--;
   }
 }
 
@@ -578,12 +592,13 @@ async function qrCheck(qrId) {
 
 // ---------- 喜马拉雅接口 ----------
 
-function pcHeaders(refererAlbum) {
+function pcHeaders(refererAlbum, cookieOverride) {
   var h = {
     'User-Agent': UA_PC,
     'Referer': 'https://www.ximalaya.com/album/' + (refererAlbum || '')
   };
-  if (login.cookie) h['Cookie'] = login.cookie;
+  var ck = (cookieOverride !== undefined && cookieOverride !== null) ? cookieOverride : login.cookie;
+  if (ck) h['Cookie'] = ck;
   return h;
 }
 
@@ -607,8 +622,10 @@ async function fetchShowPage(albumId, page) {
     try {
       d = await getJSON(url, pcHeaders(albumId));
     } catch (e2) {
-      logWarn('album', '取第 ' + page + ' 页失败：' + String(e2 && e2.message || e2));
-      return [];
+      // v0.23.25：取页失败不再静默当空页 —— 上层据此报「部分失败」，不再显示"0 新增"的假成功。
+      var pe = new Error('取第 ' + page + ' 页失败：' + String(e2 && e2.message || e2));
+      pe.code = 'page_failed';
+      throw pe;
     }
   }
   if (d.ret !== 200) throw new Error('喜马拉雅接口异常 ret=' + d.ret + ' ' + (d.msg || ''));
@@ -712,8 +729,8 @@ async function fetchAlbumDetail(albumId) {
     vipType: Number(m.vipType) || 0,
     isFinished: Number(m.isFinished) || 0,
     finishedText: pay.finishedText,
-    updateDate: String(m.updateDate || '').split(' ')[0],
-    createDate: String(m.createDate || '').split(' ')[0],
+    updateDate: stripTags(String(m.updateDate || '').split(' ')[0]),   // v0.23.25：元数据净化，防存储型 XSS
+    createDate: stripTags(String(m.createDate || '').split(' ')[0]),
     category: m.categoryTitle || '',
     subscribeCount: m.subscribeCount || 0
   };
@@ -770,16 +787,20 @@ async function fetchTrackUrl(trackId) {
 // v0.22.5：单集地址缓存 + 后台预取 —— 目标「即点即播」。
 // 地址本身有效期通常数小时，这里缓存 20 分钟：覆盖连续收听，又不会用到过期地址。
 var TURL = {}, TURL_TTL = 20 * 60 * 1000, TURL_MAX = 500, turlN = 0;
+// v0.23.25：直链缓存 key 纳入登录身份。原实现只按 trackId，换账号/退出登录 20 分钟内
+// 点同一集会命中上一账号的 VIP 直链；和 netCacheKey 一样用 cookieId() 隔离（不明文入 key）。
+function turlKey(id) { return String(id) + '|' + cookieId(login.cookie); }
 function turlGet(id) {
-  var c = TURL[id];
+  var k = turlKey(id), c = TURL[k];
   if (!c) return '';
-  if (Date.now() - c.at > TURL_TTL) { delete TURL[id]; turlN = Math.max(0, turlN - 1); return ''; }
+  if (Date.now() - c.at > TURL_TTL) { delete TURL[k]; turlN = Math.max(0, turlN - 1); return ''; }
   return c.url;
 }
 function turlPut(id, url) {
   if (!url) return;
-  if (!TURL[id]) turlN++;
-  TURL[id] = { url: url, at: Date.now() };
+  var k = turlKey(id);
+  if (!TURL[k]) turlN++;
+  TURL[k] = { url: url, at: Date.now() };
   if (turlN > TURL_MAX) {
     var keys = Object.keys(TURL);
     for (var i = 0; i < keys.length && turlN > TURL_MAX; i++) { delete TURL[keys[i]]; turlN--; }
@@ -868,12 +889,14 @@ var USER_EPS = [
 ];
 
 // 返回 { ok, user:{uid,nickname,avatar,vip}, error, ret }
-async function fetchCurrentUser() {
-  if (!login.cookie) return { ok: false, error: '未登录', ret: 401 };
+async function fetchCurrentUser(cookieOverride, fresh) {
+  var useCk = (cookieOverride !== undefined && cookieOverride !== null) ? cookieOverride : login.cookie;
+  if (!useCk) return { ok: false, error: '未登录', ret: 401 };
   var last = { ok: false, error: '未知错误', ret: 0 };
+  var gopt = fresh ? { noCache: true, noMerge: true } : undefined;
   for (var i = 0; i < USER_EPS.length; i++) {
     try {
-      var d = await getJSON(USER_EPS[i], await signHeaders(pcHeaders('')));
+      var d = await getJSON(USER_EPS[i], await signHeaders(pcHeaders('', useCk)), gopt);
       if (d && d.ret === 200) {
         var u = (d.data && (d.data.userInfo || d.data.user || d.data)) || {};
         return {
@@ -1300,7 +1323,8 @@ function normTrackDoc(d) {
   };
 }
 
-var trackSearchCache = {};
+// v0.23.25：搜索缓存加容量上限（key 是用户任意关键词，原实现只有 TTL 没有条数上限）。
+var trackSearchCache = {}, TRACK_SEARCH_CACHE_MAX = 200;
 
 async function searchTracks(kw, page, rows) {
   var key = String(kw).trim() + '|' + (page || 1) + '|' + (rows || 20);
@@ -1322,7 +1346,11 @@ async function searchTracks(kw, page, rows) {
     if (t && t.trackId) tracks.push(t);
   }
   var out = { tracks: tracks, total: progNum(d.data && d.data.result && d.data.result.response && d.data.result.response.numFound), risk: false, source: '声音检索' };
-  if (tracks.length) trackSearchCache[key] = { at: Date.now(), data: out };
+  if (tracks.length) {
+    trackSearchCache[key] = { at: Date.now(), data: out };
+    var tsk = Object.keys(trackSearchCache);
+    if (tsk.length > TRACK_SEARCH_CACHE_MAX) delete trackSearchCache[tsk[0]];
+  }
   return out;
 }
 
@@ -1396,7 +1424,8 @@ async function loadAll() {
   if (!config.sync || typeof config.sync !== 'object') config.sync = { progress: true };
   if (typeof config.sync.progress !== 'boolean') config.sync.progress = true;
   if (!config.dl || typeof config.dl !== 'object') config.dl = { targetDir: '喜马拉雅', format: 'mp3' };
-  if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '';
+  if (typeof config.dl.targetDir !== 'string') config.dl.targetDir = '喜马拉雅';
+  config.dl.targetDir = safeSubDir(config.dl.targetDir);   // v0.23.25：老配置也归一化
   if (config.dl.format !== '' && config.dl.format !== 'mp3') config.dl.format = 'mp3';
 
   // AI 推荐功能已移除（v0.23.11）：旧配置里残留的 ai 段直接丢掉（v0.17.0 同款处理）
@@ -1530,7 +1559,8 @@ function normGroups(arr) {
       auto: (g.auto === 'on' || g.auto === 'off') ? g.auto : 'global',
       time: normHHMM(g.time),
       import: (g.import === 'check' || g.import === 'import') ? g.import : 'global',
-      lastRunDate: /^\d{4}-\d{2}-\d{2}$/.test(lrd) ? lrd : ''
+      lastRunDate: /^\d{4}-\d{2}-\d{2}$/.test(lrd) ? lrd : '',
+      lastTryAt: Math.floor(Number(g.lastTryAt)) || 0   // v0.23.25：失败退避时间戳需持久化
     });
   }
   return out;
@@ -1582,10 +1612,16 @@ function gImport(g) {
   return !(g && g.import === 'check');
 }
 
-// 今天这个分组是不是到点该跑（已跑过 / 关闭 / 没到点 → false）
+// 今天这个分组是不是到点该跑（已跑过 / 关闭 / 没到点 / 失败退避中 → false）
+var AUTO_RETRY_MS = 30 * 60 * 1000;   // v0.23.25：全失败后 30 分钟内不重复全量重跑
+function retryPaused(unit) {
+  var t = Number(unit && unit.lastTryAt) || 0;
+  return !!t && (Date.now() - t < AUTO_RETRY_MS);
+}
 function gDue(g, now, today) {
   if (!gAutoOn(g)) return false;
   if (g && g.lastRunDate === today) return false;
+  if (retryPaused(g)) return false;
   return hmMin(now) >= hmMin(gTime(g));
 }
 
@@ -2117,10 +2153,17 @@ async function fetchAlbumTracks(albumId, start, end, maxPages) {
 async function fetchNewTracks(albumId, afterIndex) {
   var after = Number(afterIndex) || 0;
   var startPage = after > 0 ? Math.max(1, Math.floor((after - 1) / PAGE_SIZE) + 1) : 1;
-  var out = [], page = startPage, guard = 0, albumName = '', lastIndex = after;
+  var out = [], page = startPage, guard = 0, albumName = '', lastIndex = after, pageErr = '';
 
   while (page <= MAX_PAGES && guard < SYNC_MAX_PAGES) {
-    var batch = await fetchShowPage(albumId, page);
+    var batch;
+    try { batch = await fetchShowPage(albumId, page); }
+    catch (eP) {
+      // v0.23.25：坏页不推进水位（lastIndex 停在上一个成功页），保留已拉部分并回报失败，
+      // 下次从坏页继续；不再把失败伪装成"检查完成、0 新增"。
+      pageErr = String(eP && eP.message || eP);
+      break;
+    }
     guard += 1;
     if (!batch.length) break;
     if (!albumName) albumName = batch[0].albumName || '';
@@ -2132,7 +2175,7 @@ async function fetchNewTracks(albumId, afterIndex) {
     if (batch.length < PAGE_SIZE) break;
     page += 1;
   }
-  return { tracks: out, lastIndex: lastIndex, albumName: albumName };
+  return { tracks: out, lastIndex: lastIndex, albumName: albumName, error: pageErr };
 }
 
 // ---------- 写入歌单 ----------
@@ -2205,7 +2248,11 @@ async function runImport(albumId, name, start, end, latest) {
           start = Math.max(1, tot - latest + 1);
           songloft.log.info('[喜马拉雅]《' + (name || albumId) + '》只导最新 ' + latest + ' 集（第 ' + start + '~' + tot + ' 集）');
         }
-      } catch (eO) { /* 取不到总集数就退回全量导入 */ }
+      } catch (eO) {
+        // v0.23.25：不静默降级全量 —— 用户选「只导最新 N 集」却导入整本上千集，
+        // 会建出超大歌单。明确报错让用户重试或改用区间导入。
+        throw new Error('无法确定专辑总集数，无法按「只导最新 ' + latest + ' 集」导入：' + String(eO && eO.message || eO));
+      }
     }
 
     var fetched = await fetchAlbumTracks(albumId, start, end);
@@ -2406,6 +2453,10 @@ function dataLooksLikeLoginError(msg) {
 
 async function syncOne(sub, opts) {
   opts = opts || {};
+  // v0.23.24：pr2Added 必须在函数开头初始化。原声明在「补失败集」if 块内（var 提升但赋值不提升），
+  // 正常同步路径（pendingTracks 为空）不进该块 → 值为 undefined → songCount = 数字 + undefined = NaN，
+  // 落盘变 null 污染订阅统计。
+  var pr2Added = 0;
   var out = { albumId: sub.albumId, name: sub.name, newCount: 0, added: 0, error: '', titles: [] };
   try {
     var detail = null;
@@ -2422,13 +2473,15 @@ async function syncOne(sub, opts) {
       var pend = sub.pendingTracks.slice();
       stampAuthor(pend, sub.author, sub.name);
       var pr2 = await addTracksToPlaylist(sub.playlistId, pend);
-      var pr2Added = Number(pr2.added) || 0;   // v0.19.4：下面算 songCount 也要用
+      pr2Added = Number(pr2.added) || 0;   // v0.19.4：下面算 songCount 也要用
       out.added += pr2Added;
       sub.pendingTracks = pr2.failedTracks || [];
       if (pr2.added) songloft.log.info('[喜马拉雅] 补上上次失败的 ' + pr2.added + ' 集：《' + (sub.name || sub.albumId) + '》');
     }
 
     var r = await fetchNewTracks(sub.albumId, sub.lastIndex || 0);
+    // v0.23.25：取页失败要让用户看见（原来只 logWarn，同步结果显示"0 新增"的假成功）。
+    if (r.error) out.error = (out.error ? out.error + '；' : '') + r.error;
     // v0.23.7：自动导入范围 —— 设了「只导最新 N 集」且本次新集超过 N 时，
     // 只保留最新的 N 集写入，更早的集直接跳过（水位照常推进到最新，不会反复重拉）
     // v0.23.15：生效范围优先取订阅所在分组（全集 / 最新 N 集），没有分组就跟随全局设置
@@ -2452,7 +2505,6 @@ async function syncOne(sub, opts) {
       // 导致 totalAdded / 播报文本 / songCount 全部少算。
       out.added += (Number(res.added) || 0);
       sub.lastIndex = r.lastIndex;
-      sub.songCount = (Number(sub.songCount) || 0) + pr2Added + (Number(res.added) || 0);
       // v0.18.7：写入失败的集挂到 sub 上，下次同步会先补这批（不能只靠 lastIndex 推进）
       // v0.19.2：这批失败就追加；这批全成功也不能清空 —— 上面重试后仍失败的 pendingTracks
       // 已经是「唯一记录」，一清就永久丢集（它们的集号 ≤ lastIndex，不会再被拉到）。
@@ -2473,6 +2525,10 @@ async function syncOne(sub, opts) {
       sub.newTitles = [];
       sub.lastImportAt = nowStr();
     }
+    // v0.23.25：songCount 统一按 out.added 记账（含补写失败集 pr2Added）。
+    // 原实现写在上面块内，当"补失败集成功但本轮无新集"时整块跳过 → 歌单多了 N 集、
+    // 统计却不变，且下次不再补，偏差固化。
+    if (out.added) sub.songCount = (Number(sub.songCount) || 0) + out.added;
     await persist();
   } catch (e) {
     out.error = String(e);
@@ -2507,21 +2563,36 @@ async function pruneSubOld(sub, keepN) {
     if (songTrackId(s)) xm.push({ id: s.id, ix: songEpIndex(s), pos: i });
     else hasOther = true;
   }
-  if (xm.length <= keepN) { out.kept = xm.length; out.skipped = 'under'; return out; }
-  // 集号升序；解析不到集号的按歌单位置兜底（排前面，先被清）
-  xm.sort(function (a, b) { return (a.ix - b.ix) || (a.pos - b.pos); });
-  var rmN = xm.length - keepN;
+  // v0.23.24：只在「能解析集号」的曲目里删最旧的；解析不到集号的（ix=0，可能是用户手改过标题的
+  // 较新集）一律保留，不参与清理。原实现把它当 ix=0 排最前优先删，会误删较新的集。
+  var known = [], unknownN = 0;
+  for (var u = 0; u < xm.length; u++) {
+    if (xm[u].ix > 0) known.push(xm[u]); else unknownN++;
+  }
+  known.sort(function (a, b) { return (a.ix - b.ix) || (a.pos - b.pos); });
+  // 清理目标 = 本插件可判定集总数 - 保留数；可判定集不够删就不动（unknown 一律留）
+  var rmN = Math.max(0, known.length - keepN);
+  if (!rmN) { out.kept = songs.length; out.skipped = 'under'; return out; }
   var rmIds = {};
-  for (var j = 0; j < rmN; j++) rmIds[String(xm[j].id)] = true;
+  for (var j = 0; j < rmN; j++) rmIds[String(known[j].id)] = true;
   var keepIds = [];
   for (var k = 0; k < songs.length; k++) {
     if (!rmIds[String(songs[k].id)]) keepIds.push(songs[k].id);
   }
+  // v0.23.25：collectPlaylistSongs 到 setSongs 之间有 await 窗口，用户此时手动加歌，
+  // keepIds 来自旧快照，整表重写会静默抹掉新加的歌。写前重读一次，变了就放弃本轮清理。
+  try {
+    var recheck = await collectPlaylistSongs(sub.playlistId);
+    if (!recheck || recheck.length !== songs.length) { out.skipped = 'changed'; return out; }
+    for (var rc = 0; rc < recheck.length; rc++) {
+      if (String(recheck[rc].id) !== String(songs[rc].id)) { out.skipped = 'changed'; return out; }
+    }
+  } catch (eRc) { out.skipped = 'recheck:' + String(eRc && eRc.message || eRc); return out; }
   try { await songloft.playlists.setSongs(sub.playlistId, keepIds); }
   catch (e2) { out.skipped = 'setsongs:' + String(e2 && e2.message || e2); return out; }
   out.removed = rmN;
   out.kept = keepIds.length;
-  songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》已按设置清理旧集：移除最早 ' + rmN + ' 集，歌单保留 ' + keepIds.length + ' 首' + (hasOther ? '（含手动添加的歌）' : ''));
+  songloft.log.info('[喜马拉雅]《' + (sub.name || sub.albumId) + '》已按设置清理旧集：移除最早 ' + rmN + ' 集，歌单保留 ' + keepIds.length + ' 首' + (hasOther ? '（含手动添加的歌）' : '') + (unknownN ? '（' + unknownN + ' 集标题无法解析集号，已保留未清理）' : ''));
   return out;
 }
 
@@ -2549,8 +2620,9 @@ async function runSyncAll(opts) {
       if (r.added) updates.push({ albumId: s.albumId, name: s.name, added: r.added, titles: r.titles || [] });
       if (r.error) errors.push(r.name + ': ' + r.error);
       if (r.added && !pushed) pushed = s;
-      // v0.23.14：自动清理旧集（只在真导入时跑，只检查不导入不清；清理失败不影响同步）
-      if (doImp && s.playlistId) {
+      // v0.23.25：只在「本轮真写入了新集」时清理。原条件 doImp 只表示允许导入，
+      // 一次全失败的同步（r.added=0）仍会按 keepLatest 删掉歌单里最早的可听集。
+      if (r.added > 0 && s.playlistId) {
         var aKl2 = subKeepN(s);   // v0.23.15：分组优先（全集组 0=不清，最新 N 组=留 N），未分组沿用全局
         if (aKl2 > 0) {
           try { var prR = await pruneSubOld(s, aKl2); totalPruned += (prR.removed || 0); } catch (ePr) { }
@@ -2565,9 +2637,20 @@ async function runSyncAll(opts) {
     };
     if (errors.length) logWarn('sync', '同步有 ' + errors.length + ' 张失败：' + errors.slice(0, 3).join('；'));
     if (opts.markAuto) {
-      // v0.23.17：按调度单元记「今天跑过」——未分组记全局，分组记到组自己身上
-      if (only === null || only === '') config.auto.lastRunDate = todayStr();
-      else { var gDone = findGroup(only); if (gDone) gDone.lastRunDate = todayStr(); }
+      // v0.23.25：只有「至少检查成功一张」才算今天跑过。若到点恰逢断网/限流全失败，
+      // 原实现仍写 lastRunDate → 当天剩余 1440 次 tick 全部跳过，用户以为跑过实则一集未拉。
+      // 全失败只记 lastTryAt（30 分钟内退避重试），不写 lastRunDate。
+      var okNow = checked > 0 && errors.length < checked;
+      if (only === null || only === '') {
+        if (okNow) { config.auto.lastRunDate = todayStr(); config.auto.lastTryAt = ''; }
+        else config.auto.lastTryAt = Date.now();
+      } else {
+        var gDone = findGroup(only);
+        if (gDone) {
+          if (okNow) { gDone.lastRunDate = todayStr(); gDone.lastTryAt = 0; }
+          else gDone.lastTryAt = Date.now();
+        }
+      }
     }
     await persist();
 
@@ -2757,7 +2840,7 @@ async function tick() {
 
   // 定时自动同步（播报刚同步过就不重复跑，避免一天两次全量抓取）
   // v0.23.17：未分组跟全局设置；每个分组按自己的开关 / 时间 / 内容各跑一次
-  if (config.auto && config.auto.enabled && config.auto.lastRunDate !== today && hmMin(now) >= hmMin(config.auto.time || '08:30')) {
+  if (config.auto && config.auto.enabled && config.auto.lastRunDate !== today && hmMin(now) >= hmMin(config.auto.time || '08:30') && !retryPaused(config.auto)) {
     songloft.log.info('[喜马拉雅] 触发定时同步（未分组，设定 ' + config.auto.time + '）');
     await runSyncAll({ import: true, markAuto: true, onlyGroup: '', trigger: '定时' });
   }
@@ -2904,9 +2987,22 @@ function isXmRemoteSong(s) {
   return str.indexOf('trackId') >= 0;
 }
 
+// v0.23.25：下载子目录白名单净化 —— 拒绝 .. / 绝对路径 / 特殊字符，防 path_template 穿越到音乐目录外。
+function safeSubDir(v) {
+  var s = String(v == null ? '' : v).trim().replace(/^\/+|\/+$/g, '');
+  if (!s) return '喜马拉雅';
+  var parts = s.split('/').filter(Boolean);
+  if (parts.length > 3) parts = parts.slice(0, 3);
+  var clean = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] === '.' || parts[i] === '..' || !/^[\w\u4e00-\u9fff .-]{1,40}$/.test(parts[i])) continue;
+    clean.push(parts[i]);
+  }
+  return clean.length ? clean.join('/') : '喜马拉雅';
+}
 async function runDownload(playlistId, subDir, title) {
   // 落地目录用 path_template 的前缀表达：子目录/主播/专辑/集名
-  var sub = String(subDir || '').replace(/^\/+|\/+$/g, '');
+  var sub = safeSubDir(subDir);
   var pathTpl = (sub ? sub + '/' : '') + '{artist}/{album}/{title}';
   if (downloading) return { ok: false, error: '已有下载任务进行中' };
   if (typeof songloft.songs.download !== 'function') {
@@ -3547,7 +3643,7 @@ async function handleHTTPRequest(req) {
       if (typeof body.sync.progress === 'boolean') config.sync.progress = body.sync.progress;
     }
     if (body.dl) {
-      if (typeof body.dl.targetDir === 'string') config.dl.targetDir = body.dl.targetDir.trim();
+      if (typeof body.dl.targetDir === 'string') config.dl.targetDir = safeSubDir(body.dl.targetDir);
       if (body.dl.format === 'mp3' || body.dl.format === '') config.dl.format = body.dl.format;
     }
     await persist();
@@ -4026,19 +4122,14 @@ async function handleHTTPRequest(req) {
   // 单独验证登录态：GET/POST /login/verify，可用 body.cookie 临时测试而不保存
   if (path === '/login/verify') {
     var vb = method === 'POST' ? readBodyJson(req) : {};
-    var vck = String(vb.cookie || '').trim();
-    var saved = login.cookie;
-    if (vck) { login.cookie = vck.replace(/^Cookie:[ \t]*/i, '').trim(); signCache = { at: 0, v: '' }; }
-    try {
-      if (!login.cookie) return jsonResp({ success: true, data: { valid: false, error: '未登录' } });
-      var uv = await fetchCurrentUser();
-      return jsonResp({
-        success: true,
-        data: { valid: uv.ok, user: uv.user || null, error: uv.ok ? '' : (uv.error || '登录态无效') }
-      });
-    } finally {
-      if (vck) { login.cookie = saved; signCache = { at: 0, v: '' }; }
-    }
+    var vck = String(vb.cookie || '').trim().replace(/^Cookie:[ \t]*/i, '').replace(/[\r\n]+/g, ' ').trim();
+    // v0.23.24：不再临时替换全局 login.cookie（await 期间会被并发的 tick/轮询读到，串号）。
+    // 显式把待验证 cookie 传给 fetchCurrentUser，并强制 noCache/noMerge，避免命中真实登录态缓存。
+    var uv = await fetchCurrentUser(vck || undefined, true);
+    return jsonResp({
+      success: true,
+      data: { valid: uv.ok, user: uv.user || null, error: uv.ok ? '' : (uv.error || '登录态无效') }
+    });
   }
 
   // ---------- 我的订阅（登录态） ----------
@@ -4085,15 +4176,19 @@ async function handleHTTPRequest(req) {
   // 调试用：只允许转发到喜马拉雅域名（排查接口变更），不暴露任意 URL
   if (path === '/me/probe' && method === 'GET') {
     var target = String(q.url || '');
-    if (!/^https?:\/\/([a-z0-9-]+\.)*ximalaya\.com\//i.test(target)) {
-      return jsonResp({ success: false, error: '只允许 ximalaya.com 域名' }, 400);
+    // v0.23.24：仅允许 https（原 http 会把登录 Cookie 明文传输）；q.n 钳制到 1..8000
+    // （原 q.n=-1 会让 slice(0,-1) 返回近乎完整响应，绕过 1500 字截断）。
+    if (!/^https:\/\/([a-z0-9-]+\.)*ximalaya\.com\//i.test(target)) {
+      return jsonResp({ success: false, error: '只允许 https:// 的 ximalaya.com 域名' }, 400);
     }
+    var lim = Number(q.n);
+    lim = isFinite(lim) && lim >= 1 ? Math.min(Math.floor(lim), 8000) : 1500;
     try {
       var pr = await fetchT(target, { method: 'GET', headers: await signHeaders(pcHeaders('')) }, 15);
       var pt = await pr.text();
       return jsonResp({
         success: true,
-        data: { status: pr.status, len: pt.length, body: pt.slice(0, Number(q.n) || 1500) }
+        data: { status: pr.status, len: pt.length, body: pt.slice(0, lim) }
       });
     } catch (e) {
       return jsonResp({ success: false, error: String(e) });
@@ -4294,7 +4389,13 @@ async function handleHTTPRequest(req) {
       var link = await fetchTrackUrl(trackId);
       return jsonResp({ url: link });
     } catch (e) {
-      return jsonResp({ error: String(e) }, 404);
+      // v0.23.25：业务错误码对齐 /track/:id/url —— 付费/下架/限流回 200 + success:false，
+      // 宿主/小爱才能提示「需购买」或「稍后重试」，不再一律 404「播放失败」。
+      var em7 = String((e && e.message) || e);
+      if (e && (e.code === 'paid' || e.code === 'no_url' || e.code === 'ratelimit')) {
+        return jsonResp({ success: false, code: e.code, error: em7 });
+      }
+      return jsonResp({ error: em7 }, 404);
     }
   }
 
@@ -4615,7 +4716,7 @@ async function handleHTTPRequest(req) {
       name: bs.name || (detailS && detailS.name) || ('专辑' + sid),
       cover: (detailS && detailS.cover) || (existing && existing.cover) || '',
       author: (detailS && detailS.author) || (existing && existing.author) || '',
-      updateDate: (detailS && detailS.updateDate) || ''
+      updateDate: (detailS && detailS.updateDate) || (existing && existing.updateDate) || ''   // v0.23.25：详情失败不清空已有日期
     };
     if (typeof bs.autoSync === 'boolean') patch.autoSync = bs.autoSync;
     // v0.23.15：订阅可直接带分组（不存在的分组名忽略，不报错，避免批量导入因分组改名断掉）
@@ -4680,7 +4781,8 @@ async function handleHTTPRequest(req) {
     if (syncing) return jsonResp({ success: false, error: '已有同步任务在跑，请稍候' }, 409);
     var gsyOnly = gsy ? gsy.name : '';
     var gsyImp = gsy ? gImport(gsy) : true;
-    runSyncAll({ onlyGroup: gsyOnly, import: gsyImp, markAuto: true, trigger: '手动·' + (gsyOnly || '未分组') })
+    // v0.23.25：手动触发与 /sync 一致用 force:true，否则组内关闭自动同步的书被静默跳过。
+    runSyncAll({ onlyGroup: gsyOnly, import: gsyImp, force: true, trigger: '手动·' + (gsyOnly || '未分组') })
       .catch(function (e) { songloft.log.warn('[喜马拉雅] 分组同步异常: ' + String(e)); });
     logInfo('subs', '开始同步' + (gsyOnly ? '分组「' + gsyOnly + '」' : '未分组订阅') + (gsyImp ? '（导入新集）' : '（只检查）'));
     return jsonResp({ success: true, data: { message: '已开始同步', async: true, group: gsyOnly, import: gsyImp } });
@@ -4743,9 +4845,16 @@ async function handleHTTPRequest(req) {
     var bc = readBodyJson(req);
     var cid = String(bc.album_id || bc.albumId || '');
     if (cid) {
+      if (syncing) return jsonResp({ success: false, error: '已有同步任务在跑，请稍候' }, 409);
       var s1 = findSub(cid);
       if (!s1) return jsonResp({ success: false, error: '未订阅该专辑' }, 404);
-      var r1 = await syncOne(s1, { import: !!bc.import });
+      // v0.23.25：单张同步也走「组级只检查」开关（原来前端固定 import:true 会绕过）。
+      var doImp1 = !!bc.import, g1 = findGroup(s1.group);
+      if (doImp1 && g1 && g1.import === 'check') doImp1 = false;
+      syncing = true;
+      var r1;
+      try { r1 = await syncOne(s1, { import: doImp1 }); }
+      finally { syncing = false; }
       return jsonResp({ success: true, data: r1, sub: s1 });
     }
     // v0.19.4：全量分支同样异步化，理由见 /sync
@@ -4813,7 +4922,7 @@ async function handleHTTPRequest(req) {
       if (!plid && ifound) { plid = Number(ifound.playlistId); dtitle = dtitle || ifound.name; }
     }
     if (!plid) return jsonResp({ success: false, error: '这个专辑还没有歌单，请先导入' }, 400);
-    var tdir = String(dbb.target_dir || '').trim() || config.dl.targetDir || '';
+    var tdir = safeSubDir(dbb.target_dir || config.dl.targetDir);
     runDownload(plid, tdir, dtitle).catch(function (e) {
       songloft.log.error('[喜马拉雅] 下载异常: ' + String(e));
     });
