@@ -2642,14 +2642,17 @@
   });
 
   $('btnImportAllTracks').addEventListener('click', async function () {
-    if (!trackRows.length) return;
+    if (!trackRows.length || this.disabled) return;
     if (trackRows.length > 50 && !confirm('将把这 ' + trackRows.length + ' 集加进一个新歌单，继续？')) return;
+    var btn = this, oldTxt = btn.textContent;
+    btn.disabled = true; btn.textContent = '处理中…';   // v0.23.25：防连点重复建歌单
     try {
       var r = await api('POST', '/import-tracks', { tracks: trackRows, name: '喜马拉雅单集 ' + todayStrCli() });
       if (r.success === false) { msg('❌ ' + r.error, 'err'); return; }
       msg('✅ 已把 ' + r.data.added + ' 集加进歌单《' + r.data.name + '》', 'ok');
       loadImported();
     } catch (e) { msg('加入失败: ' + e.message, 'err'); }
+    finally { btn.disabled = false; btn.textContent = oldTxt; }
   });
 
   $('btnImportSel').addEventListener('click', async function () {
@@ -2758,20 +2761,19 @@
   var jumpMode = 'page';
 
   var detailSeq = 0;   // v0.19.4：连点两张专辑时，慢的旧请求不能覆盖后点开的那张
-  cur.fromListen = false;   // v0.20.0：详情是不是从「继续听」点进来的
-  async function openDetail(albumId, fromListen) {
+  async function openDetail(albumId) {
     var my = ++detailSeq;
-    // v0.20.0：从「继续听」点进来的，返回时要回到继续听，而不是回到上次的搜索结果
-    cur.fromListen = !!fromListen;
+    // v0.23.25：删掉 fromListen/fromTab 死状态 —— v0.23.23 起返回按钮固定「返回订阅」，
+    // 这两个值写入后再无人读取，留着只会误导维护者以为仍支持「返回来源」。
     var aid = String(albumId);
-    // 详情卡片在「发现」页内，从其它 tab 点进来要先切过去，并记住来源以便返回
+    // 详情卡片在「发现」页内，从其它 tab 点进来要先切过去。
     var activeTab = document.querySelector('.tab.active');
     if (!activeTab || activeTab.getAttribute('data-tab') !== 'search') {
-      cur.fromTab = activeTab ? activeTab.getAttribute('data-tab') : 'search';
-      document.querySelector('.tab[data-tab="search"]').click();
+      var searchTab = document.querySelector('.tab[data-tab="search"]');
+      if (searchTab) searchTab.click();
     }
-    var TAB_NAME = { search: '发现', subs: '订阅', lib: '已导入', set: '设置' };
-    $('btnBack').textContent = '← 返回' + (TAB_NAME[cur.fromTab || 'search'] || '发现');
+    // v0.23.23：详情页返回按钮固定写「← 返回订阅」，点它回订阅 tab
+    $('btnBack').textContent = '← 返回订阅';
     cur.id = String(albumId);
     cur.page = 1;
     // v0.20.3：换专辑要清掉上一本的集名筛选，否则新专辑可能一进来就「筛出 0 集」
@@ -3185,22 +3187,18 @@
     playQueue([{ trackId: curLast.trackId, index: curLast.index, title: curLast.title }], 0, album);
   });
 
-  $('btnFromStart').addEventListener('click', async function () {
-    if (!curTracks.length) return;
+  // v0.23.25：跨页清除进度抽成公共函数 ——「清除进度」与「从头听」原先行为不一致：
+  // 后者会扫剩余分页，前者只清当前页，用户清完翻到第 2 页仍在旧进度续播。
+  async function clearAllProgress() {
+    if (!curTracks.length) return 0;
     var clearAll = function (list) { (list || []).forEach(function (t) { sSet(posKey(t.trackId), ''); }); };
     clearAll(curTracks);
     sSet(lastKey(cur.id), '');
-    renderTracks(curTracks);
-    renderResume();
-    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '', page: cur.page });
-    msg('已清除本专辑播放进度，从第 1 集开始');
-    // v0.19.4：原来只清当前页的 30 集。其它页的 xm_pos_* 还在，跨页连播到第 2 页会从中途续播，
-    // 用户以为「从头听」已经清零了。这里把剩余分页也扫一遍（单页失败不影响已清的）。
+    var cleared = 1;
     try {
       await ensureLastPage();
       var pgs = (cur.outlinePages || []).map(function (p) { return Number(p.page) || 0; })
         .filter(function (p) { return p && p !== Number(cur.page); });
-      var cleared = 1;
       for (var i = 0; i < pgs.length; i++) {
         try {
           var rr = await api('GET', '/album/' + cur.id + '/tracks?page=' + pgs[i]);
@@ -3208,16 +3206,22 @@
           cleared += 1;
         } catch (e) { /* 单页失败忽略 */ }
       }
-      if (cleared > 1) msg('已清除本专辑 ' + cleared + ' 页的播放进度，从第 1 集开始');
     } catch (e) { /* */ }
-  });
-
-  $('btnClearPos').addEventListener('click', function () {
-    curTracks.forEach(function (t) { sSet(posKey(t.trackId), ''); });
-    sSet(lastKey(cur.id), '');
     renderTracks(curTracks);
     renderResume();
-    msg('已清除播放进度');
+    return cleared;
+  }
+
+  $('btnFromStart').addEventListener('click', async function () {
+    if (!curTracks.length) return;
+    var cleared = await clearAllProgress();
+    playQueue(curTracks, 0, { id: cur.id, name: (cur.detail && cur.detail.name) || '', page: cur.page });
+    msg(cleared > 1 ? '已清除本专辑 ' + cleared + ' 页的播放进度，从第 1 集开始' : '已清除本专辑播放进度，从第 1 集开始');
+  });
+
+  $('btnClearPos').addEventListener('click', async function () {
+    var cleared = await clearAllProgress();
+    msg(cleared > 1 ? '已清除本专辑 ' + cleared + ' 页的播放进度' : '已清除播放进度');
   });
 
   // v0.19.0：页码状态统一出口。
@@ -3471,22 +3475,15 @@
   });
   $('btnBack').addEventListener('click', function () {
     $('detailCard').classList.add('hide');
-    // 从哪个 tab 进来就回哪个（默认搜索）；切 tab 会自动刷新该页数据
-    var from = cur.fromTab || 'search';
-    cur.fromTab = 'search';
-    if (from === 'search') {
-      if (cur.fromListen) {
-        cur.fromListen = false;
-        resetToDiscover();   // 从继续听进来的，原样退回继续听（别把旧搜索结果捡回来）
-      } else {
-        $('searchCard').classList.remove('hide');
-        syncDiscover();      // 空着就回到继续听，搜过就还是结果
-      }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      return;
-    }
-    var btn = document.querySelector('.tab[data-tab="' + from + '"]');
-    if (btn) btn.click(); else { $('searchCard').classList.remove('hide'); syncDiscover(); }
+    // v0.23.24： restore searchCard —— openDetail 会把它设为 hide，若返回时不恢复，
+    // 用户再从订阅页点回「发现」tab 时 syncDiscover 不会恢复它 → 搜索框/继续听/详情全隐藏，整页空白。
+    $('searchCard').classList.remove('hide');
+    // v0.23.23：详情页返回统一回「订阅」页（订阅视角就在首屏），不再回发现页/继续听；
+    // 切到订阅 tab 时会自动刷新订阅列表，滚到顶部直接看到订阅视角。
+    // v0.23.25：删掉此处 cur.fromListen/fromTab 死赋值（返回目标已固定，无人再读）。
+    var btn = document.querySelector('.tab[data-tab="subs"]');
+    if (btn) btn.click(); else syncDiscover();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   });
   $('dIntroToggle').addEventListener('click', function () {
     var open = $('dIntro').classList.toggle('open');
@@ -3599,6 +3596,7 @@
     try {
       var r = await api('GET', '/subs');
       subsCache = r.data || [];
+      setCardHint('subsCardHint', subsCache.length ? subsCache.length + ' 张订阅 · 可勾选批量管理' : '订阅与批量管理');
       await ensureGroups();          // v0.23.15：分组标签与筛选要用
       // 分组被删掉后，筛选停在该分组会看到空列表 —— 自动退回「全部」
       if (sgrpFilter !== 'all' && sgrpFilter !== '' && !(groupsCache || []).some(function (g) { return g.name === sgrpFilter; })) sgrpFilter = 'all';
@@ -3650,10 +3648,11 @@
         var sub2 = document.createElement('div');
         sub2.className = 's';
         var bits = [];
-        if (s.newCount) bits.push('<span class="badge new">有 ' + s.newCount + ' 集更新</span>');
-        bits.push('收录到第 ' + (s.lastIndex || 0) + ' 集');
-        if (s.updateDate) bits.push('专辑更新 ' + s.updateDate);
-        if (s.lastCheckAt) bits.push('检查 ' + s.lastCheckAt);
+        // v0.23.25：这些字段来自喜马拉雅元数据，进 innerHTML 前统一转义（原样拼接是存储型 XSS sink）。
+        if (s.newCount) bits.push('<span class="badge new">有 ' + escHtml(s.newCount) + ' 集更新</span>');
+        bits.push('收录到第 ' + escHtml(s.lastIndex || 0) + ' 集');
+        if (s.updateDate) bits.push('专辑更新 ' + escHtml(s.updateDate));
+        if (s.lastCheckAt) bits.push('检查 ' + escHtml(s.lastCheckAt));
         if (!s.playlistId) bits.push('<span class="err">未绑定歌单</span>');
         sub2.innerHTML = bits.join(' · ');
         // v0.23.15：分组标签放信息行最前（不会被省略号截掉），点一下改分组
@@ -3711,7 +3710,7 @@
       updateSubBadge();
       updateSubsSelBar();
     } catch (e) {
-      el.innerHTML = '<span class="err">加载失败: ' + e.message + '</span>';
+      el.innerHTML = '<span class="err">加载失败: ' + escHtml(e.message) + '</span>';
     }
   }
 
@@ -3749,12 +3748,19 @@
   }
 
   // 分组卡：名字 + 同步范围（跟随全局 / 只同步最新 N 集 / 同步全集）
+  // v0.23.25：分组「编辑/收起」态按组名记到 localStorage，跨刷新保留（原来只在内存，刷新全收起）。
+  var SG_OPEN_KEY = 'xm_sg_open';
+  function sgOpenState() {
+    try { var v = JSON.parse(sGet(SG_OPEN_KEY) || '{}'); return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}; }
+    catch (e) { return {}; }
+  }
   async function loadSubGroups() {
     var box = $('sgList');
     if (!box) return;
     await ensureGroups(true);
     // v0.23.17：连同步方式一起带进草稿（开关 / 时间 / 内容 / 上次跑的时间）
-    var prevOpen = {};
+    // v0.23.25：优先取内存态，其次取 localStorage 记忆的展开态。
+    var prevOpen = sgOpenState();
     sgDraft.forEach(function (g0) { if (g0._open) prevOpen[g0.name] = true; });
     sgDraft = (groupsCache || []).map(function (g) {
       return {
@@ -3780,6 +3786,7 @@
   }
 
   function renderSgCard() {
+    setCardHint('sgCardHint', sgDraft.length ? sgDraft.length + ' 个分组 · 各有同步方式' : '每组独立同步方式');
     var box = $('sgList');
     if (!box) return;
     var counts = {};
@@ -3812,6 +3819,8 @@
       bEdit.title = '展开或收起这一组的同步设置';
       bEdit.addEventListener('click', function () {
         g._open = !g._open;
+        // v0.23.25：记忆展开态，刷新后常改的那几组仍是展开的。
+        try { var so = sgOpenState(); so[g.name] = !!g._open; sSet(SG_OPEN_KEY, JSON.stringify(so)); } catch (e) { /* */ }
         renderSgCard();
       });
 
@@ -4343,15 +4352,26 @@
         gn = payload.length;
         var mv = (r2.data && r2.data.moved) || 0;
         if (mv) mvTxt = '，' + mv + ' 张订阅回到未分组';
-        await loadSubGroups();
+        // v0.23.25：不再 await loadSubGroups() 重建整张卡 —— 那会整体替换 sgDraft 与 DOM，
+        // 打断正在输入的下一个字段（光标丢失），且 POST 后 GET 返回前的新改动会被旧草稿覆盖。
+        // 用服务端回传的 groups 轻量同步缓存与计数，DOM 保持不动。
+        if (r2.data && Array.isArray(r2.data.groups)) groupsCache = r2.data.groups;
+        setCardHint('sgCardHint', sgDraft.length ? sgDraft.length + ' 个分组 · 各有同步方式' : '每组独立同步方式');
       }
       if (st) st.textContent = '✅ 已自动保存 ' + new Date().toTimeString().slice(0, 5) + (gn ? '（' + gn + ' 个分组' + mvTxt + '）' : '');
-      loadSubs();
+      loadSubs();   // v0.23.25：只刷订阅列表反映「回到未分组」，不碰分组卡输入焦点
     } catch (e) {
       msg('保存失败: ' + e.message, 'err');
       if (st) st.textContent = '⚠️ 保存失败，改一下会重试';
     }
     savingNow = false;
+  }
+  // v0.23.25：状态行改成真按钮后可点「立即保存」，不再是个点了没反应的伪按钮。
+  if ($('btnSaveAuto') && $('btnSaveAuto').tagName === 'BUTTON') {
+    $('btnSaveAuto').addEventListener('click', function () {
+      if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+      saveSyncSettings();
+    });
   }
   // 默认设置六个控件：用户改动即自动保存（loadAuto 程序化赋值不触发 change，不会误存）
   ['autoEnabled', 'autoTime', 'autoLatest', 'autoLatestN', 'autoKeep', 'autoKeepN'].forEach(function (id2) {
@@ -4377,9 +4397,20 @@
     return null;
   }
 
-  $('btnSyncAll').addEventListener('click', async function () {
+  // v0.23.25：全量同步/只检查加防重入锁 + 按钮禁用，连点不再叠加多个 waitSyncDone 轮询与重复 POST。
+  var syncBusy = false;
+  function withSyncLock(btn, busyText, fn) {
+    if (syncBusy) { msg('已有同步任务在跑，请稍候', 'warn'); return; }
+    syncBusy = true;
+    var old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = busyText; }
+    Promise.resolve().then(fn).catch(function (e) { msg('操作失败: ' + (e && e.message || e), 'err'); })
+      .then(function () { syncBusy = false; if (btn) { btn.disabled = false; btn.textContent = old; } });
+  }
+  $('btnSyncAll').addEventListener('click', function () {
+    if (syncBusy) { msg('已有同步任务在跑，请稍候', 'warn'); return; }
     msg('⏳ 正在同步全部订阅…');
-    try {
+    withSyncLock($('btnSyncAll'), '同步中…', async function () {
       var s0 = await api('GET', '/status');
       var before = ((s0 && s0.data && s0.data.lastSync) || {}).at || '';
       var r = await api('POST', '/sync', { import: true });
@@ -4389,12 +4420,13 @@
       msg('✅ ' + (((d0.lastSync || {}).result) || '同步完成'), 'ok');
       if (d0.subs) subsCache = d0.subs;
       loadSubs();
-    } catch (e) { msg('同步失败: ' + e.message, 'err'); }
+    });
   });
 
-  $('btnCheckAll').addEventListener('click', async function () {
+  $('btnCheckAll').addEventListener('click', function () {
+    if (syncBusy) { msg('已有同步任务在跑，请稍候', 'warn'); return; }
     msg('⏳ 正在检查更新（不导入）…');
-    try {
+    withSyncLock($('btnCheckAll'), '检查中…', async function () {
       var sc0 = await api('GET', '/status');
       var cbefore = ((sc0 && sc0.data && sc0.data.lastSync) || {}).at || '';
       var r = await api('POST', '/subs/check', { import: false });
@@ -4404,7 +4436,7 @@
       msg('检查完成：' + (((dc.lastSync || {}).result) || '订阅列表已更新'), 'ok');
       if (dc.subs) subsCache = dc.subs;
       loadSubs();
-    } catch (e) { msg('检查失败: ' + e.message, 'err'); }
+    });
   });
 
   // ---------- 收听报告 ----------
@@ -4599,7 +4631,7 @@
         line.appendChild(body); line.appendChild(ops);
         el.appendChild(line);
       });
-    } catch (e) { el.innerHTML = '<span class="err">加载失败: ' + e.message + '</span>'; }
+    } catch (e) { el.innerHTML = '<span class="err">加载失败: ' + escHtml(e.message) + '</span>'; }
   }
 
   // ---------- 进度轮询 ----------
@@ -4968,6 +5000,28 @@
     } catch (e) { /* 静默 */ }
   }
 
+  // ---------- v0.23.22：折叠块记住开合状态 ----------
+  var FOLD_KEY = 'xm_fold_state';
+  function foldState() {
+    try {
+      var v = JSON.parse(sGet(FOLD_KEY) || '{}');
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    } catch (e) { return {}; }
+  }
+  function initFolds() {
+    var st = foldState();
+    // v0.23.25：详情页「更多导入方式」已补 id=dMoreImport；这里维持「只接管带 id 的块」，
+    // 避免无 id 块用 summary 文本当 key 时同名冲突或误挂监听。
+    document.querySelectorAll('details.fold[id]').forEach(function (d) {
+      if (typeof st[d.id] === 'boolean') d.open = st[d.id];
+      d.addEventListener('toggle', function () {
+        var s2 = foldState(); s2[d.id] = !!d.open;
+        try { sSet(FOLD_KEY, JSON.stringify(s2)); } catch (e) { /* 沙箱里写不了就算了 */ }
+      });
+    });
+  }
+  function setCardHint(id, txt) { var el = $(id); if (el) el.textContent = txt; }
+
   // ---------- 订阅分组 ----------
   var grpBy = 'cat';
   var grpSel = {};
@@ -4986,8 +5040,13 @@
   async function loadGroups() {
     var box = $('grpBody');
     if (!box) return;
-    grpSel = {};
+    // v0.23.25：不再整体清空 grpSel —— 原来切「按状态/按主播」或切 tab 回来勾选全没，
+    // 与「我的订阅」卡记忆勾选的行为相反，用户以为白勾了。只剔除已不存在的专辑 id。
+    var liveIds = {};
+    (subsCache || []).forEach(function (s) { liveIds[String(s.albumId)] = true; });
+    Object.keys(grpSel).forEach(function (k) { if (!liveIds[k]) delete grpSel[k]; });
     box.innerHTML = '<div class="muted small-txt">读取中…</div>';
+    updateGrpSelBar();
     try {
       var r = await api('GET', '/subs/groups?by=' + encodeURIComponent(grpBy));
       if (!r || r.success === false) { box.innerHTML = '<span class="err">' + escHtml((r && r.error) || '读取失败') + '</span>'; return; }
@@ -4995,6 +5054,14 @@
     } catch (e) {
       box.innerHTML = '<span class="err">失败：' + escHtml(e.message) + '</span>';
     }
+  }
+
+  // v0.23.22：/subs/groups 已回传 cover，缓存再兜一层（老数据可能没封面字段）
+  function subCoverOf(id) {
+    for (var i = 0; i < subsCache.length; i++) {
+      if (String(subsCache[i].albumId) === String(id)) return subsCache[i].cover || '';
+    }
+    return '';
   }
 
   function renderGroups(d, box) {
@@ -5012,6 +5079,7 @@
           c.checked = ckAll.checked;
           grpSel[c.getAttribute('data-id')] = ckAll.checked;
         });
+        updateGrpSelBar();
       });
       var label = document.createElement('span');
       label.textContent = g.label;
@@ -5029,13 +5097,35 @@
         ck.className = 'ck';
         ck.setAttribute('data-id', x.albumId);
         ck.setAttribute('data-g', g.key);
-        ck.addEventListener('change', function () { grpSel[x.albumId] = ck.checked; });
+        ck.checked = !!grpSel[String(x.albumId)];   // v0.23.25：重建后回填勾选态
+        ck.addEventListener('change', function () { grpSel[x.albumId] = ck.checked; updateGrpSelBar(); });
         var name = document.createElement('span');
         name.className = 'grpname';
         name.textContent = x.name || ('专辑 ' + x.albumId);
         name.title = x.name || '';
         name.addEventListener('click', function () { document.querySelector('.tab[data-tab="search"]').click(); openDetail(x.albumId); });
-        row.appendChild(ck); row.appendChild(name);
+        // v0.23.22：每条配一张专辑封面；https 化 + 懒加载 + 失败回落占位，点封面同样进详情
+        var cvUrl = x.cover || subCoverOf(x.albumId);
+        var cvBox = document.createElement('div');
+        cvBox.className = 'grpcover';
+        cvBox.textContent = '🎧';
+        cvBox.title = (x.name || '专辑') + ' · 点开详情';
+        if (cvUrl) {
+          var cvImg = document.createElement('img');
+          cvImg.referrerPolicy = 'no-referrer';
+          cvImg.loading = 'lazy';
+          cvImg.alt = '';
+          cvImg.src = String(cvUrl).replace(/^http:\/\//i, 'https://');
+          cvImg.onerror = function () { cvImg.remove(); cvBox.textContent = '🎧'; };
+          cvBox.textContent = '';
+          cvBox.appendChild(cvImg);
+        }
+        cvBox.addEventListener('click', function () {
+          var tb = document.querySelector('.tab[data-tab="search"]');
+          if (tb && tb.click) tb.click();
+          openDetail(x.albumId);
+        });
+        row.appendChild(ck); row.appendChild(cvBox); row.appendChild(name);
         if (x.newCount) {
           var nb = document.createElement('span');
           nb.className = 'dbadge';
@@ -5050,6 +5140,22 @@
         }
         box.appendChild(row);
       });
+    });
+    updateGrpSelBar(groups.reduce(function (a, g) { return a + (g.count || 0); }, 0));
+  }
+
+  // v0.23.25：订阅视角批量条实时反馈，和「我的订阅」卡一致（原按钮常驻、无计数、无禁用）。
+  var grpSelTotal = 0;
+  function updateGrpSelBar(total) {
+    if (typeof total === 'number') grpSelTotal = total;   // 缓存分母，勾选回调无参时也带上
+    var cnt = $('grpSelCount');
+    if (cnt) {
+      var n = Object.keys(grpSel).filter(function (k) { return grpSel[k]; }).length;
+      cnt.textContent = '已选 ' + n + (grpSelTotal ? ' / 共 ' + grpSelTotal + ' 本' : ' 本');
+    }
+    ['btnGrpGroup', 'btnGrpUnsub'].forEach(function (id) {
+      var el = $(id);
+      if (el) el.disabled = !Object.keys(grpSel).some(function (k) { return grpSel[k]; });
     });
   }
 
@@ -5090,6 +5196,7 @@
   }
 
   function boot() {
+    initFolds();   // v0.23.22：先恢复上次各折叠块的开合
     loadLogin();
     loadAuto();
     loadProgCfg();
