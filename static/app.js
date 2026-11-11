@@ -5118,6 +5118,7 @@
     bindSubsMultiUI();
     loadSubGroups();
     loadSubs();
+    loadGroups();  // v0.23.20：订阅视角提到订阅页首屏，启动时就把数据备好
     loadImported();
     renderIdleChips();
     // v0.20.0：恢复上次看的收听分段，并把「继续听」当作发现页首屏
